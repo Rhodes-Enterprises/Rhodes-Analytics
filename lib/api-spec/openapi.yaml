@@ -12,7 +12,82 @@ tags:
     description: Health operations
   - name: snowflake
     description: Snowflake connectivity
+  - name: dashboards
+    description: BI dashboards
 paths:
+  /dashboards/overview-with-targets/filters:
+    get:
+      operationId: getOwtFilters
+      tags: [dashboards]
+      summary: Filter options for the Overview with Targets dashboard
+      responses:
+        "200":
+          description: Filter options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwtFilterOptions"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/overview-with-targets:
+    get:
+      operationId: getOwtDashboard
+      tags: [dashboards]
+      summary: Overview with Targets dashboard data
+      parameters:
+        - $ref: "#/components/parameters/OwtTarget"
+        - $ref: "#/components/parameters/OwtCompany"
+        - $ref: "#/components/parameters/OwtDevelopment"
+        - $ref: "#/components/parameters/OwtCohortQuarter"
+        - $ref: "#/components/parameters/OwtLeadSource"
+        - $ref: "#/components/parameters/OwtContactChannel"
+        - $ref: "#/components/parameters/OwtDealChannel"
+        - $ref: "#/components/parameters/OwtStartDate"
+        - $ref: "#/components/parameters/OwtEndDate"
+      responses:
+        "200":
+          description: Dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwtDashboard"
+        "400":
+          description: Invalid date or range (malformed date, reversed range, or range crossing a calendar year)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/overview-with-targets/yoy:
+    get:
+      operationId: getOwtYoy
+      tags: [dashboards]
+      summary: Year-over-year monthly series for the Overview with Targets dashboard
+      parameters:
+        - $ref: "#/components/parameters/OwtCompany"
+        - $ref: "#/components/parameters/OwtDevelopment"
+      responses:
+        "200":
+          description: YOY series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwtYoy"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
   /snowflake/status:
     get:
       operationId: getSnowflakeStatus
@@ -40,7 +115,296 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
 components:
+  parameters:
+    OwtTarget:
+      name: target
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [proforma, business_plan, goal, waterfall]
+        default: goal
+    OwtCompany:
+      name: company
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtDevelopment:
+      name: development
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtCohortQuarter:
+      name: cohortQuarter
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtLeadSource:
+      name: leadSource
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtContactChannel:
+      name: contactChannel
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtDealChannel:
+      name: dealChannel
+      in: query
+      required: false
+      schema:
+        type: string
+    OwtStartDate:
+      name: startDate
+      in: query
+      required: false
+      schema:
+        type: string
+        description: YYYY-MM-DD; defaults to start of the current quarter
+    OwtEndDate:
+      name: endDate
+      in: query
+      required: false
+      schema:
+        type: string
+        description: YYYY-MM-DD; defaults to end of the current quarter
   schemas:
+    ErrorMessage:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    OwtFilterOptions:
+      type: object
+      properties:
+        companies:
+          type: array
+          items:
+            type: string
+        developments:
+          type: array
+          items:
+            type: object
+            properties:
+              company:
+                type: string
+              development:
+                type: string
+            required: [company, development]
+        cohortQuarters:
+          type: array
+          items:
+            type: string
+        leadSources:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+      required: [companies, developments, cohortQuarters, leadSources, channels]
+    OwtGoalCell:
+      type: object
+      properties:
+        fullSpanGoal:
+          type: number
+        toDateGoal:
+          type: number
+        actual:
+          type: number
+        ptgPercent:
+          type: ["number", "null"]
+      required: [fullSpanGoal, toDateGoal, actual, ptgPercent]
+    OwtDashboard:
+      type: object
+      properties:
+        appliedRange:
+          type: object
+          properties:
+            startDate:
+              type: string
+            endDate:
+              type: string
+            toDate:
+              type: string
+            target:
+              type: string
+          required: [startDate, endDate, toDate, target]
+        kpis:
+          type: object
+          properties:
+            salesGoal:
+              type: number
+            salesTdGoal:
+              type: number
+            grossSales:
+              type: number
+            ptgVariance:
+              type: number
+            ptgPercent:
+              type: ["number", "null"]
+          required: [salesGoal, salesTdGoal, grossSales, ptgVariance, ptgPercent]
+        trafficMatrix:
+          type: object
+          properties:
+            online:
+              type: object
+              properties:
+                websiteUsers:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                leads:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                tours:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                sales:
+                  $ref: "#/components/schemas/OwtGoalCell"
+              required: [websiteUsers, leads, tours, sales]
+            onsite:
+              type: object
+              properties:
+                leads:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                tours:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                sales:
+                  $ref: "#/components/schemas/OwtGoalCell"
+              required: [leads, tours, sales]
+            total:
+              type: object
+              properties:
+                leads:
+                  $ref: "#/components/schemas/OwtGoalCell"
+                tours:
+                  $ref: "#/components/schemas/OwtGoalCell"
+              required: [leads, tours]
+            newWebsiteUsers:
+              type: number
+          required: [online, onsite, total, newWebsiteUsers]
+        divisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/OwtDivisionRow"
+        ratios:
+          type: array
+          items:
+            $ref: "#/components/schemas/OwtRatioRow"
+      required: [appliedRange, kpis, trafficMatrix, divisions, ratios]
+    OwtDivisionRow:
+      type: object
+      properties:
+        division:
+          type: string
+        newWebsiteUsers:
+          type: number
+        totalWebsiteUsers:
+          type: number
+        leads:
+          type: number
+        leadsPctOfTotal:
+          type: number
+        tours:
+          type: number
+        toursPctOfTotal:
+          type: number
+        sales:
+          type: number
+        salesPctOfTotal:
+          type: number
+        salesPtg:
+          type: ["number", "null"]
+        toursPtg:
+          type: ["number", "null"]
+        leadsPtg:
+          type: ["number", "null"]
+        onlineTrafficPtg:
+          type: ["number", "null"]
+        onlineLeadsPtg:
+          type: ["number", "null"]
+        onlineToursPtg:
+          type: ["number", "null"]
+        onlineSalesPtg:
+          type: ["number", "null"]
+        onsiteLeadsPtg:
+          type: ["number", "null"]
+        onsiteToursPtg:
+          type: ["number", "null"]
+        onsiteSalesPtg:
+          type: ["number", "null"]
+      required:
+        [
+          division,
+          newWebsiteUsers,
+          totalWebsiteUsers,
+          leads,
+          leadsPctOfTotal,
+          tours,
+          toursPctOfTotal,
+          sales,
+          salesPctOfTotal,
+          salesPtg,
+          toursPtg,
+          leadsPtg,
+          onlineTrafficPtg,
+          onlineLeadsPtg,
+          onlineToursPtg,
+          onlineSalesPtg,
+          onsiteLeadsPtg,
+          onsiteToursPtg,
+          onsiteSalesPtg,
+        ]
+    OwtRatioRow:
+      type: object
+      properties:
+        name:
+          type: string
+        group:
+          type: string
+          enum: [total, online, onsite]
+        goal:
+          type: ["number", "null"]
+        actual:
+          type: number
+        ptgPercent:
+          type: ["number", "null"]
+      required: [name, group, goal, actual, ptgPercent]
+    OwtYoy:
+      type: object
+      properties:
+        year:
+          type: number
+        priorYear:
+          type: number
+        measures:
+          type: array
+          items:
+            type: object
+            properties:
+              measure:
+                type: string
+              points:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    month:
+                      type: number
+                    currentYear:
+                      type: number
+                    priorYear:
+                      type: number
+                    goal:
+                      type: number
+                  required: [month, currentYear, priorYear, goal]
+            required: [measure, points]
+      required: [year, priorYear, measures]
     SnowflakeStatus:
       type: object
       properties:

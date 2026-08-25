@@ -36,6 +36,10 @@ function getConfig(): SnowflakeConfig {
   if (!account) missing.push("SNOWFLAKE_ACCOUNT");
   if (!username) missing.push("SNOWFLAKE_USER");
   if (!privateKey) missing.push("SNOWFLAKE_PRIVATE_KEY");
+  // Dashboard queries use unqualified table names and rely on the session
+  // namespace, so an active database/schema is required — fail loudly.
+  if (!process.env.SNOWFLAKE_DATABASE) missing.push("SNOWFLAKE_DATABASE");
+  if (!process.env.SNOWFLAKE_SCHEMA) missing.push("SNOWFLAKE_SCHEMA");
   if (missing.length > 0) throw new SnowflakeConfigError(missing);
 
   return {

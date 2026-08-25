@@ -4,12 +4,21 @@ import { Button } from "@/components/ui/button";
 import { Layout } from "@/components/layout";
 import { getDashboard } from "@/lib/workspaces";
 import NotFound from "@/pages/not-found";
+import OverviewWithTargetsPage from "@/pages/overview-with-targets";
+
+/** Dashboards that have been migrated get a dedicated component. */
+const MIGRATED: Record<string, React.ComponentType> = {
+  "marketing/overview-with-targets": OverviewWithTargetsPage,
+};
 
 export default function DashboardPage() {
   const { workspaceSlug, dashboardSlug } = useParams();
   const entry = getDashboard(workspaceSlug ?? "", dashboardSlug ?? "");
 
   if (!entry) return <NotFound />;
+
+  const Migrated = MIGRATED[`${workspaceSlug}/${dashboardSlug}`];
+  if (Migrated) return <Migrated />;
 
   const { workspace, dashboard } = entry;
 

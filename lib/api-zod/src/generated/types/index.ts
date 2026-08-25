@@ -6,5 +6,33 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './errorMessage';
+export * from './getOwtDashboardParams';
+export * from './getOwtYoyParams';
 export * from './healthStatus';
+export * from './owtCohortQuarterParameter';
+export * from './owtCompanyParameter';
+export * from './owtContactChannelParameter';
+export * from './owtDashboard';
+export * from './owtDashboardAppliedRange';
+export * from './owtDashboardKpis';
+export * from './owtDashboardTrafficMatrix';
+export * from './owtDashboardTrafficMatrixOnline';
+export * from './owtDashboardTrafficMatrixOnsite';
+export * from './owtDashboardTrafficMatrixTotal';
+export * from './owtDealChannelParameter';
+export * from './owtDevelopmentParameter';
+export * from './owtDivisionRow';
+export * from './owtEndDateParameter';
+export * from './owtFilterOptions';
+export * from './owtFilterOptionsDevelopmentsItem';
+export * from './owtGoalCell';
+export * from './owtLeadSourceParameter';
+export * from './owtRatioRow';
+export * from './owtRatioRowGroup';
+export * from './owtStartDateParameter';
+export * from './owtTargetParameter';
+export * from './owtYoy';
+export * from './owtYoyMeasuresItem';
+export * from './owtYoyMeasuresItemPointsItem';
 export * from './snowflakeStatus';

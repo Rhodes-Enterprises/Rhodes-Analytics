@@ -9,6 +9,169 @@ import * as zod from 'zod';
 
 
 /**
+ * @summary Filter options for the Overview with Targets dashboard
+ */
+export const GetOwtFiltersResponse = zod.object({
+  "companies": zod.array(zod.string()),
+  "developments": zod.array(zod.object({
+  "company": zod.string(),
+  "development": zod.string()
+})),
+  "cohortQuarters": zod.array(zod.string()),
+  "leadSources": zod.array(zod.string()),
+  "channels": zod.array(zod.string())
+})
+
+
+/**
+ * @summary Overview with Targets dashboard data
+ */
+export const getOwtDashboardQueryTargetDefault = `goal`;
+
+export const GetOwtDashboardQueryParams = zod.object({
+  "target": zod.enum(['proforma', 'business_plan', 'goal', 'waterfall']).default(getOwtDashboardQueryTargetDefault),
+  "company": zod.coerce.string().optional(),
+  "development": zod.coerce.string().optional(),
+  "cohortQuarter": zod.coerce.string().optional(),
+  "leadSource": zod.coerce.string().optional(),
+  "contactChannel": zod.coerce.string().optional(),
+  "dealChannel": zod.coerce.string().optional(),
+  "startDate": zod.coerce.string().optional(),
+  "endDate": zod.coerce.string().optional()
+})
+
+export const GetOwtDashboardResponse = zod.object({
+  "appliedRange": zod.object({
+  "startDate": zod.string(),
+  "endDate": zod.string(),
+  "toDate": zod.string(),
+  "target": zod.string()
+}),
+  "kpis": zod.object({
+  "salesGoal": zod.number(),
+  "salesTdGoal": zod.number(),
+  "grossSales": zod.number(),
+  "ptgVariance": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "trafficMatrix": zod.object({
+  "online": zod.object({
+  "websiteUsers": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "leads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "tours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "sales": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
+}),
+  "onsite": zod.object({
+  "leads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "tours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "sales": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
+}),
+  "total": zod.object({
+  "leads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "tours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
+}),
+  "newWebsiteUsers": zod.number()
+}),
+  "divisions": zod.array(zod.object({
+  "division": zod.string(),
+  "newWebsiteUsers": zod.number(),
+  "totalWebsiteUsers": zod.number(),
+  "leads": zod.number(),
+  "leadsPctOfTotal": zod.number(),
+  "tours": zod.number(),
+  "toursPctOfTotal": zod.number(),
+  "sales": zod.number(),
+  "salesPctOfTotal": zod.number(),
+  "salesPtg": zod.number().nullable(),
+  "toursPtg": zod.number().nullable(),
+  "leadsPtg": zod.number().nullable(),
+  "onlineTrafficPtg": zod.number().nullable(),
+  "onlineLeadsPtg": zod.number().nullable(),
+  "onlineToursPtg": zod.number().nullable(),
+  "onlineSalesPtg": zod.number().nullable(),
+  "onsiteLeadsPtg": zod.number().nullable(),
+  "onsiteToursPtg": zod.number().nullable(),
+  "onsiteSalesPtg": zod.number().nullable()
+})),
+  "ratios": zod.array(zod.object({
+  "name": zod.string(),
+  "group": zod.enum(['total', 'online', 'onsite']),
+  "goal": zod.number().nullable(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}))
+})
+
+
+/**
+ * @summary Year-over-year monthly series for the Overview with Targets dashboard
+ */
+export const GetOwtYoyQueryParams = zod.object({
+  "company": zod.coerce.string().optional(),
+  "development": zod.coerce.string().optional()
+})
+
+export const GetOwtYoyResponse = zod.object({
+  "year": zod.number(),
+  "priorYear": zod.number(),
+  "measures": zod.array(zod.object({
+  "measure": zod.string(),
+  "points": zod.array(zod.object({
+  "month": zod.number(),
+  "currentYear": zod.number(),
+  "priorYear": zod.number(),
+  "goal": zod.number()
+}))
+}))
+})
+
+
+/**
  * Runs a probe query and reports the active session context
  * @summary Verify Snowflake connectivity
  */

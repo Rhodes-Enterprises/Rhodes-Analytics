@@ -16,7 +16,13 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ErrorMessage,
+  GetOwtDashboardParams,
+  GetOwtYoyParams,
   HealthStatus,
+  OwtDashboard,
+  OwtFilterOptions,
+  OwtYoy,
   SnowflakeStatus
 } from './api.schemas';
 
@@ -46,6 +52,251 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export const getGetOwtFiltersUrl = () => {
+
+
+
+
+  return `/api/dashboards/overview-with-targets/filters`
+}
+
+/**
+ * @summary Filter options for the Overview with Targets dashboard
+ */
+export const getOwtFilters = async ( options?: Parameters<typeof customFetch>[1]): Promise<OwtFilterOptions> => {
+
+  return customFetch<OwtFilterOptions>(getGetOwtFiltersUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetOwtFiltersQueryKey = () => {
+    return [
+    `/api/dashboards/overview-with-targets/filters`
+    ] as const;
+    }
+
+
+export const getGetOwtFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getOwtFilters>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOwtFiltersQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOwtFilters>>> = ({ signal }) => getOwtFilters({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetOwtFiltersQueryResult = NonNullable<Awaited<ReturnType<typeof getOwtFilters>>>
+export type GetOwtFiltersQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Filter options for the Overview with Targets dashboard
+ */
+
+export function useGetOwtFilters<TData = Awaited<ReturnType<typeof getOwtFilters>>, TError = ErrorType<ErrorMessage>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetOwtFiltersQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetOwtDashboardUrl = (params?: GetOwtDashboardParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/overview-with-targets?${stringifiedParams}` : `/api/dashboards/overview-with-targets`
+}
+
+/**
+ * @summary Overview with Targets dashboard data
+ */
+export const getOwtDashboard = async (params?: GetOwtDashboardParams, options?: Parameters<typeof customFetch>[1]): Promise<OwtDashboard> => {
+
+  return customFetch<OwtDashboard>(getGetOwtDashboardUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetOwtDashboardQueryKey = (params?: GetOwtDashboardParams,) => {
+    return [
+    `/api/dashboards/overview-with-targets`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetOwtDashboardQueryOptions = <TData = Awaited<ReturnType<typeof getOwtDashboard>>, TError = ErrorType<ErrorMessage>>(params?: GetOwtDashboardParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtDashboard>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOwtDashboardQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOwtDashboard>>> = ({ signal }) => getOwtDashboard(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOwtDashboard>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetOwtDashboardQueryResult = NonNullable<Awaited<ReturnType<typeof getOwtDashboard>>>
+export type GetOwtDashboardQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Overview with Targets dashboard data
+ */
+
+export function useGetOwtDashboard<TData = Awaited<ReturnType<typeof getOwtDashboard>>, TError = ErrorType<ErrorMessage>>(
+ params?: GetOwtDashboardParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtDashboard>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetOwtDashboardQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetOwtYoyUrl = (params?: GetOwtYoyParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/overview-with-targets/yoy?${stringifiedParams}` : `/api/dashboards/overview-with-targets/yoy`
+}
+
+/**
+ * @summary Year-over-year monthly series for the Overview with Targets dashboard
+ */
+export const getOwtYoy = async (params?: GetOwtYoyParams, options?: Parameters<typeof customFetch>[1]): Promise<OwtYoy> => {
+
+  return customFetch<OwtYoy>(getGetOwtYoyUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetOwtYoyQueryKey = (params?: GetOwtYoyParams,) => {
+    return [
+    `/api/dashboards/overview-with-targets/yoy`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetOwtYoyQueryOptions = <TData = Awaited<ReturnType<typeof getOwtYoy>>, TError = ErrorType<ErrorMessage>>(params?: GetOwtYoyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtYoy>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetOwtYoyQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOwtYoy>>> = ({ signal }) => getOwtYoy(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getOwtYoy>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetOwtYoyQueryResult = NonNullable<Awaited<ReturnType<typeof getOwtYoy>>>
+export type GetOwtYoyQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Year-over-year monthly series for the Overview with Targets dashboard
+ */
+
+export function useGetOwtYoy<TData = Awaited<ReturnType<typeof getOwtYoy>>, TError = ErrorType<ErrorMessage>>(
+ params?: GetOwtYoyParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtYoy>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetOwtYoyQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getGetSnowflakeStatusUrl = () => {
 

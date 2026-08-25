@@ -5,6 +5,149 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+export interface ErrorMessage {
+  error: string;
+}
+
+export type OwtFilterOptionsDevelopmentsItem = {
+  company: string;
+  development: string;
+};
+
+export interface OwtFilterOptions {
+  companies: string[];
+  developments: OwtFilterOptionsDevelopmentsItem[];
+  cohortQuarters: string[];
+  leadSources: string[];
+  channels: string[];
+}
+
+export interface OwtGoalCell {
+  fullSpanGoal: number;
+  toDateGoal: number;
+  actual: number;
+  /** @nullable */
+  ptgPercent: number | null;
+}
+
+export type OwtDashboardAppliedRange = {
+  startDate: string;
+  endDate: string;
+  toDate: string;
+  target: string;
+};
+
+export type OwtDashboardKpis = {
+  salesGoal: number;
+  salesTdGoal: number;
+  grossSales: number;
+  ptgVariance: number;
+  /** @nullable */
+  ptgPercent: number | null;
+};
+
+export type OwtDashboardTrafficMatrixOnline = {
+  websiteUsers: OwtGoalCell;
+  leads: OwtGoalCell;
+  tours: OwtGoalCell;
+  sales: OwtGoalCell;
+};
+
+export type OwtDashboardTrafficMatrixOnsite = {
+  leads: OwtGoalCell;
+  tours: OwtGoalCell;
+  sales: OwtGoalCell;
+};
+
+export type OwtDashboardTrafficMatrixTotal = {
+  leads: OwtGoalCell;
+  tours: OwtGoalCell;
+};
+
+export type OwtDashboardTrafficMatrix = {
+  online: OwtDashboardTrafficMatrixOnline;
+  onsite: OwtDashboardTrafficMatrixOnsite;
+  total: OwtDashboardTrafficMatrixTotal;
+  newWebsiteUsers: number;
+};
+
+export interface OwtDivisionRow {
+  division: string;
+  newWebsiteUsers: number;
+  totalWebsiteUsers: number;
+  leads: number;
+  leadsPctOfTotal: number;
+  tours: number;
+  toursPctOfTotal: number;
+  sales: number;
+  salesPctOfTotal: number;
+  /** @nullable */
+  salesPtg: number | null;
+  /** @nullable */
+  toursPtg: number | null;
+  /** @nullable */
+  leadsPtg: number | null;
+  /** @nullable */
+  onlineTrafficPtg: number | null;
+  /** @nullable */
+  onlineLeadsPtg: number | null;
+  /** @nullable */
+  onlineToursPtg: number | null;
+  /** @nullable */
+  onlineSalesPtg: number | null;
+  /** @nullable */
+  onsiteLeadsPtg: number | null;
+  /** @nullable */
+  onsiteToursPtg: number | null;
+  /** @nullable */
+  onsiteSalesPtg: number | null;
+}
+
+export type OwtRatioRowGroup = typeof OwtRatioRowGroup[keyof typeof OwtRatioRowGroup];
+
+
+export const OwtRatioRowGroup = {
+  total: 'total',
+  online: 'online',
+  onsite: 'onsite',
+} as const;
+
+export interface OwtRatioRow {
+  name: string;
+  group: OwtRatioRowGroup;
+  /** @nullable */
+  goal: number | null;
+  actual: number;
+  /** @nullable */
+  ptgPercent: number | null;
+}
+
+export interface OwtDashboard {
+  appliedRange: OwtDashboardAppliedRange;
+  kpis: OwtDashboardKpis;
+  trafficMatrix: OwtDashboardTrafficMatrix;
+  divisions: OwtDivisionRow[];
+  ratios: OwtRatioRow[];
+}
+
+export type OwtYoyMeasuresItemPointsItem = {
+  month: number;
+  currentYear: number;
+  priorYear: number;
+  goal: number;
+};
+
+export type OwtYoyMeasuresItem = {
+  measure: string;
+  points: OwtYoyMeasuresItemPointsItem[];
+};
+
+export interface OwtYoy {
+  year: number;
+  priorYear: number;
+  measures: OwtYoyMeasuresItem[];
+}
+
 export interface SnowflakeStatus {
   connected: boolean;
   version?: string;
@@ -19,4 +162,53 @@ export interface SnowflakeStatus {
 export interface HealthStatus {
   status: string;
 }
+
+export type OwtTargetParameter = typeof OwtTargetParameter[keyof typeof OwtTargetParameter];
+
+
+export const OwtTargetParameter = {
+  proforma: 'proforma',
+  business_plan: 'business_plan',
+  goal: 'goal',
+  waterfall: 'waterfall',
+} as const;
+
+export type OwtCompanyParameter = string;
+
+export type OwtDevelopmentParameter = string;
+
+export type OwtCohortQuarterParameter = string;
+
+export type OwtLeadSourceParameter = string;
+
+export type OwtContactChannelParameter = string;
+
+export type OwtDealChannelParameter = string;
+
+export type OwtStartDateParameter = string;
+
+export type OwtEndDateParameter = string;
+
+export type GetOwtDashboardParams = {
+target?: OwtTargetParameter;
+company?: OwtCompanyParameter;
+development?: OwtDevelopmentParameter;
+cohortQuarter?: OwtCohortQuarterParameter;
+leadSource?: OwtLeadSourceParameter;
+contactChannel?: OwtContactChannelParameter;
+dealChannel?: OwtDealChannelParameter;
+/**
+ * YYYY-MM-DD; defaults to start of the current quarter
+ */
+startDate?: OwtStartDateParameter;
+/**
+ * YYYY-MM-DD; defaults to end of the current quarter
+ */
+endDate?: OwtEndDateParameter;
+};
+
+export type GetOwtYoyParams = {
+company?: OwtCompanyParameter;
+development?: OwtDevelopmentParameter;
+};
 

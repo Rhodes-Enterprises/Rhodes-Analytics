@@ -48,7 +48,7 @@ export const WORKSPACES: Workspace[] = [
         name: "Overview with Targets",
         description:
           "Sales and traffic performance against Proforma, Business Plan, Goal, and Waterfall targets with PTG tracking.",
-        status: "coming-soon",
+        status: "available",
         icon: Target,
       },
       {
