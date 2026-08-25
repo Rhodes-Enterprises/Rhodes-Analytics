@@ -5,7 +5,8 @@ import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import Home from '@/pages/home';
-import SiteDashboard from '@/pages/site';
+import WorkspacePage from '@/pages/workspace';
+import DashboardPage from '@/pages/dashboard';
 import {
   Route,
   Switch,
@@ -20,7 +21,11 @@ function Router() {
     <RoutedErrorBoundary>
       <Switch>
         <Route path="/" component={Home} />
-        <Route path="/sites/:id" component={SiteDashboard} />
+        <Route path="/workspaces/:workspaceSlug" component={WorkspacePage} />
+        <Route
+          path="/workspaces/:workspaceSlug/:dashboardSlug"
+          component={DashboardPage}
+        />
         <Route component={NotFound} />
       </Switch>
     </RoutedErrorBoundary>
