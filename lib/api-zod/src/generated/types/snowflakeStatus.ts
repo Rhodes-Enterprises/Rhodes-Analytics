@@ -5,6 +5,7 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+
 export interface SnowflakeStatus {
   connected: boolean;
   version?: string;
@@ -15,8 +16,3 @@ export interface SnowflakeStatus {
   schema?: string;
   error?: string;
 }
-
-export interface HealthStatus {
-  status: string;
-}
-

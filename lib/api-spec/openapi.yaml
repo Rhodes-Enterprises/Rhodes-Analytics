@@ -10,7 +10,22 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: snowflake
+    description: Snowflake connectivity
 paths:
+  /snowflake/status:
+    get:
+      operationId: getSnowflakeStatus
+      tags: [snowflake]
+      summary: Verify Snowflake connectivity
+      description: Runs a probe query and reports the active session context
+      responses:
+        "200":
+          description: Snowflake connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnowflakeStatus"
   /healthz:
     get:
       operationId: healthCheck
@@ -26,6 +41,27 @@ paths:
                 $ref: "#/components/schemas/HealthStatus"
 components:
   schemas:
+    SnowflakeStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        version:
+          type: string
+        user:
+          type: string
+        role:
+          type: string
+        warehouse:
+          type: string
+        database:
+          type: string
+        schema:
+          type: string
+        error:
+          type: string
+      required:
+        - connected
     HealthStatus:
       type: object
       properties:

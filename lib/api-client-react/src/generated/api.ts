@@ -16,7 +16,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
-  HealthStatus
+  HealthStatus,
+  SnowflakeStatus
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -45,6 +46,84 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export const getGetSnowflakeStatusUrl = () => {
+
+
+
+
+  return `/api/snowflake/status`
+}
+
+/**
+ * Runs a probe query and reports the active session context
+ * @summary Verify Snowflake connectivity
+ */
+export const getSnowflakeStatus = async ( options?: Parameters<typeof customFetch>[1]): Promise<SnowflakeStatus> => {
+
+  return customFetch<SnowflakeStatus>(getGetSnowflakeStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetSnowflakeStatusQueryKey = () => {
+    return [
+    `/api/snowflake/status`
+    ] as const;
+    }
+
+
+export const getGetSnowflakeStatusQueryOptions = <TData = Awaited<ReturnType<typeof getSnowflakeStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSnowflakeStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetSnowflakeStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getSnowflakeStatus>>> = ({ signal }) => getSnowflakeStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSnowflakeStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetSnowflakeStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getSnowflakeStatus>>>
+export type GetSnowflakeStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Verify Snowflake connectivity
+ */
+
+export function useGetSnowflakeStatus<TData = Awaited<ReturnType<typeof getSnowflakeStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getSnowflakeStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetSnowflakeStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getHealthCheckUrl = () => {
 

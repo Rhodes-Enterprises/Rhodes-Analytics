@@ -21,3 +21,9 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+SNOWFLAKE_DATABASE = "PC_DBT_DB"
+SNOWFLAKE_SCHEMA = "dbt_ecoronado"

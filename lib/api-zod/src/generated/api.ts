@@ -9,6 +9,22 @@ import * as zod from 'zod';
 
 
 /**
+ * Runs a probe query and reports the active session context
+ * @summary Verify Snowflake connectivity
+ */
+export const GetSnowflakeStatusResponse = zod.object({
+  "connected": zod.boolean(),
+  "version": zod.string().optional(),
+  "user": zod.string().optional(),
+  "role": zod.string().optional(),
+  "warehouse": zod.string().optional(),
+  "database": zod.string().optional(),
+  "schema": zod.string().optional(),
+  "error": zod.string().optional()
+})
+
+
+/**
  * Returns server health status
  * @summary Health check
  */
