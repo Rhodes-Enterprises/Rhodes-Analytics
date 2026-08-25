@@ -8,6 +8,7 @@
 import type { OwtDashboardAppliedRange } from './owtDashboardAppliedRange';
 import type { OwtDashboardKpis } from './owtDashboardKpis';
 import type { OwtDashboardTrafficMatrix } from './owtDashboardTrafficMatrix';
+import type { OwtDevelopmentRow } from './owtDevelopmentRow';
 import type { OwtDivisionRow } from './owtDivisionRow';
 import type { OwtRatioRow } from './owtRatioRow';
 
@@ -16,5 +17,6 @@ export interface OwtDashboard {
   kpis: OwtDashboardKpis;
   trafficMatrix: OwtDashboardTrafficMatrix;
   divisions: OwtDivisionRow[];
+  developments: OwtDevelopmentRow[];
   ratios: OwtRatioRow[];
 }

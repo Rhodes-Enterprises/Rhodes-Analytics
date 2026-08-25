@@ -22,6 +22,7 @@ export * from './owtDashboardTrafficMatrixOnsite';
 export * from './owtDashboardTrafficMatrixTotal';
 export * from './owtDealChannelParameter';
 export * from './owtDevelopmentParameter';
+export * from './owtDevelopmentRow';
 export * from './owtDivisionRow';
 export * from './owtEndDateParameter';
 export * from './owtFilterOptions';

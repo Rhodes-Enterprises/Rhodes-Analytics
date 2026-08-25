@@ -111,6 +111,7 @@ router.get("/dashboards/overview-with-targets", async (req, res) => {
       kpis: data.kpis,
       trafficMatrix: data.trafficMatrix,
       divisions: data.divisions,
+      developments: data.developments,
       ratios: data.ratios,
     });
   } catch (err) {

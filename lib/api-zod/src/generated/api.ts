@@ -138,6 +138,29 @@ export const GetOwtDashboardResponse = zod.object({
   "onsiteToursPtg": zod.number().nullable(),
   "onsiteSalesPtg": zod.number().nullable()
 })),
+  "developments": zod.array(zod.object({
+  "division": zod.string(),
+  "newWebsiteUsers": zod.number(),
+  "totalWebsiteUsers": zod.number(),
+  "leads": zod.number(),
+  "leadsPctOfTotal": zod.number(),
+  "tours": zod.number(),
+  "toursPctOfTotal": zod.number(),
+  "sales": zod.number(),
+  "salesPctOfTotal": zod.number(),
+  "salesPtg": zod.number().nullable(),
+  "toursPtg": zod.number().nullable(),
+  "leadsPtg": zod.number().nullable(),
+  "onlineTrafficPtg": zod.number().nullable(),
+  "onlineLeadsPtg": zod.number().nullable(),
+  "onlineToursPtg": zod.number().nullable(),
+  "onlineSalesPtg": zod.number().nullable(),
+  "onsiteLeadsPtg": zod.number().nullable(),
+  "onsiteToursPtg": zod.number().nullable(),
+  "onsiteSalesPtg": zod.number().nullable()
+}).and(zod.object({
+  "development": zod.string()
+}))),
   "ratios": zod.array(zod.object({
   "name": zod.string(),
   "group": zod.enum(['total', 'online', 'onsite']),

@@ -293,6 +293,7 @@ export default function OverviewWithTargetsPage() {
             <KpiRow data={dash.data} />
             <TrafficMatrix data={dash.data} />
             <DivisionTable data={dash.data} />
+            <DevelopmentTable data={dash.data} />
             <RatioSection ratios={dash.data.ratios} />
           </>
         )}
@@ -467,18 +468,66 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
 }
 
 function DivisionTable({ data }: { data: OwtDashboard }) {
-  const rows = data.divisions;
+  return (
+    <SummaryTable
+      title="Division Summary"
+      labelHeader="Division"
+      testId="table-divisions"
+      rows={data.divisions.map((r) => ({ ...r, label: r.division, key: r.division }))}
+      userTotals={{
+        newUsers: data.trafficMatrix.newWebsiteUsers,
+        totalUsers: data.trafficMatrix.online.websiteUsers.actual,
+      }}
+    />
+  );
+}
+
+function DevelopmentTable({ data }: { data: OwtDashboard }) {
+  return (
+    <SummaryTable
+      title="Development Summary"
+      labelHeader="Development"
+      testId="table-developments"
+      rows={data.developments.map((r) => ({
+        ...r,
+        label: r.development,
+        key: `${r.division}|${r.development}`,
+      }))}
+      userTotals={{
+        newUsers: data.trafficMatrix.newWebsiteUsers,
+        totalUsers: data.trafficMatrix.online.websiteUsers.actual,
+      }}
+    />
+  );
+}
+
+type SummaryRow = OwtDashboard["divisions"][number] & { label: string; key: string };
+
+function SummaryTable({
+  title,
+  labelHeader,
+  testId,
+  rows,
+  userTotals,
+}: {
+  title: string;
+  labelHeader: string;
+  testId: string;
+  rows: SummaryRow[];
+  /** Distinct user counts for the footer — summing per-row distinct counts would double-count. */
+  userTotals: { newUsers: number; totalUsers: number };
+}) {
   const totals = useMemo(() => {
     const sum = (pick: (r: (typeof rows)[number]) => number) =>
       rows.reduce((t, r) => t + pick(r), 0);
     return {
-      newUsers: sum((r) => r.newWebsiteUsers),
-      totalUsers: sum((r) => r.totalWebsiteUsers),
+      newUsers: userTotals.newUsers,
+      totalUsers: userTotals.totalUsers,
       leads: sum((r) => r.leads),
       tours: sum((r) => r.tours),
       sales: sum((r) => r.sales),
     };
-  }, [rows]);
+  }, [rows, userTotals]);
 
   const PtgCell = ({ v }: { v: number | null }) => (
     <td className={cn("py-1.5 px-2 text-right tabular-nums", ptgColor(v))}>
@@ -489,13 +538,13 @@ function DivisionTable({ data }: { data: OwtDashboard }) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-base">Division Summary</CardTitle>
+        <CardTitle className="text-base">{title}</CardTitle>
       </CardHeader>
       <CardContent className="overflow-x-auto">
-        <table className="w-full text-xs sm:text-sm" data-testid="table-divisions">
+        <table className="w-full text-xs sm:text-sm" data-testid={testId}>
           <thead>
             <tr className="border-b text-muted-foreground">
-              <th className="py-2 pr-3 text-left font-medium">Division</th>
+              <th className="py-2 pr-3 text-left font-medium">{labelHeader}</th>
               <th className="py-2 px-2 text-right font-medium">New Users</th>
               <th className="py-2 px-2 text-right font-medium">Total Users</th>
               <th className="py-2 px-2 text-right font-medium">Leads</th>
@@ -515,9 +564,9 @@ function DivisionTable({ data }: { data: OwtDashboard }) {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.division} className="border-b last:border-0">
+              <tr key={r.key} className="border-b last:border-0">
                 <td className="py-1.5 pr-3 font-medium whitespace-nowrap">
-                  {r.division.replace("Esperanza Homes ", "").replace(", LLC", "")}
+                  {r.label.replace("Esperanza Homes ", "").replace(", LLC", "")}
                 </td>
                 <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.newWebsiteUsers)}</td>
                 <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.totalWebsiteUsers)}</td>

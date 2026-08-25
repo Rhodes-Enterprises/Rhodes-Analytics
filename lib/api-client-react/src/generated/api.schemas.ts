@@ -103,6 +103,10 @@ export interface OwtDivisionRow {
   onsiteSalesPtg: number | null;
 }
 
+export type OwtDevelopmentRow = OwtDivisionRow & {
+  development: string;
+};
+
 export type OwtRatioRowGroup = typeof OwtRatioRowGroup[keyof typeof OwtRatioRowGroup];
 
 
@@ -127,6 +131,7 @@ export interface OwtDashboard {
   kpis: OwtDashboardKpis;
   trafficMatrix: OwtDashboardTrafficMatrix;
   divisions: OwtDivisionRow[];
+  developments: OwtDevelopmentRow[];
   ratios: OwtRatioRow[];
 }
 

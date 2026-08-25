@@ -292,11 +292,23 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OwtDivisionRow"
+        developments:
+          type: array
+          items:
+            $ref: "#/components/schemas/OwtDevelopmentRow"
         ratios:
           type: array
           items:
             $ref: "#/components/schemas/OwtRatioRow"
-      required: [appliedRange, kpis, trafficMatrix, divisions, ratios]
+      required: [appliedRange, kpis, trafficMatrix, divisions, developments, ratios]
+    OwtDevelopmentRow:
+      allOf:
+        - $ref: "#/components/schemas/OwtDivisionRow"
+        - type: object
+          properties:
+            development:
+              type: string
+          required: [development]
     OwtDivisionRow:
       type: object
       properties:

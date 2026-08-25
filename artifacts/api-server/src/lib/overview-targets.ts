@@ -215,6 +215,7 @@ function goalFilters(f: DashboardFilters): Frag {
 interface GoalRow {
   GOAL_TYPE: string;
   COMPANY_NAME: string;
+  DEVELOPMENT_NAME: string | null;
   FULL_SPAN: number;
   TO_DATE: number;
 }
@@ -229,14 +230,14 @@ async function fetchGoals(
   const gf = goalFilters(f);
   const placeholders = types.map(() => "?").join(",");
   const sql = `
-    SELECT GOAL_TYPE, COMPANY_NAME,
+    SELECT GOAL_TYPE, COMPANY_NAME, DEVELOPMENT_NAME,
            SUM(GOAL) AS FULL_SPAN,
            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
     FROM DM_GOALS
     WHERE FISCAL_YEAR = ?
       AND GOAL_TYPE IN (${placeholders})
       AND BUDGET_DATE BETWEEN ? AND ?${gf.sql}
-    GROUP BY 1, 2`;
+    GROUP BY 1, 2, 3`;
   return cached(
     `goals:${JSON.stringify([f, fiscalYear, types])}`,
     () =>
@@ -253,6 +254,7 @@ async function fetchGoals(
 
 interface ActualRow {
   COMPANY_NAME: string | null;
+  DEVELOPMENT_NAME: string | null;
   CHANNEL: string | null;
   N: number;
 }
@@ -261,6 +263,7 @@ async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<A
   const cf = contactFilters(f);
   const sql = `
     SELECT D.COMPANY_NAME AS COMPANY_NAME,
+           D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
            C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
            COUNT(*) AS N
     FROM DM_CONTACTS C
@@ -268,7 +271,7 @@ async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<A
       ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
     WHERE C.EHI_LEAD = 1
       AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
-    GROUP BY 1, 2`;
+    GROUP BY 1, 2, 3`;
   return cached(`leadActuals:${dateCol}:${JSON.stringify(f)}`, () =>
     querySnowflake<ActualRow>(sql, [f.startDate, f.toDate, ...cf.binds]),
   );
@@ -278,6 +281,7 @@ async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
   const df = dealFilters(f);
   const sql = `
     SELECT D.COMPANY_NAME AS COMPANY_NAME,
+           D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
            X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
            COUNT(*) AS N
     FROM DM_DEALS X
@@ -285,7 +289,7 @@ async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
       ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
     WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
       AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
-    GROUP BY 1, 2`;
+    GROUP BY 1, 2, 3`;
   return cached(`salesActuals:${JSON.stringify(f)}`, () =>
     querySnowflake<ActualRow>(sql, [f.startDate, f.toDate, ...df.binds]),
   );
@@ -293,6 +297,11 @@ async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
 
 interface UsersRow {
   COMPANY_NAME: string | null;
+  DEVELOPMENT_NAME: string | null;
+  /** 1 when the row is aggregated over all companies */
+  G_COMPANY: number;
+  /** 1 when the row is aggregated over all developments */
+  G_DEV: number;
   TOTAL_USERS: number;
   NEW_USERS: number;
 }
@@ -301,12 +310,19 @@ async function fetchWebsiteUsers(f: DashboardFilters): Promise<UsersRow[]> {
   const gf = gaFilters(f);
   const sql = `
     SELECT MATCHED_COMPANY_NAME AS COMPANY_NAME,
+           MATCHED_DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
+           GROUPING(MATCHED_COMPANY_NAME) AS G_COMPANY,
+           GROUPING(MATCHED_DEVELOPMENT_NAME) AS G_DEV,
            COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
            COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
     WHERE PROPERTY = 'Esperanza Homes'
       AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}
-    GROUP BY 1`;
+    GROUP BY GROUPING SETS (
+      (),
+      (MATCHED_COMPANY_NAME),
+      (MATCHED_COMPANY_NAME, MATCHED_DEVELOPMENT_NAME)
+    )`;
   return cached(`gaUsers:${JSON.stringify(f)}`, () =>
     querySnowflake<UsersRow>(sql, [f.startDate, f.toDate, ...gf.binds]),
   );
@@ -411,27 +427,47 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
   ]);
 
   // Goal lookups
-  const goalTotal = (metric: MetricKey, kind: "FULL_SPAN" | "TO_DATE", company?: string) => {
+  const goalTotal = (
+    metric: MetricKey,
+    kind: "FULL_SPAN" | "TO_DATE",
+    company?: string,
+    development?: string,
+  ) => {
     const gt = goalTypeByMetric.get(metric);
     if (!gt) return 0;
     return sumBy(
       goals,
       (r) => Number(r[kind]) || 0,
-      (r) => r.GOAL_TYPE === gt && (!company || r.COMPANY_NAME === company),
+      (r) =>
+        r.GOAL_TYPE === gt &&
+        (!company || r.COMPANY_NAME === company) &&
+        (!development || r.DEVELOPMENT_NAME === development),
     );
   };
 
-  const chan = (rows: ActualRow[], channel?: string, company?: string) =>
+  const chan = (
+    rows: ActualRow[],
+    channel?: string,
+    company?: string,
+    development?: string,
+  ) =>
     sumBy(
       rows,
       (r) => Number(r.N) || 0,
       (r) =>
         (!channel || r.CHANNEL === channel) &&
-        (!company || r.COMPANY_NAME === company),
+        (!company || r.COMPANY_NAME === company) &&
+        (!development || r.DEVELOPMENT_NAME === development),
     );
 
-  const totalUsers = sumBy(users, (r) => Number(r.TOTAL_USERS) || 0);
-  const newUsers = sumBy(users, (r) => Number(r.NEW_USERS) || 0);
+  // Distinct-count rows come at three grouping levels; pick the right one.
+  const overallUsers = users.find((r) => Number(r.G_COMPANY) === 1);
+  const companyUsers = users.filter(
+    (r) => Number(r.G_COMPANY) === 0 && Number(r.G_DEV) === 1,
+  );
+  const devUsers = users.filter((r) => Number(r.G_DEV) === 0);
+  const totalUsers = Number(overallUsers?.TOTAL_USERS) || 0;
+  const newUsers = Number(overallUsers?.NEW_USERS) || 0;
 
   const actuals = {
     websiteUsers: totalUsers,
@@ -487,9 +523,9 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
   // Division summary
   const companies = new Set<string>();
   for (const r of goals) if (r.COMPANY_NAME) companies.add(r.COMPANY_NAME);
-  for (const r of users) if (r.COMPANY_NAME?.includes("Esperanza")) companies.add(r.COMPANY_NAME);
+  for (const r of companyUsers) if (r.COMPANY_NAME?.includes("Esperanza")) companies.add(r.COMPANY_NAME);
   const divisions = [...companies].sort().map((company) => {
-    const uRow = users.filter((r) => r.COMPANY_NAME === company);
+    const uRow = companyUsers.filter((r) => r.COMPANY_NAME === company);
     const cTotalUsers = sumBy(uRow, (r) => Number(r.TOTAL_USERS) || 0);
     const cNewUsers = sumBy(uRow, (r) => Number(r.NEW_USERS) || 0);
     const cLeads = chan(leads, undefined, company);
@@ -520,6 +556,58 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     };
   });
 
+  // Development summary — one row per (company, development) pair; the same
+  // development name may exist under different divisions, so key on the pair.
+  const devPairs = new Map<string, { company: string; development: string }>();
+  const addPair = (company: string | null, development: string | null) => {
+    if (!company || !development) return;
+    devPairs.set(`${company}\u0000${development}`, { company, development });
+  };
+  for (const r of goals) addPair(r.COMPANY_NAME, r.DEVELOPMENT_NAME);
+  for (const r of devUsers) {
+    if (r.COMPANY_NAME?.includes("Esperanza")) addPair(r.COMPANY_NAME, r.DEVELOPMENT_NAME);
+  }
+  const developments = [...devPairs.values()]
+    .sort(
+      (a, b) =>
+        a.company.localeCompare(b.company) ||
+        a.development.localeCompare(b.development),
+    )
+    .map(({ company, development }) => {
+      const uRow = devUsers.filter(
+        (r) => r.COMPANY_NAME === company && r.DEVELOPMENT_NAME === development,
+      );
+      const dTotalUsers = sumBy(uRow, (r) => Number(r.TOTAL_USERS) || 0);
+      const dNewUsers = sumBy(uRow, (r) => Number(r.NEW_USERS) || 0);
+      const dLeads = chan(leads, undefined, company, development);
+      const dTours = chan(tours, undefined, company, development);
+      const dSales = chan(sales, undefined, company, development);
+      const p = (metric: MetricKey, actual: number) =>
+        ptg(actual, goalTotal(metric, "TO_DATE", company, development));
+      return {
+        development,
+        division: company,
+        newWebsiteUsers: dNewUsers,
+        totalWebsiteUsers: dTotalUsers,
+        leads: dLeads,
+        leadsPctOfTotal: actuals.leads ? (dLeads / actuals.leads) * 100 : 0,
+        tours: dTours,
+        toursPctOfTotal: actuals.tours ? (dTours / actuals.tours) * 100 : 0,
+        sales: dSales,
+        salesPctOfTotal: actuals.sales ? (dSales / actuals.sales) * 100 : 0,
+        salesPtg: p("gross_sales", dSales),
+        toursPtg: p("first_tours", dTours),
+        leadsPtg: p("leads", dLeads),
+        onlineTrafficPtg: p("web_traffic", dTotalUsers),
+        onlineLeadsPtg: p("online_leads", chan(leads, "Online", company, development)),
+        onlineToursPtg: p("online_first_tours", chan(tours, "Online", company, development)),
+        onlineSalesPtg: p("online_gross_sales", chan(sales, "Online", company, development)),
+        onsiteLeadsPtg: p("onsite_leads", chan(leads, "Onsite", company, development)),
+        onsiteToursPtg: p("onsite_first_tours", chan(tours, "Onsite", company, development)),
+        onsiteSalesPtg: p("onsite_gross_sales", chan(sales, "Onsite", company, development)),
+      };
+    });
+
   // Ratio goals table + charts
   const safeDiv = (a: number, b: number) => (b ? a / b : 0);
   const ratioDefs: { name: string; group: "total" | "online" | "onsite"; actual: number }[] = [
@@ -545,7 +633,7 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     };
   });
 
-  return { filters: f, kpis, trafficMatrix, divisions, ratios, actuals };
+  return { filters: f, kpis, trafficMatrix, divisions, developments, ratios, actuals };
 }
 
 // ---------- Year-over-year chart ----------
