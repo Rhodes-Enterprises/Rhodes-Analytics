@@ -1,7 +1,7 @@
 import { Link, useLocation } from "wouter";
-import { BarChart2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WORKSPACES } from "@/lib/workspaces";
+import rhodesLogo from "@/assets/brand/rhodes-logo-horizontal.png";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
@@ -11,12 +11,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
       {/* Top Navbar */}
       <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-7xl items-center px-4 md:px-6">
-          <Link href="/" className="flex items-center gap-2 group">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm transition-transform group-hover:scale-105">
-              <BarChart2 className="h-5 w-5" />
-            </div>
-            <span className="font-bold tracking-tight text-foreground">
-              Rhodes Analytics
+          <Link href="/" className="flex items-center gap-2.5 group">
+            <img
+              src={rhodesLogo}
+              alt="Rhodes"
+              className="h-6 w-auto transition-opacity group-hover:opacity-80"
+            />
+            <span className="mt-0.5 text-sm font-semibold uppercase tracking-widest text-muted-foreground">
+              Analytics
             </span>
           </Link>
           <nav className="ml-8 flex items-center gap-1">

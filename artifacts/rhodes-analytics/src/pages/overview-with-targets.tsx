@@ -600,7 +600,7 @@ function RatioChart({
             </Bar>
             <Bar dataKey="Actual" barSize={10} radius={2}>
               {data.map((d, i) => (
-                <Cell key={i} fill={d.behind ? "#dc2626" : "#059669"} />
+                <Cell key={i} fill={d.behind ? "#dc2626" : "#457537"} />
               ))}
               <LabelList dataKey="Actual" position="right" formatter={(v: number) => `${v}%`} style={{ fontSize: 10 }} />
             </Bar>
@@ -729,14 +729,14 @@ function YoySection({
               <Area
                 type="monotone"
                 dataKey={`${yoy?.year ?? "current"}`}
-                stroke="#0284c7"
-                fill="#0284c71f"
+                stroke="#005473"
+                fill="#0054731f"
                 strokeWidth={2}
               />
               <Area
                 type="monotone"
                 dataKey="Goal"
-                stroke="#d97706"
+                stroke="#A69211"
                 fill="transparent"
                 strokeDasharray="5 4"
                 strokeWidth={1.5}

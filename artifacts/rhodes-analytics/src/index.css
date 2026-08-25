@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
 
 @import 'tailwindcss';
 @import 'tw-animate-css';
@@ -48,50 +48,56 @@
 }
 
 :root {
-  /* Very light grey-blue background for the "cockpit" feel */
-  --background: 220 20% 97%;
-  --foreground: 224 40% 12%;
+  /*
+   * Rhodes brand palette (Brand Guide):
+   *   Primary green  #457537 -> 106 36% 34%
+   *   Deep navy      #133440 -> 196 54% 16%
+   *   Ivory white    #FCFBF8 ->  45 33% 98%
+   * Secondary accents: blue #005473 (196 100% 23%), olive #A69211 (52 81% 36%)
+   */
+  --background: 45 33% 98%;
+  --foreground: 196 54% 16%;
 
   --card: 0 0% 100%;
-  --card-foreground: 224 40% 12%;
-  --card-border: 220 15% 90%;
+  --card-foreground: 196 54% 16%;
+  --card-border: 100 12% 89%;
 
   --popover: 0 0% 100%;
-  --popover-foreground: 224 40% 12%;
-  --popover-border: 220 15% 90%;
+  --popover-foreground: 196 54% 16%;
+  --popover-border: 100 12% 89%;
 
-  /* High visibility safety orange / bright red-orange as primary accent */
-  --primary: 13 90% 55%;
-  --primary-foreground: 0 0% 100%;
+  /* Rhodes primary green */
+  --primary: 106 36% 34%;
+  --primary-foreground: 45 33% 98%;
 
-  --secondary: 220 20% 90%;
-  --secondary-foreground: 224 40% 12%;
+  --secondary: 100 15% 91%;
+  --secondary-foreground: 196 54% 16%;
 
-  --muted: 220 20% 93%;
-  --muted-foreground: 220 15% 45%;
+  --muted: 80 12% 94%;
+  --muted-foreground: 197 20% 40%;
 
-  --accent: 220 20% 93%;
-  --accent-foreground: 224 40% 12%;
+  --accent: 106 25% 92%;
+  --accent-foreground: 196 54% 16%;
 
   --destructive: 0 84% 60%;
   --destructive-foreground: 0 0% 100%;
 
-  --success: 142 76% 36%;
-  --success-foreground: 0 0% 100%;
+  --success: 106 36% 34%;
+  --success-foreground: 45 33% 98%;
 
-  --border: 220 15% 88%;
-  --input: 220 15% 88%;
-  --ring: 13 90% 55%;
+  --border: 100 12% 88%;
+  --input: 100 12% 88%;
+  --ring: 106 36% 34%;
 
-  --app-font-sans: 'Plus Jakarta Sans', sans-serif;
+  --app-font-sans: 'Archivo', sans-serif;
   --app-font-mono: 'Space Mono', monospace;
   --radius: 0.35rem;
 
-  --chart-1: 13 90% 55%;
-  --chart-2: 220 40% 40%;
-  --chart-3: 142 76% 36%;
-  --chart-4: 45 93% 47%;
-  --chart-5: 280 65% 60%;
+  --chart-1: 106 36% 34%;   /* Rhodes green */
+  --chart-2: 196 100% 23%;  /* Rhodes blue */
+  --chart-3: 52 81% 36%;    /* Rhodes olive */
+  --chart-4: 196 54% 16%;   /* Rhodes navy */
+  --chart-5: 13 90% 55%;
 }
 
 @layer base {
