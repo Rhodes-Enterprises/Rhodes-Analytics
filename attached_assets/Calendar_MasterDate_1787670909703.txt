@@ -1,0 +1,175 @@
+LET vToday = 
+Floor(
+    Date(
+        ConvertToLocalTime(Now(1),'America/Chicago')
+    )
+);
+
+LET vCurrentMonth = NUM(Month(Today());
+
+Let vYTDJuly_Test = NUM('07/31/2023');
+ 
+//the next variables are used to set the proper flags as needed
+// ****************************
+LET vLastYear = NUM(ADDMONTHS(TODAY(), -12, 0));
+ 
+LET r3Date = NUM(MONTHSTART(ADDMONTHS('$(vToday)', -2)));
+LET r6Date = NUM(MONTHSTART(ADDMONTHS('$(vToday)', -5)));
+LET r9Date =  NUM(MONTHSTART(ADDMONTHS('$(vToday)', -8)));
+LET r12Date =  NUM(MONTHSTART(ADDMONTHS('$(vToday)', -11)));
+LET r13Date =  NUM(MONTHSTART(ADDMONTHS('$(vToday)', -12)));
+// *************************************
+
+
+QUALIFY *;
+UNQUALIFY MASTERDATE;
+
+MinMaxDateMC:
+Load Distinct 
+	Min(Date#(Date(MASTERDATE, 'MM/DD/YYYY'), 'MM/DD/YYYY')) as MinDate,
+    //Max(Date#(Date(YearEnd(MASTERDATE), 'MM/DD/YYYY'), 'MM/DD/YYYY')) as MaxDate
+	Max(Date#(Date(MASTERDATE, 'MM/DD/YYYY'), 'MM/DD/YYYY')) as MaxDate
+    //AddYears(YearEnd(Today()), 3) as MaxDate
+Resident [BR_MASTERCALENDAR_V2];  
+
+    //Min([date_received]) as MinDate,
+    //Max([date_received]) as MaxDate
+ 
+
+ 
+MasterDate:
+LOAD
+  //[Calendar Date]                                                                           AS MasterDate,
+  [Calendar Date]                                                                           AS MASTERDATE,
+  [Calendar Date],
+  NUM(YEAR(YEARSTART([Calendar Date])))                                                     AS [Year],
+  DUAL(YEAR([Calendar Date]) & '-' & MONTH([Calendar Date]), MONTHSTART([Calendar Date]))   AS [Year-Month],
+  Date(MonthStart([Calendar Date]),'MMM-YYYY')                                                                                                                                                                                            AS MonthYear,
+  Date(MonthStart([Calendar Date]), 'YYYYMM')                                                                                                                                                                                 AS MonthYearLink,
+  QUARTERNAME([Calendar Date])                                                              AS [Quarter],
+  'Q' & NUM(CEIL(NUM(MONTH([Calendar Date]))/3))                                            AS [QuarterNum],
+  DUAL(YEAR([Calendar Date]) & '-Q' & NUM(CEIL(NUM(MONTH([Calendar Date]))/3))
+  , QUARTERSTART([Calendar Date]))                                                          AS [Year-Quarter],
+  MONTH([Calendar Date])                                                                    AS [Calendar Month],
+  DATE([Calendar Date], 'M')                                                                AS [Month Number],
+  Num(Month([Calendar Date])) & '-' & Month([Calendar Date])                                                                                                                                  AS MonthNumName,
+  Num(Month([Calendar Date]))                                                                                                                                                                                                                                                AS MonthNum,
+  WEEK([Calendar Date])                                                                     AS [Week],
+  WeekStart([Calendar Date])                                                                                                                                                                                                                                                      AS WeekYear,
+  WEEKDAY([Calendar Date])                                                                  AS [Weekday],
+  DAYNUMBEROFYEAR([Calendar Date])                                                          AS [Day of Year],
+  Num(Month([Calendar Date])) & '/' & Day([Calendar Date])                                                                                                                                                        AS MonthDay,
+  DAY([Calendar Date])                                                                      AS [Day Number],
+  if(WeekDay([Calendar Date])< 5,8,0)                                                                                                                                                                                                                     as AvailableHours,
+  CEIL(MONTH([Calendar Date])/3) as date_rec_quarter,
+  WEEK([Calendar Date], 4) as date_rec_week,
+  Date#(Date([Calendar Date], 'MM/DD/YYYY'), 'MM/DD/YYYY') AS Format_Date,
+  Ceil(Month([Calendar Date])/3) AS [QuarterN],
+  //Eurpoean version
+  //Week([Calendar Date], 4) AS [WeekN],
+  //American version
+  Week([Calendar Date]) AS [WeekN],
+  Date(Weekstart([Calendar Date]), 'MM/DD/YY') & ' - ' & Date(Weekend([Calendar Date]), 'MM/DD/YY') AS [WeekRange],
+  1 as [DayCount],
+  IF(year([Calendar Date])< year(Today()),1,
+  	 IF(INYEARTODATE([Calendar Date], $(vToday), 0), 1, 0)) as [YTD_DayCount],
+  
+    //Current flags 
+    IF($(vToday) = [Calendar Date], 1 ,0)                                       AS %dateflag_CD, //current day
+    IF(INWEEK([Calendar Date], $(vToday), 0), 1, 0)                             AS %dateflag_CW, //week
+    IF(INMONTH([Calendar Date], $(vToday), 0), 1, 0)                            AS %dateflag_CM, //month
+    IF(INQUARTER ([Calendar Date], $(vToday), 0), 1, 0)                         AS %dateflag_CQ, //quarter
+    IF(INYEAR([Calendar Date], $(vToday), 0), 1, 0)                             AS %dateflag_CY, //year    
+    
+    //prior flags
+    IF($(vToday) - 1 = [Calendar Date], 1 ,0)                                   AS %dateflag_PD, //previous day
+    IF(INWEEK([Calendar Date], $(vToday), -1), 1, 0)                            AS %dateflag_PW, //week
+    IF(INMONTH([Calendar Date], $(vToday), -1), 1, 0)                           AS %dateflag_PM, //month
+    IF(INQUARTER ([Calendar Date], $(vToday), -1), 1, 0)                        AS %dateflag_PQ, //quarter
+    IF(INYEAR([Calendar Date], $(vToday), -1), 1, 0)                            AS %dateflag_PY, //year    
+       
+    //same period last year
+    IF(INWEEK([Calendar Date], $(vLastYear), 0), 1, 0)                          AS %dateflag_LYCW, //last year same week 
+    IF(INMONTH([Calendar Date], $(vLastYear), 0), 1, 0)                         AS %dateflag_LYCM, //last year same month  
+    IF(INQUARTER([Calendar Date], $(vLastYear), 0), 1, 0)                       AS %dateflag_LYCQ, //same quarter last year
+    IF(INYEARTODATE([Calendar Date], $(vToday), -1), 1, 0)                                                             AS %dateflag_LYTD, //same time last year annual total
+    
+    //YTD
+    //IF(INYEARTODATE([Calendar Date], $(vYTDJuly_Test), 0), 1, 0)                                             AS %dateflag_CYTD,  //all dates to July
+    IF(INYEARTODATE([Calendar Date], $(vToday), 0), 1, 0)                                             AS %dateflag_CYTD,  //all dates to today
+    If(DayNumberOfYear([Calendar Date]) <= DayNumberOfYear(Today()), 1, 0 )                                                     AS %dateflag_YTD,
+    If(Day([Calendar Date]) <= Day(Today()) and Month([Calendar Date]) = Month(Today()), 1, 0)    AS %dateflag_CMTD,
+    IF(Day([Calendar Date]) <= Day(Today()), 1, 0) as %dateflag_MTD,
+    If(Day([Calendar Date]) <= Day(AddMonths(Today(), -1)) and [Calendar Date] >= Day(MonthStart(AddMonths(Today(), -1))), 1, 0)                AS %dateflag_PMTD,
+    
+    
+    //rolling month flags
+    IF([Calendar Date] >= $(r3Date) AND [Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R3M, // 3 month
+    IF([Calendar Date] >= $(r6Date) AND [Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R6M, //6-Month
+    IF([Calendar Date] >= $(r9Date) AND [Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R9M, //9-Month
+    IF([Calendar Date] >= $(r12Date) AND [Calendar Date] <= $(vToday), 1, 0)    AS %dateflag_R12M, //12-Month
+    IF([Calendar Date] >= $(r13Date) AND [Calendar Date] <= $(vToday), 1, 0)    AS %dateflag_R13M //13-Month  
+    
+  
+  //where Exists(MASTERDATE, [Calendar Date])
+;
+
+//Generate all dates between min and max values of field from preceding load
+LOAD 
+   DATE(MinMaxDateMC.MinDate + ITERNO() ) AS [Calendar Date]
+WHILE 
+    MinMaxDateMC.MinDate + ITERNO()  <= MinMaxDateMC.MaxDate;
+//load min and max dates from given field
+Load
+    MinMaxDateMC.MinDate,
+    MinMaxDateMC.MaxDate
+Resident MinMaxDateMC;
+ 
+Drop Table MinMaxDateMC;
+ 
+
+/*
+MasterCalendarMC:
+//setting flags where 1 is true/yes and 0 is false/no
+LEFT JOIN (MasterCalendarMC)
+LOAD
+    [MasterCalendarMC.Calendar Date]                                                             AS MASTERDATE, //AS MasterDate,
+    //Current flags 
+    IF($(vToday) = [MasterCalendarMC.Calendar Date], 1 ,0)                                       AS %dateflag_CD, //current day
+    IF(INWEEK([MasterCalendarMC.Calendar Date], $(vToday), 0), 1, 0)                             AS %dateflag_CW, //week
+    IF(INMONTH([MasterCalendarMC.Calendar Date], $(vToday), 0), 1, 0)                            AS %dateflag_CM, //month
+    IF(INQUARTER ([MasterCalendarMC.Calendar Date], $(vToday), 0), 1, 0)                         AS %dateflag_CQ, //quarter
+    IF(INYEAR([MasterCalendarMC.Calendar Date], $(vToday), 0), 1, 0)                             AS %dateflag_CY, //year    
+    
+    //prior flags
+    IF($(vToday) - 1 = [MasterCalendarMC.Calendar Date], 1 ,0)                                   AS %dateflag_PD, //previous day
+    IF(INWEEK([MasterCalendarMC.Calendar Date], $(vToday), -1), 1, 0)                            AS %dateflag_PW, //week
+    IF(INMONTH([MasterCalendarMC.Calendar Date], $(vToday), -1), 1, 0)                           AS %dateflag_PM, //month
+    IF(INQUARTER ([MasterCalendarMC.Calendar Date], $(vToday), -1), 1, 0)                        AS %dateflag_PQ, //quarter
+    IF(INYEAR([MasterCalendarMC.Calendar Date], $(vToday), -1), 1, 0)                            AS %dateflag_PY, //year    
+       
+    //same period last year
+    IF(INWEEK([MasterCalendarMC.Calendar Date], $(vLastYear), 0), 1, 0)                          AS %dateflag_LYCW, //last year same week 
+    IF(INMONTH([MasterCalendarMC.Calendar Date], $(vLastYear), 0), 1, 0)                         AS %dateflag_LYCM, //last year same month  
+    IF(INQUARTER([MasterCalendarMC.Calendar Date], $(vLastYear), 0), 1, 0)                       AS %dateflag_LYCQ, //same quarter last year
+    IF(INYEARTODATE([MasterCalendarMC.Calendar Date], $(vToday), -1), 1, 0)                                                             AS %dateflag_LYTD, //same time last year annual total
+    
+    //YTD
+    //IF(INYEARTODATE([MasterCalendarMC.Calendar Date], $(vYTDJuly_Test), 0), 1, 0)                                             AS %dateflag_CYTD,  //all dates to July
+    IF(INYEARTODATE([MasterCalendarMC.Calendar Date], $(vToday), 0), 1, 0)                                             AS %dateflag_CYTD,  //all dates to today
+    If(DayNumberOfYear([MasterCalendarMC.Calendar Date]) <= DayNumberOfYear(Today()), 1, 0 )                                                     AS %dateflag_YTD,
+    If(Day([MasterCalendarMC.Calendar Date]) <= Day(Today()) and Month([MasterCalendarMC.Calendar Date]) = Month(Today()), 1, 0)    AS %dateflag_CMTD,
+    IF(Day([MasterCalendarMC.Calendar Date]) <= Day(Today()), 1, 0) as %dateflag_MTD,
+    If(Day([MasterCalendarMC.Calendar Date]) <= Day(AddMonths(Today(), -1)) and [MasterCalendarMC.Calendar Date] >= Day(MonthStart(AddMonths(Today(), -1))), 1, 0)                AS %dateflag_PMTD,
+    
+    
+    //rolling month flags
+    IF([MasterCalendarMC.Calendar Date] >= $(r3Date) AND [MasterCalendarMC.Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R3M, // 3 month
+    IF([MasterCalendarMC.Calendar Date] >= $(r6Date) AND [MasterCalendarMC.Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R6M, //6-Month
+    IF([MasterCalendarMC.Calendar Date] >= $(r9Date) AND [MasterCalendarMC.Calendar Date] <= $(vToday), 1, 0)     AS %dateflag_R9M, //9-Month
+    IF([MasterCalendarMC.Calendar Date] >= $(r12Date) AND [MasterCalendarMC.Calendar Date] <= $(vToday), 1, 0)    AS %dateflag_R12M, //12-Month
+    IF([MasterCalendarMC.Calendar Date] >= $(r13Date) AND [MasterCalendarMC.Calendar Date] <= $(vToday), 1, 0)    AS %dateflag_R13M //13-Month  
+RESIDENT 
+    MasterCalendarMC;
+*/
+UNQUALIFY *;

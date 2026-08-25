@@ -1,0 +1,13 @@
+//Removed Day because it didn't make sense at this time. Logic is written and mostly works though.
+//LET vTimePeriodPicker = 'MasterDate.QuarterNum~Quarter|MasterDate.Calendar Month~Month|MasterDate.WeekN~Week|MasterDate.Day Number~Day';
+LET vTimePeriodPicker = 'MasterDate.QuarterNum~Quarter|MasterDate.Calendar Month~Month|MasterDate.WeekN~Week';
+
+//LET vTimePeriodSelection = 'MasterDate.QuarterNum';
+
+LET vLocationPicker = 'COMPANY_NAME~Division|DEVELOPMENT_NAME~Development';
+
+//LET vLocationSelection = 'COMPANY_NAME';
+
+//LET vYOYorPriorPeriodSelection = 1;
+
+LET vYOYorPriorPeriodSelection = '1~Year Over Year|2~Prior Period';
