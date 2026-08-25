@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Rhodes Analytics"
+description = "A privacy-friendly web analytics platform. Users register their websites, get a lightweight tracking snippet, and monitor traffic through dashboards showing visitors, pageviews, top pages, referrers, devices, countries, and a live event feed."
+version = "1.0.0"
+id = "artifacts/rhodes-analytics"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24426
+
+[services.development]
+run = "pnpm --filter @workspace/rhodes-analytics run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/rhodes-analytics", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/rhodes-analytics/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24426"
+BASE_PATH = "/"
