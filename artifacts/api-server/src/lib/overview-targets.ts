@@ -140,7 +140,9 @@ interface Frag {
  * brands, and the same development name can exist under many companies (e.g.
  * "VDL Lots" under 7 divisions, "Las Brisas" under 3 brands). Joining the raw
  * table on DEVELOPMENT_NAME fans out actual counts (~1.5x inflation observed).
- * Restrict to Esperanza companies and force one row per development name.
+ * Restrict to Esperanza companies and force one row per development name,
+ * preferring the goal-carrying row: the flag holds the labels 'Has Goals' /
+ * 'No Goals', so a plain string DESC would invert the preference ('N' > 'H').
  */
 export const DEV_DIM = `(
   SELECT COMPANY_NAME, DEVELOPMENT_NAME
@@ -148,7 +150,7 @@ export const DEV_DIM = `(
   WHERE COMPANY_NAME ILIKE '%esperanza%'
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY DEVELOPMENT_NAME
-    ORDER BY DEVELOPMENT_HAS_GOALS_FLAG DESC NULLS LAST, COMPANY_NAME
+    ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
   ) = 1
 )`;
 
