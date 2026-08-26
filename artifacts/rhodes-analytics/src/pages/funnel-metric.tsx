@@ -20,6 +20,7 @@ import {
   type GetFunnelMetricMetric,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
+import { useCommittedDate } from "@/hooks/use-committed-date";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,14 +53,18 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
   const [development, setDevelopment] = useState(ALL);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  // Only complete, plausible dates reach the API; while a date is half-typed
+  // the previously applied range stays in effect (no 400 flashes mid-edit).
+  const appliedStartDate = useCommittedDate(startDate);
+  const appliedEndDate = useCommittedDate(endDate);
 
   const params: GetFunnelMetricParams = {
     metric,
     target,
     ...(company !== ALL && { company }),
     ...(development !== ALL && { development }),
-    ...(startDate && { startDate }),
-    ...(endDate && { endDate }),
+    ...(appliedStartDate && { startDate: appliedStartDate }),
+    ...(appliedEndDate && { endDate: appliedEndDate }),
   };
 
   const filters = useGetOwtFilters();
