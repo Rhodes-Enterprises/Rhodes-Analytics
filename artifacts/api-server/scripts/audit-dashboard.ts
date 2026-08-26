@@ -99,7 +99,12 @@
  * QUALIFY dedup), the isSelling invariant over the API's own YTD numbers, and
  * a label-domain guard on the flag columns — 'Has Goals'/'Rental' are text
  * labels, not booleans, so a silent upstream relabel would zero every badge
- * on both sides and still "match" without that guard.
+ * on both sides and still "match" without that guard. Each row's displayed
+ * leadsYtd/toursYtd/salesYtd values are also compared against those
+ * independent no-join baselines, inside a window that tolerates the
+ * endpoint's per-UTC-day cache lagging today's activity — so a broken join
+ * in the endpoint's L/T/S CTEs fails the audit even when zero-vs-nonzero
+ * selling status survives.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:dashboard
@@ -1163,7 +1168,8 @@ async function main() {
         "chLabels guard failure above), upstream renaming of the GA PROPERTY values " +
         "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
         "name, ignored date parameters, changed filters, stale cached data, or " +
-        "mislabeled/hidden communities in the Community List.",
+        "mislabeled/hidden communities or per-community YTD numbers drifting " +
+        "from Snowflake in the Community List.",
     );
     process.exit(1);
   }
@@ -1418,10 +1424,17 @@ function cmp(a: string, b: string): number {
  *  4. Self-consistency: isSelling === hasGoals || leads+tours+sales > 0 over
  *     the API's OWN row values — catches a hide-rule regression even when
  *     both sides of the cross-source comparison drift together.
+ *  5. Displayed YTD numbers: each row's leadsYtd/toursYtd/salesYtd against
+ *     the same plain-GROUP-BY baselines, within a cache-drift window (see
+ *     the section comment) — a broken join in the endpoint's L/T/S CTEs
+ *     that inflates or zeroes a community's numbers fails even when the
+ *     zero-vs-nonzero selling status survives.
  *
  * The endpoint caches per UTC day, so a community whose first-ever YTD
  * activity lands between the cache fill and this audit could transiently
- * flip isSelling; that is vanishingly rare and a rerun clears it.
+ * flip isSelling; that is vanishingly rare and a rerun clears it. The
+ * numeric YTD check tolerates that same cache lag deliberately (today-dated
+ * activity plus a small slack), so it does not flake intraday.
  */
 async function auditCommunities(): Promise<boolean> {
   console.log(`\n=== Community List (/dashboards/communities) ===`);
@@ -1452,27 +1465,34 @@ async function auditCommunities(): Promise<boolean> {
        FROM DM_COMPANY_DEVELOPMENT
        WHERE COMPANY_NAME ILIKE '%esperanza%'`,
     ),
-    querySnowflake<{ DEV: string | null; N: number }>(
-      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+    // Each YTD baseline also splits out how much of the count is stamped with
+    // today's UTC date (N_TODAY) — the only slice the endpoint's per-UTC-day
+    // cache can legitimately lag behind. Bind order: COUNT_IF's ? precedes
+    // the WHERE BETWEEN binds in SQL text order.
+    querySnowflake<YtdBaselineRow>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
+              COUNT_IF(CONTACT_CREATE_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
        WHERE EHI_LEAD = 1 AND CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1`,
-      [ytdStart, todayUtc],
+      [todayUtc, ytdStart, todayUtc],
     ),
-    querySnowflake<{ DEV: string | null; N: number }>(
-      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+    querySnowflake<YtdBaselineRow>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
+              COUNT_IF(EHI_MIN_FIRST_TOUR_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
        WHERE EHI_LEAD = 1 AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
        GROUP BY 1`,
-      [ytdStart, todayUtc],
+      [todayUtc, ytdStart, todayUtc],
     ),
-    querySnowflake<{ DEV: string | null; N: number }>(
-      `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+    querySnowflake<YtdBaselineRow>(
+      `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
+              COUNT_IF(CONTRACT_RATIFIED_DATE = ?) AS N_TODAY
        FROM DM_DEALS
        WHERE PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
          AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
        GROUP BY 1`,
-      [ytdStart, todayUtc],
+      [todayUtc, ytdStart, todayUtc],
     ),
   ]);
 
@@ -1511,14 +1531,20 @@ async function auditCommunities(): Promise<boolean> {
   }
 
   // --- Baseline per development, recomputed in JS from raw rows ---
-  const toCountMap = (rows: { DEV: string | null; N: number }[]) => {
-    const m = new Map<string, number>();
-    for (const r of rows) if (r.DEV) m.set(r.DEV, Number(r.N) || 0);
-    return m;
+  const toCountMaps = (rows: YtdBaselineRow[]) => {
+    const total = new Map<string, number>();
+    const today = new Map<string, number>();
+    for (const r of rows) {
+      if (r.DEV) {
+        total.set(r.DEV, Number(r.N) || 0);
+        today.set(r.DEV, Number(r.N_TODAY) || 0);
+      }
+    }
+    return { total, today };
   };
-  const leadsBy = toCountMap(leadRows);
-  const toursBy = toCountMap(tourRows);
-  const salesBy = toCountMap(saleRows);
+  const { total: leadsBy, today: leadsToday } = toCountMaps(leadRows);
+  const { total: toursBy, today: toursToday } = toCountMaps(tourRows);
+  const { total: salesBy, today: salesToday } = toCountMaps(saleRows);
 
   const rowsByDev = new Map<string, DimRawRow[]>();
   for (const r of dimRows) {
@@ -1665,6 +1691,60 @@ async function auditCommunities(): Promise<boolean> {
     );
   }
 
+  // --- 5. Displayed YTD numbers vs independent per-community baselines ---
+  // The endpoint caches per UTC day, so its L/T/S counts reflect Snowflake as
+  // of some earlier moment TODAY, while the baselines above are fresh. In
+  // between, new rows stamped with today's date can land (and, rarely,
+  // past-dated rows get restated). Exact equality would flake on every busy
+  // afternoon, so each value is checked against the cache-consistent window
+  //
+  //   baseline − todayCount − slack  ≤  api  ≤  baseline + slack
+  //
+  // where todayCount is that community's activity dated today (the only slice
+  // the cache can legitimately lag behind) and slack = max(2, TOLERANCE_PCT%
+  // of baseline) absorbs small restatements of past days. The bound stays
+  // tight when a community had no activity today — the common case — yet
+  // never flakes in January or on high-traffic days, and it holds no matter
+  // how stale within the day the cache is allowed to get. A broken join in
+  // the endpoint's L/T/S CTEs (zeroed, duplicated, or cross-wired counts)
+  // diverges far beyond this window.
+  const slackFor = (baseline: number) =>
+    Math.max(2, Math.ceil((baseline * TOLERANCE_PCT) / 100));
+  const ytdSpecs = [
+    { col: "leadsYtd", totals: leadsBy, today: leadsToday },
+    { col: "toursYtd", totals: toursBy, today: toursToday },
+    { col: "salesYtd", totals: salesBy, today: salesToday },
+  ] as const;
+  let ytdMismatches = 0;
+  let ytdChecks = 0;
+  for (const dev of [...baseline.keys()].sort(cmp)) {
+    const api = apiByDev.get(dev);
+    if (!api) continue; // already reported as missing
+    for (const s of ytdSpecs) {
+      const apiVal = Number(api[s.col]) || 0;
+      const base = s.totals.get(dev) ?? 0;
+      const todayCount = s.today.get(dev) ?? 0;
+      const slack = slackFor(base);
+      const lo = base - todayCount - slack;
+      const hi = base + slack;
+      ytdChecks++;
+      if (apiVal < lo || apiVal > hi) {
+        console.error(
+          `FAIL ytd ${s.col} for "${dev}": api=${apiVal} baseline=${base} ` +
+            `(today=${todayCount}, allowed ${Math.max(0, lo)}..${hi}) — displayed YTD ` +
+            `diverges from Snowflake beyond the cache-drift policy`,
+        );
+        ytdMismatches++;
+        failed = true;
+      }
+    }
+  }
+  if (!ytdMismatches) {
+    console.log(
+      `OK   YTD numbers leadsYtd/toursYtd/salesYtd within the cache-drift window on all ${ytdChecks} checks`,
+    );
+  }
+
   return !failed;
 }
 
@@ -1673,4 +1753,11 @@ interface DimRawRow {
   COMPANY_NAME: string;
   DEVELOPMENT_HAS_GOALS_FLAG: string | null;
   RENTAL_COMMUNITY_FLAG: string | null;
+}
+
+/** Per-community YTD baseline: full-window count plus its today-dated slice. */
+interface YtdBaselineRow {
+  DEV: string | null;
+  N: number;
+  N_TODAY: number;
 }
