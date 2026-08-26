@@ -1,11 +1,12 @@
 ---
 name: Snowflake connection quirks
-description: Lessons from setting up Snowflake key-pair auth in the api-server
+description: How the api-server talks to Snowflake (Replit connector) and schema/grant gotchas
 ---
 
-- Users may paste the private key secret as a bare base64 DER body (no PEM headers, no newlines) and it may be passphrase-encrypted (PBES2). The connection module normalizes: re-wrap to PEM, try ENCRYPTED PRIVATE KEY / PRIVATE KEY / RSA PRIVATE KEY headers, decrypt with SNOWFLAKE_PRIVATE_KEY_PASSPHRASE via node:crypto, export unencrypted PKCS#8 for the SDK.
-  **Why:** snowflake-sdk rejects anything but a clean PEM; the raw pasted secret failed with "Invalid private key".
-- snowflake-sdk cannot be bundled by esbuild (pulls optional cloud deps like @azure/storage-blob at require time). It must stay in the `external` list in the api-server build config.
-- Session defaults: warehouse PC_DBT_WH, role PC_DBT_ROLE, db PC_DBT_DB, schema DBT_ECORONADO (env: SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA shared env vars; rest are secrets).
-- Gotcha: PC_DBT_ROLE can SHOW the 121 tables in PC_DBT_DB.DBT_ECORONADO but initially lacked SELECT grants (tables owned by dbt users' roles). Admin must GRANT SELECT ON ALL/FUTURE TABLES IN SCHEMA to PC_DBT_ROLE.
+- Snowflake access now goes through the **Replit Snowflake connector** (OAuth, `@replit/connectors-sdk` proxy to the SQL REST API `/api/v2/statements`), replacing the old key-pair snowflake-sdk setup. Token is scoped to `session:role:SYSADMIN`.
+  **Why:** user prefers connector-managed credentials over hand-entered secrets.
+  **How to apply:** all queries via `querySnowflake` in the api-server snowflake lib; it converts REST string cells by rowType (FIXED/REAL→number, DATE days-since-epoch→YYYY-MM-DD, TIMESTAMP seconds→ISO), binds `?` as positional bindings, handles 202 polling and partitions. Session context (database/schema/warehouse) must be sent uppercase in every request body — USE statements don't persist.
+- Session context: warehouse PC_DBT_WH, db PC_DBT_DB, schema DBT_ECORONADO (env: SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA shared env vars). Old key-pair secrets (SNOWFLAKE_ACCOUNT/USER/PRIVATE_KEY/…) are unused now.
+- Gotcha: roles can SHOW tables in PC_DBT_DB.DBT_ECORONADO yet lack SELECT grants (tables owned by dbt users' roles). If queries 422 on access, an admin must GRANT SELECT ON ALL/FUTURE TABLES IN SCHEMA.
+- Roles see the same data, but role changes can coincide with number changes for other reasons — check INFORMATION_SCHEMA.TABLES LAST_ALTERED before blaming the connection for a KPI shift (an Aug 2026 "drop" was actually a merged dedupe fix, not the connector).
 - Verify endpoint: GET /api/snowflake/status (probe query returning session context or a clear error).

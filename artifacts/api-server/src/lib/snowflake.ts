@@ -1,176 +1,211 @@
-import crypto from "node:crypto";
-import snowflake from "snowflake-sdk";
+import { ReplitConnectors } from "@replit/connectors-sdk";
 import { logger } from "./logger";
 
-// Keep the SDK's own logging quiet; we log through pino.
-snowflake.configure({ logLevel: "ERROR" });
+/**
+ * Snowflake access via the Replit Snowflake connector (SQL REST API through
+ * the authenticated proxy). Credentials/OAuth are managed by the integration;
+ * only the session context (database/schema/warehouse) comes from env vars.
+ */
 
 export class SnowflakeConfigError extends Error {
   constructor(missing: string[]) {
     super(
-      `Snowflake is not configured. Missing secrets: ${missing.join(", ")}. ` +
-        "Add them as Replit secrets, and make sure the matching RSA public key " +
-        "is registered on the Snowflake user (ALTER USER ... SET RSA_PUBLIC_KEY = '...').",
+      `Snowflake is not configured. Missing environment variables: ${missing.join(", ")}.`,
     );
     this.name = "SnowflakeConfigError";
   }
 }
 
-interface SnowflakeConfig {
-  account: string;
-  username: string;
-  privateKey: string;
-  privateKeyPass?: string;
+interface SessionContext {
+  database: string;
+  schema: string;
   warehouse?: string;
-  database?: string;
-  schema?: string;
-  role?: string;
 }
 
-function getConfig(): SnowflakeConfig {
-  const account = process.env.SNOWFLAKE_ACCOUNT;
-  const username = process.env.SNOWFLAKE_USER;
-  const privateKey = process.env.SNOWFLAKE_PRIVATE_KEY;
-
+function getContext(): SessionContext {
+  const database = process.env.SNOWFLAKE_DATABASE;
+  const schema = process.env.SNOWFLAKE_SCHEMA;
   const missing: string[] = [];
-  if (!account) missing.push("SNOWFLAKE_ACCOUNT");
-  if (!username) missing.push("SNOWFLAKE_USER");
-  if (!privateKey) missing.push("SNOWFLAKE_PRIVATE_KEY");
   // Dashboard queries use unqualified table names and rely on the session
   // namespace, so an active database/schema is required — fail loudly.
-  if (!process.env.SNOWFLAKE_DATABASE) missing.push("SNOWFLAKE_DATABASE");
-  if (!process.env.SNOWFLAKE_SCHEMA) missing.push("SNOWFLAKE_SCHEMA");
+  if (!database) missing.push("SNOWFLAKE_DATABASE");
+  if (!schema) missing.push("SNOWFLAKE_SCHEMA");
   if (missing.length > 0) throw new SnowflakeConfigError(missing);
-
   return {
-    account: account!,
-    username: username!,
-    privateKey: normalizePrivateKey(
-      privateKey!,
-      process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE || undefined,
-    ),
-    privateKeyPass: undefined,
-    warehouse: process.env.SNOWFLAKE_WAREHOUSE || undefined,
-    database: process.env.SNOWFLAKE_DATABASE || undefined,
-    schema: process.env.SNOWFLAKE_SCHEMA || undefined,
-    role: process.env.SNOWFLAKE_ROLE || undefined,
+    // The SQL API treats context values as case-sensitive identifiers and
+    // expects the canonical (uppercase) form unless quoted when created.
+    database: database!.toUpperCase(),
+    schema: schema!.toUpperCase(),
+    warehouse: process.env.SNOWFLAKE_WAREHOUSE?.toUpperCase() || undefined,
   };
 }
 
-/**
- * Accepts a private key as PEM (encrypted or not, with real or literal "\n"
- * newlines) or as a bare base64 DER body, decrypts it if a passphrase is
- * provided, and returns an unencrypted PKCS#8 PEM for the Snowflake SDK.
- */
-function normalizePrivateKey(raw: string, passphrase?: string): string {
-  const withNewlines = raw.replace(/\\n/g, "\n").trim();
+// Never cache the client — the SDK handles token refresh per call.
+function getConnectors(): ReplitConnectors {
+  return new ReplitConnectors();
+}
 
-  const candidates: string[] = [];
-  if (withNewlines.includes("-----BEGIN")) {
-    candidates.push(withNewlines);
-  } else {
-    const body = withNewlines.replace(/\s+/g, "");
-    const wrapped = body.match(/.{1,64}/g)?.join("\n") ?? body;
-    for (const label of [
-      "ENCRYPTED PRIVATE KEY",
-      "PRIVATE KEY",
-      "RSA PRIVATE KEY",
-    ]) {
-      candidates.push(
-        `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----\n`,
-      );
-    }
-  }
+export type Bind = string | number;
 
-  let lastError: unknown;
-  for (const pem of candidates) {
-    try {
-      const keyObject = crypto.createPrivateKey({
-        key: pem,
-        format: "pem",
-        passphrase,
-      });
-      return keyObject.export({ type: "pkcs8", format: "pem" }) as string;
-    } catch (err) {
-      lastError = err;
+interface RowTypeCol {
+  name: string;
+  type: string;
+}
+
+interface ResultSet {
+  resultSetMetaData?: {
+    numRows?: number;
+    rowType?: RowTypeCol[];
+    partitionInfo?: { rowCount: number }[];
+  };
+  data?: (string | null)[][];
+  statementHandle?: string;
+  statementStatusUrl?: string;
+  code?: string;
+  message?: string;
+}
+
+function toBindings(binds: Bind[]): Record<string, { type: string; value: string }> {
+  const bindings: Record<string, { type: string; value: string }> = {};
+  binds.forEach((v, i) => {
+    bindings[String(i + 1)] = {
+      type: typeof v === "number" ? "FIXED" : "TEXT",
+      value: String(v),
+    };
+  });
+  return bindings;
+}
+
+/** Convert a raw SQL API cell (always a string) to a JS value by column type. */
+function convertCell(raw: string | null, type: string): unknown {
+  if (raw === null) return null;
+  switch (type.toUpperCase()) {
+    case "FIXED":
+    case "REAL":
+      return Number(raw);
+    case "BOOLEAN":
+      return raw === "true";
+    case "DATE": {
+      // Days since epoch.
+      const ms = Number(raw) * 86400_000;
+      return new Date(ms).toISOString().slice(0, 10);
     }
+    case "TIMESTAMP_NTZ":
+    case "TIMESTAMP_LTZ":
+    case "TIMESTAMP_TZ": {
+      // Seconds since epoch (TZ variant appends " <offsetMinutes>").
+      const seconds = Number(raw.split(" ")[0]);
+      return new Date(seconds * 1000).toISOString();
+    }
+    default:
+      return raw;
   }
-  const message = lastError instanceof Error ? lastError.message : String(lastError);
-  if (/bad decrypt|passphrase|password/i.test(message) || !passphrase) {
+}
+
+async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
+  const connectors = getConnectors();
+  const response = await connectors.proxy("snowflake", path, {
+    method: init.method,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...init.headers,
+    },
+    body: init.body,
+  });
+  const text = await response.text();
+  let json: ResultSet;
+  try {
+    json = JSON.parse(text) as ResultSet;
+  } catch {
     throw new Error(
-      "Could not read SNOWFLAKE_PRIVATE_KEY. The key appears to be encrypted or malformed. " +
-        "If it is encrypted, set SNOWFLAKE_PRIVATE_KEY_PASSPHRASE. " +
-        `Underlying error: ${message}`,
+      `Snowflake API returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`,
     );
   }
-  throw new Error(`Could not read SNOWFLAKE_PRIVATE_KEY: ${message}`);
-}
-
-function createConnection(): snowflake.Connection {
-  const config = getConfig();
-  return snowflake.createConnection({
-    account: config.account,
-    username: config.username,
-    authenticator: "SNOWFLAKE_JWT",
-    privateKey: config.privateKey,
-    privateKeyPass: config.privateKeyPass,
-    warehouse: config.warehouse,
-    database: config.database,
-    schema: config.schema,
-    role: config.role,
-  });
-}
-
-let connectionPromise: Promise<snowflake.Connection> | null = null;
-
-async function connect(): Promise<snowflake.Connection> {
-  const connection = createConnection();
-  await new Promise<void>((resolve, reject) => {
-    connection.connect((err) => (err ? reject(err) : resolve()));
-  });
-  logger.info("Connected to Snowflake");
-  return connection;
-}
-
-async function getConnection(): Promise<snowflake.Connection> {
-  if (!connectionPromise) {
-    connectionPromise = connect().catch((err) => {
-      // Don't cache failed connections.
-      connectionPromise = null;
-      throw err;
-    });
+  if (!response.ok && response.status !== 202) {
+    throw new Error(
+      `Snowflake query failed (HTTP ${response.status}): ${json.message ?? text.slice(0, 200)}`,
+    );
   }
-  const connection = await connectionPromise;
-  if (!connection.isUp()) {
-    connectionPromise = null;
-    return getConnection();
+  return { status: response.status, json };
+}
+
+const POLL_INTERVAL_MS = 1000;
+const POLL_TIMEOUT_MS = 120_000;
+
+async function pollStatement(handle: string): Promise<ResultSet> {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(`Snowflake statement ${handle} timed out after ${POLL_TIMEOUT_MS / 1000}s`);
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const { status, json } = await proxyJson(`/api/v2/statements/${handle}`, { method: "GET" });
+    if (status === 200) return json;
+    // 202: still running — keep polling.
   }
-  return connection;
 }
 
 /**
- * Run a SQL query against Snowflake and return the result rows.
- * Use `binds` for parameterized values (`?` placeholders).
+ * Run a SQL query against Snowflake and return the result rows as objects
+ * keyed by column name. Use `binds` for parameterized values (`?` placeholders).
  */
 export async function querySnowflake<T = Record<string, unknown>>(
   sqlText: string,
-  binds: snowflake.Binds = [],
+  binds: Bind[] = [],
 ): Promise<T[]> {
-  const connection = await getConnection();
-  return new Promise<T[]>((resolve, reject) => {
-    connection.execute({
-      sqlText,
-      binds,
-      complete: (err, _stmt, rows) => {
-        if (err) {
-          logger.error({ err: err.message }, "Snowflake query failed");
-          reject(err);
-        } else {
-          resolve((rows ?? []) as T[]);
-        }
-      },
+  const context = getContext();
+  const body: Record<string, unknown> = {
+    statement: sqlText,
+    timeout: 90,
+    database: context.database,
+    schema: context.schema,
+  };
+  if (context.warehouse) body.warehouse = context.warehouse;
+  if (binds.length > 0) body.bindings = toBindings(binds);
+
+  try {
+    let { status, json } = await proxyJson("/api/v2/statements", {
+      method: "POST",
+      body: JSON.stringify(body),
     });
-  });
+    if (status === 202) {
+      if (!json.statementHandle) {
+        throw new Error("Snowflake returned 202 without a statement handle");
+      }
+      json = await pollStatement(json.statementHandle);
+    }
+
+    const rowType = json.resultSetMetaData?.rowType ?? [];
+    const rows: T[] = [];
+    const pushRows = (data: (string | null)[][] | undefined) => {
+      for (const raw of data ?? []) {
+        const row: Record<string, unknown> = {};
+        rowType.forEach((col, i) => {
+          row[col.name] = convertCell(raw[i] ?? null, col.type);
+        });
+        rows.push(row as T);
+      }
+    };
+    pushRows(json.data);
+
+    // Fetch remaining partitions, if any (partition 0 is the initial body).
+    const partitions = json.resultSetMetaData?.partitionInfo ?? [];
+    for (let p = 1; p < partitions.length; p++) {
+      const { json: part } = await proxyJson(
+        `/api/v2/statements/${json.statementHandle}?partition=${p}`,
+        { method: "GET" },
+      );
+      pushRows(part.data);
+    }
+    return rows;
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "Snowflake query failed",
+    );
+    throw err;
+  }
 }
 
 export interface SnowflakeStatus {
@@ -206,9 +241,16 @@ export async function checkSnowflake(): Promise<SnowflakeStatus> {
       schema: row.schema ?? undefined,
     };
   } catch (err) {
-    return {
-      connected: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    // Log the detailed cause server-side only; never expose raw upstream
+    // connector/Snowflake error messages to clients.
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "Snowflake status probe failed",
+    );
+    const generic =
+      err instanceof SnowflakeConfigError
+        ? err.message
+        : "Unable to reach Snowflake. See server logs for details.";
+    return { connected: false, error: generic };
   }
 }

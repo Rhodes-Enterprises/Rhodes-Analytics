@@ -754,7 +754,18 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
                   <td className="py-1.5 px-3 text-right tabular-nums font-semibold">
                     {(r.actual * 100).toFixed(1)}%
                   </td>
-                  <td className={cn("py-1.5 pl-3 text-right tabular-nums font-semibold", ptgColor(r.ptgPercent))}>
+                  {/* Source Qlik sheet uses a simple two-color flag for ratios:
+                      red below goal, green at/above (no amber tier). */}
+                  <td
+                    className={cn(
+                      "py-1.5 pl-3 text-right tabular-nums font-semibold",
+                      r.ptgPercent == null
+                        ? "text-muted-foreground"
+                        : r.ptgPercent < 0
+                          ? "text-red-600"
+                          : "text-[#457537]",
+                    )}
+                  >
                     {fmtPct(r.ptgPercent)}
                   </td>
                 </tr>
