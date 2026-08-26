@@ -56,6 +56,15 @@
  * Distinct-user counts are not additive across rows, so website users get
  * per-row comparisons only, never a sum-to-headline cross-check.
  *
+ * The funnel ratios table is audited on the default view: every ratio's
+ * actual is recomputed from independent baseline counts (the same no-fan-out
+ * query shapes as the headline checks, split by channel where a ratio calls
+ * for it), and every ratio's goal is looked up directly in
+ * DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS by MARKETING_GOAL_NAME_RATIOS.
+ * A swapped numerator/denominator, a ratio wired to the wrong actual, a
+ * goal name that no longer resolves in the input table, or an input-table
+ * goal row the dashboard silently drops all fail the audit.
+ *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:dashboard
  *
@@ -94,6 +103,13 @@ interface DevelopmentRow {
   sales: number;
 }
 
+interface RatioRow {
+  name: string;
+  group: string;
+  goal: number | null;
+  actual: number;
+  ptgPercent: number | null;
+}
 interface OverviewResponse {
   appliedRange: { startDate: string; endDate: string; toDate: string; target: string };
   kpis: { grossSales: number };
@@ -115,6 +131,7 @@ interface OverviewResponse {
   };
   divisions: DivisionRow[];
   developments: DevelopmentRow[];
+  ratios: RatioRow[];
 }
 
 async function fetchOverview(params: Record<string, string>): Promise<OverviewResponse> {
@@ -198,6 +215,12 @@ interface Scenario {
    * baselines). Default view only: those baselines bind no filters.
    */
   withGaBreakdowns?: boolean;
+  /**
+   * Also audit the funnel ratios table (actuals recomputed from baseline
+   * counts, goals against the ratio-goal input table). Default view only:
+   * those baselines bind no filters.
+   */
+  withRatios?: boolean;
 }
 
 interface Frag {
@@ -771,8 +794,10 @@ async function auditWebsiteUserBreakdowns(
   return !failed;
 }
 
-// ---------- Representative filter selection ----------
-
+interface ChannelCountRow {
+  CHANNEL: string | null;
+  N: number;
+}
 /**
  * Pick representative filter values dynamically: the Esperanza company,
  * development, and channel with the most leads in the given range, so the
@@ -868,6 +893,7 @@ async function main() {
       filters: {},
       withBreakdowns: true,
       withGaBreakdowns: true,
+      withRatios: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
@@ -884,12 +910,14 @@ async function main() {
   for (const scenario of scenarios) {
     const result = await auditScenario(scenario);
     if (!result.ok) anyFailed = true;
-    if (!scenario.withBreakdowns && !scenario.withGaBreakdowns) continue;
+    if (!scenario.withBreakdowns && !scenario.withGaBreakdowns && !scenario.withRatios) {
+      continue;
+    }
     if (!result.rangeOk) {
       // Baselines would be bound to a range the API never applied; the
       // appliedRange failure above already fails the run.
       console.error(
-        `Skipping breakdown audits for "${scenario.name}" — appliedRange mismatch`,
+        `Skipping breakdown/ratio audits for "${scenario.name}" — appliedRange mismatch`,
       );
       continue;
     }
@@ -911,6 +939,12 @@ async function main() {
       );
       if (!gaBreakdownsOk) anyFailed = true;
     }
+    // Funnel ratios table — actuals recomputed from baseline counts, goals
+    // cross-checked against the ratio-goal input table.
+    if (scenario.withRatios) {
+      const ratiosOk = await auditRatios(result.overview, result.expStart, result.expTo);
+      if (!ratiosOk) anyFailed = true;
+    }
   }
 
   if (anyFailed) {
@@ -919,7 +953,8 @@ async function main() {
         "in at least one scenario. Likely causes: join fan-out in the attribution " +
         "dimension, a filter bound to the wrong column, a GA grouping regression, " +
         "an online/onsite split keyed to the wrong channel column or with swapped " +
-        "labels, ignored date parameters, changed filters, or stale cached data.",
+        "labels, a mis-wired funnel ratio, a stale ratio-goal name, ignored date " +
+        "parameters, changed filters, or stale cached data.",
     );
     process.exit(1);
   }
@@ -931,3 +966,215 @@ main().catch((err) => {
   console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
   process.exit(1);
 });
+
+interface RatioGoalBaselineRow {
+  NAME: string;
+  VAL: number | null;
+}
+
+/**
+ * Audits the funnel ratios table of the DEFAULT view.
+ *
+ * Actuals: every ratio is recomputed from independent baseline counts — the
+ * same no-fan-out query shapes the headline checks validate, grouped by
+ * ONSITE_ONLINE_SOURCE_CHANNEL so the online/onsite variants come from the
+ * data rather than from the API's own channel splits. The expected
+ * numerator/denominator wiring below is the dashboard's contract (validated
+ * against Qlik during migration); a swapped pair or a ratio fed by the wrong
+ * actual diverges by orders of magnitude, far beyond any drift tolerance.
+ * Division-by-zero mirrors the API's convention (ratio = 0), so both sides
+ * agree when a denominator is legitimately empty.
+ *
+ * Goals: each ratio's goal must resolve by MARKETING_GOAL_NAME_RATIOS in
+ * DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS for the audited fiscal year
+ * (year of the range start, the API's own convention) and match the API's
+ * ratios[].goal. The check is bidirectional: a dashboard ratio whose name
+ * no longer resolves (dbt rename), an API goal that is null despite a
+ * resolvable table row, an input-table goal row no dashboard ratio consumes
+ * (orphan left behind by a rename), and conflicting duplicate table rows
+ * all fail. Coverage is also bidirectional — an API ratio this audit does
+ * not know, a missing expected ratio, or a duplicate API ratio name fails
+ * rather than being skipped.
+ */
+async function auditRatios(
+  overview: OverviewResponse,
+  expStart: string,
+  expTo: string,
+): Promise<boolean> {
+  console.log(`\n=== Funnel ratios table (default view) ===`);
+
+  // Fiscal year the API sources ratio goals from: year of the range start.
+  const goalYear = Number(expStart.slice(0, 4));
+  const binds = [expStart, expTo];
+
+  const [leadRows, tourRows, salesRows, users, goalRows] = await Promise.all([
+    querySnowflake<ChannelCountRow>(
+      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      binds,
+    ),
+    querySnowflake<ChannelCountRow>(
+      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      binds,
+    ),
+    querySnowflake<ChannelCountRow>(
+      `SELECT X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
+       FROM DM_DEALS X
+       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      binds,
+    ),
+    countScalar(
+      `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
+      binds,
+    ),
+    querySnowflake<RatioGoalBaselineRow>(
+      `SELECT MARKETING_GOAL_NAME_RATIOS AS NAME, MARKETING_GOAL_RATIOS AS VAL
+       FROM DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS
+       WHERE MARKETING_GOAL_YEAR = ?`,
+      [goalYear],
+    ),
+  ]);
+
+  // Totals include rows with a NULL/other channel, same as the API's chan().
+  const chanSum = (rows: ChannelCountRow[], channel?: string) =>
+    sumRows(rows, (r) => (!channel || r.CHANNEL === channel ? Number(r.N) || 0 : 0));
+  const counts = {
+    users,
+    leads: chanSum(leadRows),
+    onlineLeads: chanSum(leadRows, "Online"),
+    onsiteLeads: chanSum(leadRows, "Onsite"),
+    tours: chanSum(tourRows),
+    onlineTours: chanSum(tourRows, "Online"),
+    onsiteTours: chanSum(tourRows, "Onsite"),
+    sales: chanSum(salesRows),
+    onlineSales: chanSum(salesRows, "Online"),
+    onsiteSales: chanSum(salesRows, "Onsite"),
+  };
+  console.log(`Baseline counts: ${JSON.stringify(counts)}`);
+
+  // Expected wiring of every ratio the dashboard shows (numerator/denominator
+  // over the baseline counts). Names must match the API's ratios[].name AND
+  // the input table's MARKETING_GOAL_NAME_RATIOS values.
+  const spec: { name: string; num: number; den: number }[] = [
+    { name: "Total Traffic to Total Lead", num: counts.leads, den: counts.users },
+    { name: "Total Lead to Total Tour", num: counts.tours, den: counts.leads },
+    { name: "Total Tour to Contract", num: counts.sales, den: counts.tours },
+    { name: "Total Lead to Total Sale", num: counts.sales, den: counts.leads },
+    { name: "Online Traffic to Online Lead", num: counts.onlineLeads, den: counts.users },
+    { name: "Online Lead to Online Tour", num: counts.onlineTours, den: counts.onlineLeads },
+    { name: "Online Tour to Online Sale", num: counts.onlineSales, den: counts.onlineTours },
+    { name: "Online Sales Contribution", num: counts.onlineSales, den: counts.sales },
+    { name: "Onsite Lead to Onsite Tour", num: counts.onsiteTours, den: counts.onsiteLeads },
+    { name: "Onsite Tour to Onsite Sale", num: counts.onsiteSales, den: counts.onsiteTours },
+  ];
+  const specNames = new Set(spec.map((s) => s.name));
+
+  // A ratio's numerator and denominator may each legitimately drift by up to
+  // TOLERANCE_PCT between the API's (possibly cached) read and the fresh
+  // baselines, so their quotient may drift by up to (1+t)/(1-t)-1 — use the
+  // exact compounded bound instead of flagging worst-case drift as mis-wiring.
+  // Real wiring bugs diverge by orders of magnitude more than this.
+  const t = TOLERANCE_PCT / 100;
+  const ratioTolerancePct = ((1 + t) / (1 - t) - 1) * 100;
+
+  let failed = false;
+
+  // --- 0. Structure: no duplicate ratio names in the API response ---
+  const apiByName = new Map<string, RatioRow>();
+  for (const r of overview.ratios) {
+    if (apiByName.has(r.name)) {
+      console.error(`FAIL ratio     duplicate name in API response: "${r.name}"`);
+      failed = true;
+    }
+    apiByName.set(r.name, r);
+  }
+
+  // --- 1. Coverage in both directions ---
+  for (const r of overview.ratios) {
+    if (!specNames.has(r.name)) {
+      console.error(
+        `FAIL ratio     unknown ratio "${r.name}" in API response — audit spec does not cover it; update the audit`,
+      );
+      failed = true;
+    }
+  }
+  for (const s of spec) {
+    if (!apiByName.has(s.name)) {
+      console.error(`FAIL ratio     missing from API response: "${s.name}"`);
+      failed = true;
+    }
+  }
+
+  // --- 2. Actuals: recomputed ratio vs ratios[].actual ---
+  for (const s of spec) {
+    const api = apiByName.get(s.name);
+    if (!api) continue; // already failed coverage above
+    const expected = s.den ? s.num / s.den : 0;
+    const apiActual = Number(api.actual) || 0;
+    const d = divergedPct(apiActual, expected);
+    const ok = d <= ratioTolerancePct;
+    console.log(
+      `${ok ? "OK  " : "FAIL"} ratio     ${s.name.padEnd(30)} api=${apiActual.toFixed(6)} baseline=${expected.toFixed(6)} (${s.num}/${s.den}) divergence=${d.toFixed(3)}%`,
+    );
+    if (!ok) failed = true;
+  }
+
+  // --- 3. Goals: forward — every dashboard ratio must resolve and match ---
+  const goalTable = new Map<string, number>();
+  for (const r of goalRows) {
+    if (r.VAL == null) continue; // valueless rows are invisible to the API too
+    const existing = goalTable.get(r.NAME);
+    if (existing !== undefined && existing !== Number(r.VAL)) {
+      console.error(
+        `FAIL ratiogoal conflicting duplicate rows for "${r.NAME}" (year ${goalYear}): ${existing} vs ${r.VAL} — goal lookup is ambiguous`,
+      );
+      failed = true;
+    }
+    goalTable.set(r.NAME, Number(r.VAL));
+  }
+  for (const s of spec) {
+    const tableGoal = goalTable.get(s.name);
+    if (tableGoal === undefined) {
+      console.error(
+        `FAIL ratiogoal "${s.name}" no longer resolves in DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS for year ${goalYear} (renamed or removed upstream?)`,
+      );
+      failed = true;
+      continue;
+    }
+    const api = apiByName.get(s.name);
+    if (!api) continue; // already failed coverage above
+    if (api.goal == null) {
+      console.error(
+        `FAIL ratiogoal ${s.name.padEnd(30)} api=null table=${tableGoal} — API dropped a goal the input table defines`,
+      );
+      failed = true;
+      continue;
+    }
+    const d = divergedPct(Number(api.goal), tableGoal);
+    const ok = d <= TOLERANCE_PCT;
+    console.log(
+      `${ok ? "OK  " : "FAIL"} ratiogoal ${s.name.padEnd(30)} api=${Number(api.goal)} table=${tableGoal} divergence=${d.toFixed(3)}%`,
+    );
+    if (!ok) failed = true;
+  }
+
+  // --- 4. Goals: reverse — no orphaned input-table rows for the year ---
+  for (const name of [...goalTable.keys()].sort()) {
+    if (!specNames.has(name)) {
+      console.error(
+        `FAIL ratiogoal orphaned input-table row "${name}" (year ${goalYear}) — no dashboard ratio consumes it (renamed upstream, or the dashboard is missing a ratio)`,
+      );
+      failed = true;
+    }
+  }
+
+  return !failed;
+}
