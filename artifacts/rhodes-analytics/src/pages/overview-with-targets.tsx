@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronRight, RefreshCw, Database } from "lucide-react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -19,6 +19,7 @@ import {
   useGetOwtDashboard,
   useGetOwtFilters,
   useGetOwtYoy,
+  useGetSnowflakeStatus,
   type OwtDashboard,
   type OwtRatioRow,
   type OwtYoy,
@@ -108,6 +109,7 @@ export default function OverviewWithTargetsPage() {
     ...(company !== ALL && { company }),
     ...(development !== ALL && { development }),
   });
+  const status = useGetSnowflakeStatus();
 
   const setYtd = () => {
     const year = new Date().getFullYear();
@@ -154,6 +156,11 @@ export default function OverviewWithTargetsPage() {
                 {dash.data.appliedRange.toDate}
               </p>
             )}
+            <LiveStatusBadge
+              status={status.data}
+              checking={status.isLoading}
+              lastRefreshed={dash.dataUpdatedAt}
+            />
           </div>
           {/* Target selector */}
           <div className="flex rounded-lg border p-0.5 bg-muted/40">
@@ -299,13 +306,68 @@ export default function OverviewWithTargetsPage() {
         )}
 
         {/* YOY chart */}
-        <YoySection yoy={yoy.data} loading={yoy.isLoading} />
+        <YoySection
+          yoy={yoy.data}
+          loading={yoy.isLoading}
+          error={yoy.isError ? ((yoy.error as Error)?.message ?? "Snowflake query failed.") : null}
+        />
       </div>
     </Layout>
   );
 }
 
 // ---------- pieces ----------
+
+function LiveStatusBadge({
+  status,
+  checking,
+  lastRefreshed,
+}: {
+  status: { connected: boolean; database?: string; error?: string } | undefined;
+  checking: boolean;
+  lastRefreshed: number;
+}) {
+  const time =
+    lastRefreshed > 0
+      ? new Date(lastRefreshed).toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+        })
+      : null;
+  return (
+    <div
+      className="mt-1.5 flex items-center gap-1.5 text-xs"
+      data-testid="badge-data-source"
+    >
+      {checking && !status ? (
+        <span className="text-muted-foreground">Checking data source…</span>
+      ) : status?.connected ? (
+        <>
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+          </span>
+          <span className="font-medium text-emerald-700 dark:text-emerald-400">
+            Live · Snowflake
+          </span>
+          <Database className="h-3 w-3 text-muted-foreground" />
+          {time && (
+            <span className="text-muted-foreground">
+              refreshed {time}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <span className="h-2 w-2 rounded-full bg-red-500" />
+          <span className="font-medium text-red-600 dark:text-red-400">
+            Snowflake connection unavailable
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
 
 function LegendDot({ className, label }: { className: string; label: string }) {
   return (
@@ -721,9 +783,11 @@ const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov
 function YoySection({
   yoy,
   loading,
+  error,
 }: {
   yoy: OwtYoy | undefined;
   loading: boolean;
+  error: string | null;
 }) {
   const [measure, setMeasure] = useState("websiteUsers");
   const series = yoy?.measures.find((m) => m.measure === measure);
@@ -758,7 +822,12 @@ function YoySection({
         </div>
       </CardHeader>
       <CardContent>
-        {loading ? (
+        {error ? (
+          <Alert variant="destructive" data-testid="alert-yoy-error">
+            <AlertTitle>Failed to load year-over-year data</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : loading ? (
           <Skeleton className="h-64 w-full" />
         ) : (
           <ResponsiveContainer width="100%" height={280}>

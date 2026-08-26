@@ -134,6 +134,24 @@ interface Frag {
   binds: (string | number)[];
 }
 
+/**
+ * Deduplicated company/development dimension for attribution joins.
+ * DM_COMPANY_DEVELOPMENT holds one row per (company, development) across ALL
+ * brands, and the same development name can exist under many companies (e.g.
+ * "VDL Lots" under 7 divisions, "Las Brisas" under 3 brands). Joining the raw
+ * table on DEVELOPMENT_NAME fans out actual counts (~1.5x inflation observed).
+ * Restrict to Esperanza companies and force one row per development name.
+ */
+const DEV_DIM = `(
+  SELECT COMPANY_NAME, DEVELOPMENT_NAME
+  FROM DM_COMPANY_DEVELOPMENT
+  WHERE COMPANY_NAME ILIKE '%esperanza%'
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY DEVELOPMENT_NAME
+    ORDER BY DEVELOPMENT_HAS_GOALS_FLAG DESC NULLS LAST, COMPANY_NAME
+  ) = 1
+)`;
+
 function contactFilters(f: DashboardFilters, alias = "C", dev = "D"): Frag {
   const parts: string[] = [];
   const binds: (string | number)[] = [];
@@ -267,7 +285,7 @@ async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<A
            C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
            COUNT(*) AS N
     FROM DM_CONTACTS C
-    LEFT JOIN DM_COMPANY_DEVELOPMENT D
+    LEFT JOIN ${DEV_DIM} D
       ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
     WHERE C.EHI_LEAD = 1
       AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
@@ -285,7 +303,7 @@ async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
            X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
            COUNT(*) AS N
     FROM DM_DEALS X
-    LEFT JOIN DM_COMPANY_DEVELOPMENT D
+    LEFT JOIN ${DEV_DIM} D
       ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
     WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
       AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
@@ -667,7 +685,7 @@ export async function getYearOverYear(f: DashboardFilters) {
     monthly(
       `SELECT YEAR(C.CONTACT_CREATE_DATE) Y, MONTH(C.CONTACT_CREATE_DATE) M, COUNT(*) N
        FROM DM_CONTACTS C
-       LEFT JOIN DM_COMPANY_DEVELOPMENT D
+       LEFT JOIN ${DEV_DIM} D
          ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
        WHERE C.EHI_LEAD = 1 AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)${cf.sql}
        GROUP BY 1, 2`,
@@ -676,7 +694,7 @@ export async function getYearOverYear(f: DashboardFilters) {
     monthly(
       `SELECT YEAR(C.EHI_MIN_FIRST_TOUR_DATE) Y, MONTH(C.EHI_MIN_FIRST_TOUR_DATE) M, COUNT(*) N
        FROM DM_CONTACTS C
-       LEFT JOIN DM_COMPANY_DEVELOPMENT D
+       LEFT JOIN ${DEV_DIM} D
          ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
        WHERE C.EHI_LEAD = 1 AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)${cf.sql}
        GROUP BY 1, 2`,
@@ -685,7 +703,7 @@ export async function getYearOverYear(f: DashboardFilters) {
     monthly(
       `SELECT YEAR(X.CONTRACT_RATIFIED_DATE) Y, MONTH(X.CONTRACT_RATIFIED_DATE) M, COUNT(*) N
        FROM DM_DEALS X
-       LEFT JOIN DM_COMPANY_DEVELOPMENT D
+       LEFT JOIN ${DEV_DIM} D
          ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
          AND YEAR(X.CONTRACT_RATIFIED_DATE) IN (?, ?)${df.sql}
