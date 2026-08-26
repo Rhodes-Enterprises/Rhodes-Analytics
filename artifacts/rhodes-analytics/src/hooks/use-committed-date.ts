@@ -55,22 +55,39 @@ export function useCommittedDate(raw: string, clearDelayMs = 600): string {
 }
 
 export interface CommittedDateRange {
-  /** Last valid (non-inverted) committed pair — safe to use in query params. */
+  /** Last valid committed pair (in order, same year) — safe to use in query params. */
   startDate: string;
   endDate: string;
   /** True while both inputs hold complete dates but the end is before the start. */
   invertedRange: boolean;
+  /**
+   * True while the committed dates would form a range spanning two calendar
+   * years — either both dates are set (in order) in different years, or only
+   * one date is set and it falls outside the current year (the API fills the
+   * missing side from today's date, so the resolved range would still cross
+   * years). The API rejects such ranges (goals are issued per fiscal year),
+   * so they are never queried.
+   */
+  crossYearRange: boolean;
 }
 
 /**
  * Range-level companion to {@link useCommittedDate}: commits each date the
- * same way, but additionally refuses to apply a pair whose end date is before
- * its start date. Querying an inverted range "succeeds" with all-zero metrics,
- * which reads as "no activity in this period" instead of "impossible range".
+ * same way, but additionally refuses to apply a pair that the dashboards
+ * cannot query:
  *
- * While the pair is inverted, the previous valid pair stays applied (the same
- * latching behavior as half-typed dates) and `invertedRange` is true so the
- * page can show an inline hint. Fixing either date applies immediately.
+ * - an *inverted* pair (end before start) would "succeed" with all-zero
+ *   metrics, which reads as "no activity in this period" instead of
+ *   "impossible range";
+ * - a *cross-year* pair (start and end in different calendar years) is
+ *   rejected by the API with a 400 — goals are issued per fiscal year — which
+ *   would flash the destructive "failed to load" banner at a sensible-looking
+ *   range.
+ *
+ * While the pair is invalid, the previous valid pair stays applied (the same
+ * latching behavior as half-typed dates) and the matching flag
+ * (`invertedRange` / `crossYearRange`) is true so the page can show an inline
+ * hint. Fixing either date applies immediately.
  */
 export function useCommittedDateRange(
   rawStart: string,
@@ -87,19 +104,44 @@ export function useCommittedDateRange(
     committedEnd !== "" &&
     committedEnd < committedStart;
 
+  // Mirrors the API rule in buildFilters/buildLeasingFilters: a range spanning
+  // two calendar years mixes goal regimes and is rejected server-side. Two
+  // client-detectable ways to hit that:
+  //  - both dates set, in order, in different calendar years;
+  //  - only one date set, in a year other than the current one — the server
+  //    defaults the missing side from today's date, so the resolved range
+  //    would still cross years (picking a Dec 2025 start on the way to a
+  //    Dec 2025 → Feb 2026 range must not flash the error banner).
+  // Only flagged when the pair is not inverted so at most one hint shows.
+  const bothSetCrossYear =
+    committedStart !== "" &&
+    committedEnd !== "" &&
+    committedStart.slice(0, 4) !== committedEnd.slice(0, 4);
+  const loneDate =
+    (committedStart === "") !== (committedEnd === "")
+      ? committedStart || committedEnd
+      : "";
+  const loneDateOutsideCurrentYear =
+    loneDate !== "" &&
+    loneDate.slice(0, 4) !== String(new Date().getFullYear());
+  const crossYearRange =
+    !invertedRange && (bothSetCrossYear || loneDateOutsideCurrentYear);
+
+  const holdPrevious = invertedRange || crossYearRange;
+
   const [applied, setApplied] = useState(() => ({
-    startDate: invertedRange ? "" : committedStart,
-    endDate: invertedRange ? "" : committedEnd,
+    startDate: holdPrevious ? "" : committedStart,
+    endDate: holdPrevious ? "" : committedEnd,
   }));
 
   useEffect(() => {
-    if (invertedRange) return; // keep the previous valid pair applied
+    if (holdPrevious) return; // keep the previous valid pair applied
     setApplied((prev) =>
       prev.startDate === committedStart && prev.endDate === committedEnd
         ? prev
         : { startDate: committedStart, endDate: committedEnd },
     );
-  }, [committedStart, committedEnd, invertedRange]);
+  }, [committedStart, committedEnd, holdPrevious]);
 
-  return { ...applied, invertedRange };
+  return { ...applied, invertedRange, crossYearRange };
 }

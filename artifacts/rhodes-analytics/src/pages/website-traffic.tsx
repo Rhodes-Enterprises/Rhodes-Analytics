@@ -30,6 +30,7 @@ import {
   MONTH_NAMES,
   Breadcrumb,
   FilterSelect,
+  CrossYearRangeHint,
   InvertedRangeHint,
   LiveStatusBadge,
   TargetToggle,
@@ -45,13 +46,16 @@ export default function WebsiteTrafficPage() {
   const [development, setDevelopment] = useState(ALL);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  // Only complete, plausible dates reach the API; while a date is half-typed
-  // or the end date is before the start date, the previously applied range
-  // stays in effect (no 400 flashes or misleading all-zero metrics mid-edit).
+  // Only complete, plausible dates reach the API; while a date is half-typed,
+  // the end date is before the start date, or the range crosses calendar
+  // years (the API rejects mixed-year ranges — goals are set per year), the
+  // previously applied range stays in effect (no 400 flashes or misleading
+  // all-zero metrics mid-edit).
   const {
     startDate: appliedStartDate,
     endDate: appliedEndDate,
     invertedRange,
+    crossYearRange,
   } = useCommittedDateRange(startDate, endDate);
 
   const params: GetWebsiteTrafficParams = {
@@ -142,6 +146,7 @@ export default function WebsiteTrafficPage() {
               </div>
             </div>
             <InvertedRangeHint show={invertedRange} />
+            <CrossYearRangeHint show={crossYearRange} />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={setYtd} data-testid="button-ytd">
                 Current Year

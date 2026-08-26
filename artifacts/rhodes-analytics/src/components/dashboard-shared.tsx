@@ -194,3 +194,22 @@ export function InvertedRangeHint({ show }: { show: boolean }) {
     </p>
   );
 }
+
+/**
+ * Gentle inline hint shown under the date inputs while the typed range spans
+ * two calendar years — a range the API rejects because goals are issued per
+ * fiscal year. The dashboards keep the last valid range applied (see
+ * useCommittedDateRange) instead of surfacing the error banner.
+ */
+export function CrossYearRangeHint({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <p
+      className="mt-2 text-xs text-amber-600 dark:text-amber-500"
+      data-testid="hint-cross-year-date-range"
+    >
+      Date ranges are limited to a single calendar year because goals are set
+      per year — still showing the last valid range.
+    </p>
+  );
+}
