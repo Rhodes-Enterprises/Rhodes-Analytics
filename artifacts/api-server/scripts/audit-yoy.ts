@@ -18,6 +18,16 @@
  * it is audited with the same rigor. Business-plan goal points are also
  * checked against DM_GOALS directly.
  *
+ * The websiteUsers baselines hardcode the same PROPERTY = 'Esperanza Homes'
+ * literal the API uses, so a renamed analytics property upstream would zero
+ * both sides and every point would pass 0=0 while the chart ships zeroed
+ * traffic. The run therefore starts with the shared GA property label-drift
+ * guard (ga-property-guard.ts, same guard audit-dashboard.ts runs) over the
+ * current year to date: GA rows existing with ZERO matching an expected
+ * PROPERTY value fail the audit, naming the property values actually
+ * present; windows with total GA users below
+ * AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL are too quiet to judge and exempt.
+ *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:yoy
  *
@@ -25,12 +35,17 @@
  *   AUDIT_API_BASE       base URL of the API (default http://localhost:$PORT/api,
  *                        falling back to port 8080)
  *   AUDIT_TOLERANCE_PCT  allowed relative divergence in percent (default 0.5)
+ *   AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL
+ *                        minimum total GA users (across all properties) for
+ *                        the GA property label-drift guard to judge the
+ *                        window (default 10)
  *
  * Exits 0 when all checked points match within tolerance, 1 otherwise.
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
+import { auditGaPropertyLabels } from "./ga-property-guard";
 
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
@@ -415,6 +430,15 @@ async function main() {
   console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
 
   let anyFailed = false;
+
+  // GA property label-drift guard over the current year to date: the
+  // websiteUsers baselines below hardcode the same PROPERTY literal the API
+  // uses, so a renamed property would zero both sides and every monthly
+  // point would pass 0=0. The shared guard fails loudly instead.
+  console.log(`\n=== GA property label-drift guard (${year}-01-01..${todayChicago()}) ===`);
+  if (!(await auditGaPropertyLabels(`${year}-01-01`, todayChicago()))) {
+    anyFailed = true;
+  }
   for (const scenario of scenarios) {
     const ok = await auditScenario(scenario, months);
     if (!ok) anyFailed = true;
@@ -424,8 +448,9 @@ async function main() {
     console.error(
       "\nAUDIT FAILED: YoY chart points diverge from independent Snowflake baselines " +
         "in at least one scenario. Likely causes: join fan-out in the attribution " +
-        "dimension, a filter bound to the wrong column, wrong year selection, or " +
-        "stale cached data.",
+        "dimension, a filter bound to the wrong column, wrong year selection, " +
+        "upstream renaming of the GA PROPERTY values (see any gaProperty guard " +
+        "failure above), or stale cached data.",
     );
     process.exit(1);
   }

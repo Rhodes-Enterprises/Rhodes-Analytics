@@ -62,6 +62,19 @@
  * Quiet windows (total below AUDIT_CHANNEL_GUARD_MIN_TOTAL, e.g. day one of
  * a quarter) are exempt so they cannot false-positive.
  *
+ * The website-user metrics share the same blind-spot class through the GA
+ * property: the API's GA queries and this audit's GA baselines both
+ * hardcode PROPERTY = 'Esperanza Homes' (and the Leasing pages hardcode
+ * 'Rhodes Living'), so an upstream property rename zeroes both sides and
+ * every user-count check passes 0=0 while the dashboard ships zeroed
+ * traffic numbers. The default view therefore also runs the shared GA
+ * property label-drift guard (ga-property-guard.ts, also run by
+ * audit-yoy.ts): GA rows existing in the range with ZERO matching an
+ * expected PROPERTY value fail the audit, naming the column, the missing
+ * value, and the property values actually present. Quiet windows (total
+ * GA users across all properties below AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL)
+ * are exempt so they cannot false-positive.
+ *
  * The breakdown tables (divisions / developments) are audited per row: leads,
  * tours, and sales against CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
@@ -98,12 +111,17 @@
  *   AUDIT_CHANNEL_GUARD_MIN_TOTAL
  *                        minimum headline baseline count for the channel
  *                        label-drift guard to judge a metric (default 10)
+ *   AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL
+ *                        minimum total GA users (across all properties) for
+ *                        the GA property label-drift guard to judge the
+ *                        window (default 10)
  *
  * Exits 0 when all totals match within tolerance, 1 otherwise.
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
+import { auditGaPropertyLabels } from "./ga-property-guard";
 
 // Default to the API server's own local port (same PORT contract the server
 // uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
@@ -249,6 +267,14 @@ interface Scenario {
    * opposite channel's cells.
    */
   withChannelLabelGuard?: boolean;
+  /**
+   * Run the shared GA property label-drift guard: fail when GA rows exist
+   * for the range but zero match an expected PROPERTY value — the all-zero
+   * signature of a renamed analytics property upstream. Default view only:
+   * one guard pass per audit run is coverage enough, and the default range
+   * is the one the dashboard ships.
+   */
+  withGaPropertyGuard?: boolean;
 }
 
 interface Frag {
@@ -592,6 +618,17 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
       );
       failed = true;
     }
+  }
+
+  // ---- GA property label-drift guard ----
+  // Same blind-spot class as the channel guard, for website traffic: the
+  // API's GA queries and this audit's GA baselines hardcode the same
+  // PROPERTY literal, so an upstream rename zeroes both sides and every
+  // user-count check passes 0=0. The shared guard (ga-property-guard.ts)
+  // fails when GA rows exist for the range but zero match an expected
+  // property, naming the property values actually present.
+  if (scenario.withGaPropertyGuard) {
+    if (!(await auditGaPropertyLabels(expStart, expTo))) failed = true;
   }
 
   return { ok: !failed, rangeOk: true, overview, expStart, expTo };
@@ -1058,6 +1095,7 @@ async function main() {
       withGaBreakdowns: true,
       withRatios: true,
       withChannelLabelGuard: true,
+      withGaPropertyGuard: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
@@ -1122,7 +1160,8 @@ async function main() {
         "dimension, a filter bound to the wrong column, a GA grouping regression, " +
         "an online/onsite split keyed to the wrong channel column or with swapped " +
         "labels, upstream renaming of the 'Online'/'Onsite' channel values (see any " +
-        "chLabels guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
+        "chLabels guard failure above), upstream renaming of the GA PROPERTY values " +
+        "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
         "name, ignored date parameters, changed filters, stale cached data, or " +
         "mislabeled/hidden communities in the Community List.",
     );

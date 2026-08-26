@@ -16,3 +16,10 @@ description: How the api-server talks to Snowflake (Replit connector) and schema
 - Snowflake/proxy latency is heavy-tailed (same query 1s–7s run to run). To measure an endpoint perf change, interleave cold-start runs of both variants order-balanced and compare medians (n≥8 per variant); single-sample timings routinely point the wrong way.
 - Verify endpoint: GET /api/snowflake/status (probe query returning session context or a clear error).
 - Lesson: pnpm store contents can mask a missing package.json dependency — a dep can vanish from the manifest (e.g. in a merge) while dev still works. After merges, confirm snowflake-sdk is declared where it's imported.
+
+## audit:all flakiness under concurrent task validations
+
+The 10 RPS proxy budget is per REPL, shared by every concurrent process: task-merge validations each run audit:all, so when several tasks merge around the same time, audits 429 (one run showed 15/10 RPS while the largest single-audit burst is 11) or hit transient HTTP 500 "fetch failed" at arbitrary pre-existing query sites. Standalone reruns of the same audit pass.
+
+**How to apply:** a validation-gate audit failure showing HTTP 429 or 500 at a scenario unrelated to your change is very likely contention, not regression — rerun the single audit standalone (boot dist/index.mjs on a private port, AUDIT_API_BASE=http://localhost:PORT/api) to confirm before touching code. Retry/backoff inside the audits is the durable fix (tracked as its own task).
+
