@@ -183,6 +183,7 @@ router.get("/dashboards/leasing", async (req, res) => {
       },
       fiscalYear: data.fiscalYear,
       kpis: data.kpis,
+      funnel: data.funnel,
       matrix: data.matrix,
       communities: data.communities,
       monthly: data.monthly,

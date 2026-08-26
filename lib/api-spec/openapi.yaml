@@ -434,6 +434,8 @@ components:
               type: ["number", "null"]
           required:
             [leaseGoal, leaseTdGoal, leasesRatified, leasesCancelled, netLeases, ptgVariance, ptgPercent]
+        funnel:
+          $ref: "#/components/schemas/LeasingFunnel"
         matrix:
           type: object
           properties:
@@ -454,7 +456,29 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LeasingMonthlyPoint"
-      required: [appliedRange, fiscalYear, kpis, matrix, communities, monthly]
+      required: [appliedRange, fiscalYear, kpis, funnel, matrix, communities, monthly]
+    LeasingFunnel:
+      type: object
+      description: Upstream Rhodes Living funnel stages vs their RL_* goals
+      properties:
+        webTraffic:
+          $ref: "#/components/schemas/OwtGoalCell"
+        leads:
+          $ref: "#/components/schemas/OwtGoalCell"
+        onlineLeads:
+          $ref: "#/components/schemas/OwtGoalCell"
+        onsiteLeads:
+          $ref: "#/components/schemas/OwtGoalCell"
+        firstTours:
+          $ref: "#/components/schemas/OwtGoalCell"
+        onlineFirstTours:
+          $ref: "#/components/schemas/OwtGoalCell"
+        onsiteFirstTours:
+          $ref: "#/components/schemas/OwtGoalCell"
+        moveIns:
+          $ref: "#/components/schemas/OwtGoalCell"
+      required:
+        [webTraffic, leads, onlineLeads, onsiteLeads, firstTours, onlineFirstTours, onsiteFirstTours, moveIns]
     LeasingCommunityRow:
       type: object
       properties:

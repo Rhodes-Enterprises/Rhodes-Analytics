@@ -84,6 +84,46 @@ function resolveLeaseGoalTypes(available: string[]): Map<GoalMetric, string> {
   return out;
 }
 
+// ---------- Upstream funnel (traffic → leads → tours → move-ins) ----------
+
+type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
+
+/**
+ * Goal type candidates per funnel stage/metric, newest naming first.
+ * FY2025 only had RL_Leads / RL_Tours (no traffic or move-in goals);
+ * FY2026 added RL_Web_Traffic, RL_First_Tours (+channel splits), RL_Move_Ins.
+ */
+const FUNNEL_GOAL_CANDIDATES: Record<FunnelStage, Record<GoalMetric, string[]>> = {
+  webTraffic: { total: ["RL_Web_Traffic"], online: [], onsite: [] },
+  leads: {
+    total: ["RL_Leads"],
+    online: ["RL_Online_Leads"],
+    onsite: ["RL_Onsite_Leads"],
+  },
+  firstTours: {
+    total: ["RL_First_Tours", "RL_Tours"],
+    online: ["RL_Online_First_Tours"],
+    onsite: ["RL_Onsite_First_Tours"],
+  },
+  moveIns: { total: ["RL_Move_Ins"], online: [], onsite: [] },
+};
+
+function resolveFunnelGoalTypes(available: string[]): Map<string, string> {
+  const set = new Set(available);
+  const out = new Map<string, string>();
+  for (const stage of Object.keys(FUNNEL_GOAL_CANDIDATES) as FunnelStage[]) {
+    for (const metric of ["total", "online", "onsite"] as GoalMetric[]) {
+      for (const c of FUNNEL_GOAL_CANDIDATES[stage][metric]) {
+        if (set.has(c)) {
+          out.set(`${stage}:${metric}`, c);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 // ---------- Queries ----------
 
 interface GoalRow {
@@ -152,6 +192,70 @@ async function fetchLeaseCounts(
       AND X.${dateCol} BETWEEN ? AND ?${extra}
     GROUP BY 1, 2`;
   return cached(`rlLeases:${dateCol}:${JSON.stringify(f)}`, () =>
+    querySnowflake<LeaseRow>(sql, binds),
+  );
+}
+
+/** Count RL web sessions (GA session starts for the Rhodes Living property). */
+async function fetchTrafficCount(f: LeasingFilters): Promise<number> {
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  let communitySql = "";
+  if (f.community) {
+    communitySql = " AND MATCHED_DEVELOPMENT_NAME = ?";
+    binds.push(f.community);
+  }
+  const sql = `
+    SELECT COUNT(*) AS N
+    FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+    WHERE PROPERTY = 'Rhodes Living'
+      AND IS_SESSION_START = 'Yes'
+      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}`;
+  return cached(`rlTraffic:${JSON.stringify(f)}`, async () => {
+    const rows = await querySnowflake<{ N: number }>(sql, binds);
+    return Number(rows[0]?.N) || 0;
+  });
+}
+
+/**
+ * Count RL contacts by community/channel for a funnel stage.
+ * - leads: contacts created in range with an RL community of interest
+ * - firstTours: contacts whose first RL tour date falls in range
+ * - moveIns: contacts whose first RL move-in date falls in range
+ */
+async function fetchContactStageCounts(
+  f: LeasingFilters,
+  stage: "leads" | "firstTours" | "moveIns",
+): Promise<LeaseRow[]> {
+  const dateExpr = {
+    leads: "X.CONTACT_CREATE_DATE",
+    firstTours: "X.RL_MIN_FIRST_TOUR_DATE",
+    moveIns: "TO_DATE(X.RL_MIN_MOVE_IN_DATE)",
+  }[stage];
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  const parts: string[] = [];
+  if (stage === "leads") {
+    // A lead is a contact with an RL community of interest.
+    parts.push(
+      "X.RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+    );
+  }
+  if (f.community) {
+    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("X.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const sql = `
+    SELECT TRIM(X.RL_COMMUNITY_OF_INTEREST) AS COMMUNITY,
+           X.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
+           COUNT(*) AS N
+    FROM DM_CONTACTS X
+    WHERE ${dateExpr} BETWEEN ? AND ?${extra}
+    GROUP BY 1, 2`;
+  return cached(`rlFunnel:${stage}:${JSON.stringify(f)}`, () =>
     querySnowflake<LeaseRow>(sql, binds),
   );
 }
@@ -275,7 +379,10 @@ export async function getLeasingDashboard(f: LeasingFilters) {
 
   const available = await listGoalTypes(fiscalYear);
   const goalTypeByMetric = resolveLeaseGoalTypes(available);
-  const types = [...new Set(goalTypeByMetric.values())];
+  const funnelGoalTypes = resolveFunnelGoalTypes(available);
+  const types = [
+    ...new Set([...goalTypeByMetric.values(), ...funnelGoalTypes.values()]),
+  ];
 
   // When a channel filter is applied, every displayed target must share the
   // actuals' scope: "total"/"net" compare against that channel's goal, and
@@ -291,15 +398,29 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     return m ? goalTypeByMetric.get(m) : undefined;
   })();
 
-  const [goals, ratified, cancelled, monthlyRatified, monthlyCancelled, monthlyGoal] =
-    await Promise.all([
-      fetchGoals(f, fiscalYear, types),
-      fetchLeaseCounts(f, "LEASE_RATIFIED_DATE"),
-      fetchLeaseCounts(f, "CANCELLATION_DATE"),
-      fetchMonthly(f, "LEASE_RATIFIED_DATE"),
-      fetchMonthly(f, "CANCELLATION_DATE"),
-      fetchMonthlyGoal(f, fiscalYear, trendGoalType),
-    ]);
+  const [
+    goals,
+    ratified,
+    cancelled,
+    monthlyRatified,
+    monthlyCancelled,
+    monthlyGoal,
+    traffic,
+    leadRows,
+    tourRows,
+    moveInRows,
+  ] = await Promise.all([
+    fetchGoals(f, fiscalYear, types),
+    fetchLeaseCounts(f, "LEASE_RATIFIED_DATE"),
+    fetchLeaseCounts(f, "CANCELLATION_DATE"),
+    fetchMonthly(f, "LEASE_RATIFIED_DATE"),
+    fetchMonthly(f, "CANCELLATION_DATE"),
+    fetchMonthlyGoal(f, fiscalYear, trendGoalType),
+    fetchTrafficCount(f),
+    fetchContactStageCounts(f, "leads"),
+    fetchContactStageCounts(f, "firstTours"),
+    fetchContactStageCounts(f, "moveIns"),
+  ]);
 
   const goalTotal = (
     metric: GoalMetric,
@@ -337,6 +458,59 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     netLeases: actuals.net,
     ptgVariance: actuals.ratified - leaseTdGoal,
     ptgPercent: ptg(actuals.ratified, leaseTdGoal),
+  };
+
+  // Upstream funnel — actuals vs the RL_* stage goals. Stages without a
+  // channel-split goal (traffic, move-ins) show a null target when a channel
+  // filter is applied rather than comparing against an all-channel goal.
+  const funnelGoalTotal = (
+    stage: FunnelStage,
+    metric: GoalMetric,
+    kind: "FULL_SPAN" | "TO_DATE",
+  ) => {
+    const eff = effectiveMetric(metric);
+    const gt = eff ? funnelGoalTypes.get(`${stage}:${eff}`) : undefined;
+    if (!gt) return 0;
+    let total = 0;
+    for (const r of goals) {
+      if (r.GOAL_TYPE === gt) total += Number(r[kind]) || 0;
+    }
+    return total;
+  };
+  const funnelCell = (stage: FunnelStage, metric: GoalMetric, actual: number) => {
+    const toDateGoal = funnelGoalTotal(stage, metric, "TO_DATE");
+    return {
+      fullSpanGoal: funnelGoalTotal(stage, metric, "FULL_SPAN"),
+      toDateGoal,
+      actual,
+      ptgPercent: ptg(actual, toDateGoal),
+    };
+  };
+  const funnel = {
+    webTraffic: funnelCell("webTraffic", "total", traffic),
+    leads: funnelCell("leads", "total", sumRows(leadRows)),
+    onlineLeads: funnelCell(
+      "leads",
+      "online",
+      sumRows(leadRows, (r) => r.CHANNEL === "Online"),
+    ),
+    onsiteLeads: funnelCell(
+      "leads",
+      "onsite",
+      sumRows(leadRows, (r) => r.CHANNEL === "Onsite"),
+    ),
+    firstTours: funnelCell("firstTours", "total", sumRows(tourRows)),
+    onlineFirstTours: funnelCell(
+      "firstTours",
+      "online",
+      sumRows(tourRows, (r) => r.CHANNEL === "Online"),
+    ),
+    onsiteFirstTours: funnelCell(
+      "firstTours",
+      "onsite",
+      sumRows(tourRows, (r) => r.CHANNEL === "Onsite"),
+    ),
+    moveIns: funnelCell("moveIns", "total", sumRows(moveInRows)),
   };
 
   // Goal matrix (ratified vs targets by channel; net vs the ratified goal)
@@ -406,6 +580,7 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     fiscalYear,
     goalTypes: Object.fromEntries(goalTypeByMetric),
     kpis,
+    funnel,
     matrix,
     communities,
     monthly,

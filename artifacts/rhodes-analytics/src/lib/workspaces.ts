@@ -52,7 +52,7 @@ export const WORKSPACES: Workspace[] = [
         slug: "leasing",
         name: "Rhodes Living Leasing",
         description:
-          "Leases ratified, cancelled, and net vs RL goals for the Rhodes Living communities.",
+          "Full Rhodes Living funnel — web traffic, leads, tours, move-ins — plus leases ratified, cancelled, and net vs RL goals.",
         status: "available",
         icon: KeyRound,
       },

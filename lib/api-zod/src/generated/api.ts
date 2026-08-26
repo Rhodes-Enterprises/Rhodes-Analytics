@@ -426,6 +426,56 @@ export const GetLeasingDashboardResponse = zod.object({
   "ptgVariance": zod.number(),
   "ptgPercent": zod.number().nullable()
 }),
+  "funnel": zod.object({
+  "webTraffic": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "leads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "onlineLeads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "onsiteLeads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "firstTours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "onlineFirstTours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "onsiteFirstTours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "moveIns": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
+}).describe('Upstream Rhodes Living funnel stages vs their RL_\* goals'),
   "matrix": zod.object({
   "total": zod.object({
   "fullSpanGoal": zod.number(),

@@ -59,6 +59,20 @@ export type LeasingDashboardMatrix = {
   net: OwtGoalCell;
 };
 
+/**
+ * Upstream Rhodes Living funnel stages vs their RL_* goals
+ */
+export interface LeasingFunnel {
+  webTraffic: OwtGoalCell;
+  leads: OwtGoalCell;
+  onlineLeads: OwtGoalCell;
+  onsiteLeads: OwtGoalCell;
+  firstTours: OwtGoalCell;
+  onlineFirstTours: OwtGoalCell;
+  onsiteFirstTours: OwtGoalCell;
+  moveIns: OwtGoalCell;
+}
+
 export interface LeasingCommunityRow {
   community: string;
   fullSpanGoal: number;
@@ -84,6 +98,7 @@ export interface LeasingDashboard {
   appliedRange: LeasingDashboardAppliedRange;
   fiscalYear: number;
   kpis: LeasingDashboardKpis;
+  funnel: LeasingFunnel;
   matrix: LeasingDashboardMatrix;
   communities: LeasingCommunityRow[];
   monthly: LeasingMonthlyPoint[];

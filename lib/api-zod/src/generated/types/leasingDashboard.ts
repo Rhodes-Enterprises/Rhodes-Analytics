@@ -9,12 +9,14 @@ import type { LeasingCommunityRow } from './leasingCommunityRow';
 import type { LeasingDashboardAppliedRange } from './leasingDashboardAppliedRange';
 import type { LeasingDashboardKpis } from './leasingDashboardKpis';
 import type { LeasingDashboardMatrix } from './leasingDashboardMatrix';
+import type { LeasingFunnel } from './leasingFunnel';
 import type { LeasingMonthlyPoint } from './leasingMonthlyPoint';
 
 export interface LeasingDashboard {
   appliedRange: LeasingDashboardAppliedRange;
   fiscalYear: number;
   kpis: LeasingDashboardKpis;
+  funnel: LeasingFunnel;
   matrix: LeasingDashboardMatrix;
   communities: LeasingCommunityRow[];
   monthly: LeasingMonthlyPoint[];

@@ -216,6 +216,7 @@ export default function LeasingPage() {
         {dash.data && (
           <>
             <KpiRow data={dash.data} />
+            <FunnelMatrix data={dash.data} />
             <GoalMatrix data={dash.data} />
             <CommunityTable data={dash.data} />
             <MonthlyChart data={dash.data} />
@@ -418,6 +419,50 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
               label="Net Leases"
               cell={m.net}
               sub="Ratified − cancelled, vs the ratified goal"
+            />
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function FunnelMatrix({ data }: { data: LeasingDashboard }) {
+  const fu = data.funnel;
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">
+          Leasing Funnel — Actual vs Target
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table className="w-full text-sm" data-testid="table-funnel-matrix">
+          <thead>
+            <tr className="border-b text-muted-foreground">
+              <th className="py-2 pr-4 text-left font-medium">Stage</th>
+              <th className="py-2 px-3 text-right font-medium">Full Span Goal</th>
+              <th className="py-2 px-3 text-right font-medium">To Date Goal</th>
+              <th className="py-2 px-3 text-right font-medium">Actual</th>
+              <th className="py-2 pl-3 text-right font-medium">PTG %</th>
+            </tr>
+          </thead>
+          <tbody>
+            <MatrixRow
+              label="Web Traffic"
+              cell={fu.webTraffic}
+              sub="Sessions on the Rhodes Living site (site-wide, no channel split)"
+            />
+            <MatrixRow label="Leads" cell={fu.leads} />
+            <MatrixRow label="Online Leads" cell={fu.onlineLeads} />
+            <MatrixRow label="Onsite Leads" cell={fu.onsiteLeads} />
+            <MatrixRow label="First Tours" cell={fu.firstTours} />
+            <MatrixRow label="Online First Tours" cell={fu.onlineFirstTours} />
+            <MatrixRow label="Onsite First Tours" cell={fu.onsiteFirstTours} />
+            <MatrixRow
+              label="Move-Ins"
+              cell={fu.moveIns}
+              sub="First move-in date per contact (no channel-split goal)"
             />
           </tbody>
         </table>
