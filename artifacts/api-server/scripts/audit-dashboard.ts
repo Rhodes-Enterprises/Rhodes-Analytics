@@ -25,6 +25,12 @@
  * wrong range. Baselines are bound to that expected range, never to the
  * response's echo of it.
  *
+ * Headline totals are checked in every scenario: leads, tours, gross sales,
+ * total website users, and NEW website users (trafficMatrix.newWebsiteUsers).
+ * The two user counts come from the API's overall () grouping-set row —
+ * picked via G_COMPANY=1 — which can regress independently of the per-row
+ * values, so both get their own scalar GA baselines.
+ *
  * The breakdown tables (divisions / developments) are audited per row: leads,
  * tours, and sales against CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
@@ -77,6 +83,8 @@ interface OverviewResponse {
   trafficMatrix: {
     online: { websiteUsers: { actual: number } };
     total: { leads: { actual: number }; tours: { actual: number } };
+    /** Headline NEW-users count from the overall () grouping-set row */
+    newWebsiteUsers: number;
   };
   divisions: DivisionRow[];
   developments: DevelopmentRow[];
@@ -270,7 +278,7 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
   // Independent baselines — bound to the EXPECTED dates (start..elapsed
   // cutoff), same window the API applies to actuals, no attribution join
   // that could fan out counts.
-  const [leads, tours, sales, users] = await Promise.all([
+  const [leads, tours, sales, users, newUsers] = await Promise.all([
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_CONTACTS C
        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}`,
@@ -292,6 +300,15 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
        WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
       [expStart, expTo, ...gf.binds],
     ),
+    // NEW-users headline: same GA source and filters, restricted to first-time
+    // users. The API takes this from the overall () grouping-set row (picked
+    // via G_COMPANY=1), which can regress independently of the per-row values.
+    countScalar(
+      `SELECT COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS N
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
+      [expStart, expTo, ...gf.binds],
+    ),
   ]);
 
   const checks: { name: string; api: number; baseline: number }[] = [
@@ -299,6 +316,7 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
     { name: "tours", api: overview.trafficMatrix.total.tours.actual, baseline: tours },
     { name: "sales", api: overview.kpis.grossSales, baseline: sales },
     { name: "users", api: overview.trafficMatrix.online.websiteUsers.actual, baseline: users },
+    { name: "newUsers", api: overview.trafficMatrix.newWebsiteUsers, baseline: newUsers },
   ];
 
   let failed = false;
@@ -312,7 +330,7 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
     const ok = divergencePct <= TOLERANCE_PCT;
     const status = ok ? "OK  " : "FAIL";
     console.log(
-      `${status} ${c.name.padEnd(6)} api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`,
+      `${status} ${c.name.padEnd(8)} api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`,
     );
     if (!ok) failed = true;
   }
