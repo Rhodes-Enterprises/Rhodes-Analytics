@@ -212,6 +212,170 @@ export interface OwtYoy {
   measures: OwtYoyMeasuresItem[];
 }
 
+export interface AppliedRange {
+  startDate: string;
+  endDate: string;
+  toDate: string;
+  target: string;
+}
+
+export type WebsiteTrafficKpis = {
+  totalUsers: number;
+  newUsers: number;
+  sessions: number;
+  engagedSessions: number;
+  pageViews: number;
+  engagementRate: number;
+  fullSpanGoal: number;
+  toDateGoal: number;
+  /** @nullable */
+  ptgPercent: number | null;
+};
+
+export type WebsiteTrafficMonthlyItem = {
+  month: number;
+  users: number;
+  newUsers: number;
+  sessions: number;
+};
+
+export type WebsiteTrafficChannelsItem = {
+  name: string;
+  users: number;
+  sessions: number;
+};
+
+export type WebsiteTrafficDevicesItem = {
+  name: string;
+  users: number;
+};
+
+export type WebsiteTrafficDevelopmentsItem = {
+  development: string;
+  division: string;
+  users: number;
+  newUsers: number;
+  sessions: number;
+};
+
+export interface WebsiteTraffic {
+  appliedRange: AppliedRange;
+  kpis: WebsiteTrafficKpis;
+  monthly: WebsiteTrafficMonthlyItem[];
+  channels: WebsiteTrafficChannelsItem[];
+  devices: WebsiteTrafficDevicesItem[];
+  developments: WebsiteTrafficDevelopmentsItem[];
+}
+
+export interface FunnelBreakdownRow {
+  division: string;
+  total: number;
+  online: number;
+  onsite: number;
+  toDateGoal: number;
+  /** @nullable */
+  ptgPercent: number | null;
+}
+
+export type FunnelMetricDashboardMetric = typeof FunnelMetricDashboardMetric[keyof typeof FunnelMetricDashboardMetric];
+
+
+export const FunnelMetricDashboardMetric = {
+  leads: 'leads',
+  tours: 'tours',
+  'gross-sales': 'gross-sales',
+} as const;
+
+export type FunnelMetricDashboardKpis = {
+  total: number;
+  online: number;
+  onsite: number;
+  fullSpanGoal: number;
+  toDateGoal: number;
+  /** @nullable */
+  ptgPercent: number | null;
+  onlineToDateGoal: number;
+  /** @nullable */
+  onlinePtgPercent: number | null;
+  onsiteToDateGoal: number;
+  /** @nullable */
+  onsitePtgPercent: number | null;
+};
+
+export type FunnelMetricDashboardMonthlyItem = {
+  month: number;
+  total: number;
+  online: number;
+  onsite: number;
+  goal: number;
+};
+
+export type FunnelMetricDashboardSourcesItem = {
+  name: string;
+  count: number;
+};
+
+export type FunnelMetricDashboardDevelopmentsItem = FunnelBreakdownRow & {
+  development: string;
+};
+
+export interface FunnelMetricDashboard {
+  appliedRange: AppliedRange;
+  metric: FunnelMetricDashboardMetric;
+  kpis: FunnelMetricDashboardKpis;
+  monthly: FunnelMetricDashboardMonthlyItem[];
+  sources: FunnelMetricDashboardSourcesItem[];
+  divisions: FunnelBreakdownRow[];
+  developments: FunnelMetricDashboardDevelopmentsItem[];
+}
+
+export type EhiGoalsMetricsItem = {
+  metric: string;
+  label: string;
+  /** @nullable */
+  goalType: string | null;
+  fullYearGoal: number;
+  toDateGoal: number;
+  actual: number;
+  /** @nullable */
+  attainmentPct: number | null;
+  /** @nullable */
+  ptgPercent: number | null;
+};
+
+export type EhiGoalsDivisionsItem = {
+  division: string;
+  metric: string;
+  label: string;
+  toDateGoal: number;
+  actual: number;
+  /** @nullable */
+  ptgPercent: number | null;
+};
+
+export interface EhiGoals {
+  appliedRange: AppliedRange;
+  metrics: EhiGoalsMetricsItem[];
+  divisions: EhiGoalsDivisionsItem[];
+}
+
+export type CommunityListCommunitiesItem = {
+  development: string;
+  division: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  isRental: boolean;
+  hasGoals: boolean;
+  leadsYtd: number;
+  toursYtd: number;
+  salesYtd: number;
+};
+
+export interface CommunityList {
+  communities: CommunityListCommunitiesItem[];
+}
+
 export interface SnowflakeStatus {
   connected: boolean;
   version?: string;
@@ -274,6 +438,56 @@ endDate?: OwtEndDateParameter;
 export type GetOwtYoyParams = {
 company?: OwtCompanyParameter;
 development?: OwtDevelopmentParameter;
+};
+
+export type GetWebsiteTrafficParams = {
+target?: OwtTargetParameter;
+company?: OwtCompanyParameter;
+development?: OwtDevelopmentParameter;
+/**
+ * YYYY-MM-DD; defaults to start of the current quarter
+ */
+startDate?: OwtStartDateParameter;
+/**
+ * YYYY-MM-DD; defaults to end of the current quarter
+ */
+endDate?: OwtEndDateParameter;
+};
+
+export type GetFunnelMetricParams = {
+metric: GetFunnelMetricMetric;
+target?: OwtTargetParameter;
+company?: OwtCompanyParameter;
+development?: OwtDevelopmentParameter;
+/**
+ * YYYY-MM-DD; defaults to start of the current quarter
+ */
+startDate?: OwtStartDateParameter;
+/**
+ * YYYY-MM-DD; defaults to end of the current quarter
+ */
+endDate?: OwtEndDateParameter;
+};
+
+export type GetFunnelMetricMetric = typeof GetFunnelMetricMetric[keyof typeof GetFunnelMetricMetric];
+
+
+export const GetFunnelMetricMetric = {
+  leads: 'leads',
+  tours: 'tours',
+  'gross-sales': 'gross-sales',
+} as const;
+
+export type GetEhiGoalsParams = {
+target?: OwtTargetParameter;
+/**
+ * YYYY-MM-DD; defaults to start of the current quarter
+ */
+startDate?: OwtStartDateParameter;
+/**
+ * YYYY-MM-DD; defaults to end of the current quarter
+ */
+endDate?: OwtEndDateParameter;
 };
 
 export type GetLeasingDashboardParams = {

@@ -1,0 +1,399 @@
+import { useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Bar,
+  Line,
+  BarChart,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RTooltip,
+  Legend,
+} from "recharts";
+import {
+  useGetFunnelMetric,
+  useGetOwtFilters,
+  useGetSnowflakeStatus,
+  type GetFunnelMetricParams,
+  type GetFunnelMetricMetric,
+} from "@workspace/api-client-react";
+import { Layout } from "@/components/layout";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { cn } from "@/lib/utils";
+import {
+  ALL,
+  MONTH_NAMES,
+  Breadcrumb,
+  FilterSelect,
+  LiveStatusBadge,
+  TargetToggle,
+  fmt,
+  fmtPct,
+  ptgColor,
+  ptgBg,
+  type TargetValue,
+} from "@/components/dashboard-shared";
+
+interface FunnelPageConfig {
+  metric: GetFunnelMetricMetric;
+  title: string;
+  unit: string;
+  color: string;
+}
+
+function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
+  const [target, setTarget] = useState<TargetValue>("goal");
+  const [company, setCompany] = useState(ALL);
+  const [development, setDevelopment] = useState(ALL);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+
+  const params: GetFunnelMetricParams = {
+    metric,
+    target,
+    ...(company !== ALL && { company }),
+    ...(development !== ALL && { development }),
+    ...(startDate && { startDate }),
+    ...(endDate && { endDate }),
+  };
+
+  const filters = useGetOwtFilters();
+  const dash = useGetFunnelMetric(params);
+  const status = useGetSnowflakeStatus();
+
+  const developments = useMemo(() => {
+    const list = filters.data?.developments ?? [];
+    const scoped = company === ALL ? list : list.filter((d) => d.company === company);
+    return [...new Set(scoped.map((d) => d.development))];
+  }, [filters.data, company]);
+
+  const setYtd = () => {
+    const year = new Date().getFullYear();
+    setStartDate(`${year}-01-01`);
+    setEndDate(`${year}-12-31`);
+  };
+
+  return (
+    <Layout>
+      <div className="space-y-6">
+        <Breadcrumb page={title} />
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
+            {dash.data && (
+              <p className="text-sm text-muted-foreground mt-1">
+                {dash.data.appliedRange.startDate} → {dash.data.appliedRange.endDate} ·
+                progress through {dash.data.appliedRange.toDate}
+              </p>
+            )}
+            <LiveStatusBadge
+              status={status.data}
+              checking={status.isLoading}
+              lastRefreshed={dash.dataUpdatedAt}
+            />
+          </div>
+          <TargetToggle target={target} onChange={setTarget} />
+        </div>
+
+        <Card>
+          <CardContent className="pt-4 pb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 items-end">
+              <FilterSelect
+                label="Division"
+                value={company}
+                onChange={(v) => {
+                  setCompany(v);
+                  setDevelopment(ALL);
+                }}
+                options={filters.data?.companies ?? []}
+                testId="select-division"
+              />
+              <FilterSelect
+                label="Development"
+                value={development}
+                onChange={setDevelopment}
+                options={developments}
+                testId="select-development"
+              />
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Start</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  data-testid="input-start-date"
+                  className="w-full h-9 rounded-md border bg-background px-2 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">End</span>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  data-testid="input-end-date"
+                  className="w-full h-9 rounded-md border bg-background px-2 text-sm"
+                />
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={setYtd} data-testid="button-ytd">
+                Current Year
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setCompany(ALL);
+                  setDevelopment(ALL);
+                  setStartDate("");
+                  setEndDate("");
+                }}
+                data-testid="button-clear-filters"
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Clear filters
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {dash.isError && (
+          <Alert variant="destructive">
+            <AlertTitle>Failed to load dashboard data</AlertTitle>
+            <AlertDescription>
+              {(dash.error as Error)?.message ?? "Snowflake query failed."}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {dash.isLoading && (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-28" />
+            ))}
+          </div>
+        )}
+
+        {dash.data && (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+              <KpiCell
+                title={`Total ${unit}`}
+                value={dash.data.kpis.total}
+                goal={dash.data.kpis.toDateGoal}
+                ptgPercent={dash.data.kpis.ptgPercent}
+                testId="kpi-total"
+              />
+              <KpiCell
+                title={`Online ${unit}`}
+                value={dash.data.kpis.online}
+                goal={dash.data.kpis.onlineToDateGoal}
+                ptgPercent={dash.data.kpis.onlinePtgPercent}
+                testId="kpi-online"
+              />
+              <KpiCell
+                title={`Onsite ${unit}`}
+                value={dash.data.kpis.onsite}
+                goal={dash.data.kpis.onsiteToDateGoal}
+                ptgPercent={dash.data.kpis.onsitePtgPercent}
+                testId="kpi-onsite"
+              />
+              <Card data-testid="kpi-full-span-goal">
+                <CardContent className="pt-4 pb-4">
+                  <p className="text-xs text-muted-foreground">Full-Span Goal</p>
+                  <p className="text-2xl font-bold mt-1">{fmt(dash.data.kpis.fullSpanGoal)}</p>
+                </CardContent>
+              </Card>
+              <Card data-testid="kpi-td-goal">
+                <CardContent className="pt-4 pb-4">
+                  <p className="text-xs text-muted-foreground">To-Date Goal</p>
+                  <p className="text-2xl font-bold mt-1">{fmt(dash.data.kpis.toDateGoal)}</p>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Monthly {unit} vs Goal</CardTitle>
+                </CardHeader>
+                <CardContent className="h-72">
+                  <ResponsiveContainer>
+                    <ComposedChart
+                      data={dash.data.monthly.map((m) => ({
+                        ...m,
+                        name: MONTH_NAMES[m.month - 1],
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="name" fontSize={12} />
+                      <YAxis fontSize={12} tickFormatter={(v) => fmt(v)} />
+                      <RTooltip formatter={(v: number) => fmt(v)} />
+                      <Legend />
+                      <Bar dataKey="online" name="Online" stackId="a" fill={color} radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="onsite" name="Onsite" stackId="a" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                      <Line
+                        type="monotone"
+                        dataKey="goal"
+                        name="Monthly Goal"
+                        stroke="#ef4444"
+                        strokeDasharray="5 3"
+                        dot={false}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{unit} by Lead Source</CardTitle>
+                </CardHeader>
+                <CardContent className="h-72">
+                  <ResponsiveContainer>
+                    <BarChart data={dash.data.sources} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis type="number" fontSize={12} tickFormatter={(v) => fmt(v)} />
+                      <YAxis type="category" dataKey="name" width={140} fontSize={11} />
+                      <RTooltip formatter={(v: number) => fmt(v)} />
+                      <Bar dataKey="count" name={unit} fill={color} radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            </div>
+
+            <BreakdownTable
+              title="Division Summary"
+              rows={dash.data.divisions}
+              unit={unit}
+              testId="table-divisions"
+            />
+            <BreakdownTable
+              title="Development Summary"
+              rows={dash.data.developments.map((d) => ({
+                ...d,
+                division: `${d.development} · ${d.division}`,
+              }))}
+              unit={unit}
+              firstColumn="Development"
+              testId="table-developments"
+            />
+          </>
+        )}
+      </div>
+    </Layout>
+  );
+}
+
+function KpiCell({
+  title,
+  value,
+  goal,
+  ptgPercent,
+  testId,
+}: {
+  title: string;
+  value: number;
+  goal: number;
+  ptgPercent: number | null;
+  testId: string;
+}) {
+  return (
+    <Card data-testid={testId}>
+      <CardContent className="pt-4 pb-4">
+        <p className="text-xs text-muted-foreground">{title}</p>
+        <p className="text-2xl font-bold mt-1">{fmt(value)}</p>
+        {goal > 0 && (
+          <p className={cn("text-xs mt-1 font-medium", ptgColor(ptgPercent))}>
+            {fmtPct(ptgPercent)} vs TD goal {fmt(goal)}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BreakdownTable({
+  title,
+  rows,
+  unit,
+  firstColumn = "Division",
+  testId,
+}: {
+  title: string;
+  rows: {
+    division: string;
+    total: number;
+    online: number;
+    onsite: number;
+    toDateGoal: number;
+    ptgPercent: number | null;
+  }[];
+  unit: string;
+  firstColumn?: string;
+  testId: string;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table className="w-full text-sm" data-testid={testId}>
+          <thead>
+            <tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="py-2 pr-4">{firstColumn}</th>
+              <th className="py-2 pr-4 text-right">Total {unit}</th>
+              <th className="py-2 pr-4 text-right">Online</th>
+              <th className="py-2 pr-4 text-right">Onsite</th>
+              <th className="py-2 pr-4 text-right">TD Goal</th>
+              <th className="py-2 text-right">PTG</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.division} className="border-b last:border-0">
+                <td className="py-1.5 pr-4 font-medium">{r.division}</td>
+                <td className="py-1.5 pr-4 text-right">{fmt(r.total)}</td>
+                <td className="py-1.5 pr-4 text-right">{fmt(r.online)}</td>
+                <td className="py-1.5 pr-4 text-right">{fmt(r.onsite)}</td>
+                <td className="py-1.5 pr-4 text-right">{fmt(r.toDateGoal)}</td>
+                <td className="py-1.5 text-right">
+                  <span
+                    className={cn(
+                      "inline-block rounded px-1.5 py-0.5 font-medium",
+                      ptgColor(r.ptgPercent),
+                      ptgBg(r.ptgPercent),
+                    )}
+                  >
+                    {fmtPct(r.ptgPercent)}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function LeadsPage() {
+  return <FunnelMetricPage metric="leads" title="Leads" unit="Leads" color="#3b82f6" />;
+}
+
+export function ToursPage() {
+  return <FunnelMetricPage metric="tours" title="Tours" unit="Tours" color="#8b5cf6" />;
+}
+
+export function GrossSalesPage() {
+  return (
+    <FunnelMetricPage metric="gross-sales" title="Gross Sales" unit="Sales" color="#10b981" />
+  );
+}

@@ -88,6 +88,118 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/website-traffic:
+    get:
+      operationId: getWebsiteTraffic
+      tags: [dashboards]
+      summary: Website Traffic dashboard data (Google Analytics)
+      parameters:
+        - $ref: "#/components/parameters/OwtTarget"
+        - $ref: "#/components/parameters/OwtCompany"
+        - $ref: "#/components/parameters/OwtDevelopment"
+        - $ref: "#/components/parameters/OwtStartDate"
+        - $ref: "#/components/parameters/OwtEndDate"
+      responses:
+        "200":
+          description: Website traffic payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebsiteTraffic"
+        "400":
+          description: Invalid date or range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/funnel:
+    get:
+      operationId: getFunnelMetric
+      tags: [dashboards]
+      summary: Funnel metric dashboard data (Leads, Tours, Gross Sales)
+      parameters:
+        - name: metric
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [leads, tours, gross-sales]
+        - $ref: "#/components/parameters/OwtTarget"
+        - $ref: "#/components/parameters/OwtCompany"
+        - $ref: "#/components/parameters/OwtDevelopment"
+        - $ref: "#/components/parameters/OwtStartDate"
+        - $ref: "#/components/parameters/OwtEndDate"
+      responses:
+        "200":
+          description: Funnel metric payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FunnelMetricDashboard"
+        "400":
+          description: Invalid date, range, or metric
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/ehi-goals:
+    get:
+      operationId: getEhiGoals
+      tags: [dashboards]
+      summary: EHI Goals dashboard data (full fiscal year attainment)
+      parameters:
+        - $ref: "#/components/parameters/OwtTarget"
+        - $ref: "#/components/parameters/OwtStartDate"
+        - $ref: "#/components/parameters/OwtEndDate"
+      responses:
+        "200":
+          description: EHI goals payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EhiGoals"
+        "400":
+          description: Invalid date or range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/communities:
+    get:
+      operationId: getCommunities
+      tags: [dashboards]
+      summary: Community List directory with YTD funnel counts
+      responses:
+        "200":
+          description: Community list payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommunityList"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
   /snowflake/status:
     get:
       operationId: getSnowflakeStatus
@@ -586,6 +698,299 @@ components:
                   required: [month, currentYear, priorYear, goal]
             required: [measure, points]
       required: [year, priorYear, measures]
+    AppliedRange:
+      type: object
+      properties:
+        startDate:
+          type: string
+        endDate:
+          type: string
+        toDate:
+          type: string
+        target:
+          type: string
+      required: [startDate, endDate, toDate, target]
+    WebsiteTraffic:
+      type: object
+      properties:
+        appliedRange:
+          $ref: "#/components/schemas/AppliedRange"
+        kpis:
+          type: object
+          properties:
+            totalUsers:
+              type: number
+            newUsers:
+              type: number
+            sessions:
+              type: number
+            engagedSessions:
+              type: number
+            pageViews:
+              type: number
+            engagementRate:
+              type: number
+            fullSpanGoal:
+              type: number
+            toDateGoal:
+              type: number
+            ptgPercent:
+              type: ["number", "null"]
+          required:
+            [
+              totalUsers,
+              newUsers,
+              sessions,
+              engagedSessions,
+              pageViews,
+              engagementRate,
+              fullSpanGoal,
+              toDateGoal,
+              ptgPercent,
+            ]
+        monthly:
+          type: array
+          items:
+            type: object
+            properties:
+              month:
+                type: number
+              users:
+                type: number
+              newUsers:
+                type: number
+              sessions:
+                type: number
+            required: [month, users, newUsers, sessions]
+        channels:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              users:
+                type: number
+              sessions:
+                type: number
+            required: [name, users, sessions]
+        devices:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              users:
+                type: number
+            required: [name, users]
+        developments:
+          type: array
+          items:
+            type: object
+            properties:
+              development:
+                type: string
+              division:
+                type: string
+              users:
+                type: number
+              newUsers:
+                type: number
+              sessions:
+                type: number
+            required: [development, division, users, newUsers, sessions]
+      required: [appliedRange, kpis, monthly, channels, devices, developments]
+    FunnelBreakdownRow:
+      type: object
+      properties:
+        division:
+          type: string
+        total:
+          type: number
+        online:
+          type: number
+        onsite:
+          type: number
+        toDateGoal:
+          type: number
+        ptgPercent:
+          type: ["number", "null"]
+      required: [division, total, online, onsite, toDateGoal, ptgPercent]
+    FunnelMetricDashboard:
+      type: object
+      properties:
+        appliedRange:
+          $ref: "#/components/schemas/AppliedRange"
+        metric:
+          type: string
+          enum: [leads, tours, gross-sales]
+        kpis:
+          type: object
+          properties:
+            total:
+              type: number
+            online:
+              type: number
+            onsite:
+              type: number
+            fullSpanGoal:
+              type: number
+            toDateGoal:
+              type: number
+            ptgPercent:
+              type: ["number", "null"]
+            onlineToDateGoal:
+              type: number
+            onlinePtgPercent:
+              type: ["number", "null"]
+            onsiteToDateGoal:
+              type: number
+            onsitePtgPercent:
+              type: ["number", "null"]
+          required:
+            [
+              total,
+              online,
+              onsite,
+              fullSpanGoal,
+              toDateGoal,
+              ptgPercent,
+              onlineToDateGoal,
+              onlinePtgPercent,
+              onsiteToDateGoal,
+              onsitePtgPercent,
+            ]
+        monthly:
+          type: array
+          items:
+            type: object
+            properties:
+              month:
+                type: number
+              total:
+                type: number
+              online:
+                type: number
+              onsite:
+                type: number
+              goal:
+                type: number
+            required: [month, total, online, onsite, goal]
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              count:
+                type: number
+            required: [name, count]
+        divisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunnelBreakdownRow"
+        developments:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/FunnelBreakdownRow"
+              - type: object
+                properties:
+                  development:
+                    type: string
+                required: [development]
+      required: [appliedRange, metric, kpis, monthly, sources, divisions, developments]
+    EhiGoals:
+      type: object
+      properties:
+        appliedRange:
+          $ref: "#/components/schemas/AppliedRange"
+        metrics:
+          type: array
+          items:
+            type: object
+            properties:
+              metric:
+                type: string
+              label:
+                type: string
+              goalType:
+                type: ["string", "null"]
+              fullYearGoal:
+                type: number
+              toDateGoal:
+                type: number
+              actual:
+                type: number
+              attainmentPct:
+                type: ["number", "null"]
+              ptgPercent:
+                type: ["number", "null"]
+            required:
+              [metric, label, goalType, fullYearGoal, toDateGoal, actual, attainmentPct, ptgPercent]
+        divisions:
+          type: array
+          items:
+            type: object
+            properties:
+              division:
+                type: string
+              metric:
+                type: string
+              label:
+                type: string
+              toDateGoal:
+                type: number
+              actual:
+                type: number
+              ptgPercent:
+                type: ["number", "null"]
+            required: [division, metric, label, toDateGoal, actual, ptgPercent]
+      required: [appliedRange, metrics, divisions]
+    CommunityList:
+      type: object
+      properties:
+        communities:
+          type: array
+          items:
+            type: object
+            properties:
+              development:
+                type: string
+              division:
+                type: string
+              city:
+                type: string
+              state:
+                type: string
+              postalCode:
+                type: string
+              isRental:
+                type: boolean
+              hasGoals:
+                type: boolean
+              leadsYtd:
+                type: number
+              toursYtd:
+                type: number
+              salesYtd:
+                type: number
+            required:
+              [
+                development,
+                division,
+                city,
+                state,
+                postalCode,
+                isRental,
+                hasGoals,
+                leadsYtd,
+                toursYtd,
+                salesYtd,
+              ]
+      required: [communities]
     SnowflakeStatus:
       type: object
       properties:

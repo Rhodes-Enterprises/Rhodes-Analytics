@@ -13,7 +13,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 500;
 const cache = new Map<string, { at: number; value: unknown }>();
 
-async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
   const value = await fn();
@@ -49,7 +49,7 @@ export interface DashboardFilters {
   target: TargetKind;
 }
 
-type MetricKey =
+export type MetricKey =
   | "web_traffic"
   | "leads"
   | "online_leads"
@@ -61,7 +61,7 @@ type MetricKey =
   | "online_gross_sales"
   | "onsite_gross_sales";
 
-const METRICS: MetricKey[] = [
+export const METRICS: MetricKey[] = [
   "web_traffic",
   "leads",
   "online_leads",
@@ -81,7 +81,7 @@ const MONTH_ABBR = [
 
 // ---------- Goal type resolution ----------
 
-async function listGoalTypes(fiscalYear: number): Promise<string[]> {
+export async function listGoalTypes(fiscalYear: number): Promise<string[]> {
   return cached(`goalTypes:${fiscalYear}`, async () => {
     const rows = await querySnowflake<{ GOAL_TYPE: string }>(
       "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ?",
@@ -97,7 +97,7 @@ async function listGoalTypes(fiscalYear: number): Promise<string[]> {
  * - goal: recalculated quarterly (`goal_<m>_q<N>`) — latest quarter <= current
  * - waterfall: recalculated monthly (`waterfall_<m>_<mon>`) — latest month <= current
  */
-function resolveGoalType(
+export function resolveGoalType(
   available: string[],
   target: TargetKind,
   metric: MetricKey,
@@ -142,7 +142,7 @@ interface Frag {
  * table on DEVELOPMENT_NAME fans out actual counts (~1.5x inflation observed).
  * Restrict to Esperanza companies and force one row per development name.
  */
-const DEV_DIM = `(
+export const DEV_DIM = `(
   SELECT COMPANY_NAME, DEVELOPMENT_NAME
   FROM DM_COMPANY_DEVELOPMENT
   WHERE COMPANY_NAME ILIKE '%esperanza%'

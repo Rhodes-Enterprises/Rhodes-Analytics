@@ -11,6 +11,13 @@ import {
   getLeasingFilterOptions,
   type LeasingFilters,
 } from "../lib/leasing";
+import {
+  getWebsiteTraffic,
+  getFunnelMetric,
+  getEhiGoals,
+  getCommunityList,
+  type FunnelMetric,
+} from "../lib/marketing-dashboards";
 
 const router: IRouter = Router();
 
@@ -184,5 +191,66 @@ router.get("/dashboards/leasing", async (req, res) => {
     sendSnowflakeError(res, err);
   }
 });
+
+router.get("/dashboards/website-traffic", async (req, res) => {
+  try {
+    const filters = buildFilters(req.query as Record<string, unknown>);
+    const data = await getWebsiteTraffic(filters);
+    res.json({ appliedRange: appliedRange(filters), ...data });
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+const FUNNEL_METRICS: FunnelMetric[] = ["leads", "tours", "gross-sales"];
+
+router.get("/dashboards/funnel", async (req, res) => {
+  try {
+    const metric = req.query.metric as FunnelMetric;
+    if (!FUNNEL_METRICS.includes(metric)) {
+      res.status(400).json({ error: "metric must be one of leads, tours, gross-sales" });
+      return;
+    }
+    const filters = buildFilters(req.query as Record<string, unknown>);
+    const data = await getFunnelMetric(metric, filters);
+    res.json({ appliedRange: appliedRange(filters), ...data });
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+router.get("/dashboards/ehi-goals", async (req, res) => {
+  try {
+    // EHI Goals always looks at the full fiscal year of the requested range.
+    const filters = buildFilters(req.query as Record<string, unknown>);
+    const year = filters.startDate.slice(0, 4);
+    const yearFilters: DashboardFilters = {
+      ...filters,
+      startDate: `${year}-01-01`,
+      endDate: `${year}-12-31`,
+    };
+    const data = await getEhiGoals(yearFilters);
+    res.json({ appliedRange: appliedRange(yearFilters), ...data });
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+router.get("/dashboards/communities", async (_req, res) => {
+  try {
+    res.json(await getCommunityList());
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+function appliedRange(filters: DashboardFilters) {
+  return {
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    toDate: filters.toDate,
+    target: filters.target,
+  };
+}
 
 export default router;

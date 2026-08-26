@@ -195,6 +195,186 @@ export const GetOwtYoyResponse = zod.object({
 
 
 /**
+ * @summary Website Traffic dashboard data (Google Analytics)
+ */
+export const getWebsiteTrafficQueryTargetDefault = `goal`;
+
+export const GetWebsiteTrafficQueryParams = zod.object({
+  "target": zod.enum(['proforma', 'business_plan', 'goal', 'waterfall']).default(getWebsiteTrafficQueryTargetDefault),
+  "company": zod.coerce.string().optional(),
+  "development": zod.coerce.string().optional(),
+  "startDate": zod.coerce.string().optional(),
+  "endDate": zod.coerce.string().optional()
+})
+
+export const GetWebsiteTrafficResponse = zod.object({
+  "appliedRange": zod.object({
+  "startDate": zod.string(),
+  "endDate": zod.string(),
+  "toDate": zod.string(),
+  "target": zod.string()
+}),
+  "kpis": zod.object({
+  "totalUsers": zod.number(),
+  "newUsers": zod.number(),
+  "sessions": zod.number(),
+  "engagedSessions": zod.number(),
+  "pageViews": zod.number(),
+  "engagementRate": zod.number(),
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "monthly": zod.array(zod.object({
+  "month": zod.number(),
+  "users": zod.number(),
+  "newUsers": zod.number(),
+  "sessions": zod.number()
+})),
+  "channels": zod.array(zod.object({
+  "name": zod.string(),
+  "users": zod.number(),
+  "sessions": zod.number()
+})),
+  "devices": zod.array(zod.object({
+  "name": zod.string(),
+  "users": zod.number()
+})),
+  "developments": zod.array(zod.object({
+  "development": zod.string(),
+  "division": zod.string(),
+  "users": zod.number(),
+  "newUsers": zod.number(),
+  "sessions": zod.number()
+}))
+})
+
+
+/**
+ * @summary Funnel metric dashboard data (Leads, Tours, Gross Sales)
+ */
+export const getFunnelMetricQueryTargetDefault = `goal`;
+
+export const GetFunnelMetricQueryParams = zod.object({
+  "metric": zod.enum(['leads', 'tours', 'gross-sales']),
+  "target": zod.enum(['proforma', 'business_plan', 'goal', 'waterfall']).default(getFunnelMetricQueryTargetDefault),
+  "company": zod.coerce.string().optional(),
+  "development": zod.coerce.string().optional(),
+  "startDate": zod.coerce.string().optional(),
+  "endDate": zod.coerce.string().optional()
+})
+
+export const GetFunnelMetricResponse = zod.object({
+  "appliedRange": zod.object({
+  "startDate": zod.string(),
+  "endDate": zod.string(),
+  "toDate": zod.string(),
+  "target": zod.string()
+}),
+  "metric": zod.enum(['leads', 'tours', 'gross-sales']),
+  "kpis": zod.object({
+  "total": zod.number(),
+  "online": zod.number(),
+  "onsite": zod.number(),
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "ptgPercent": zod.number().nullable(),
+  "onlineToDateGoal": zod.number(),
+  "onlinePtgPercent": zod.number().nullable(),
+  "onsiteToDateGoal": zod.number(),
+  "onsitePtgPercent": zod.number().nullable()
+}),
+  "monthly": zod.array(zod.object({
+  "month": zod.number(),
+  "total": zod.number(),
+  "online": zod.number(),
+  "onsite": zod.number(),
+  "goal": zod.number()
+})),
+  "sources": zod.array(zod.object({
+  "name": zod.string(),
+  "count": zod.number()
+})),
+  "divisions": zod.array(zod.object({
+  "division": zod.string(),
+  "total": zod.number(),
+  "online": zod.number(),
+  "onsite": zod.number(),
+  "toDateGoal": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})),
+  "developments": zod.array(zod.object({
+  "division": zod.string(),
+  "total": zod.number(),
+  "online": zod.number(),
+  "onsite": zod.number(),
+  "toDateGoal": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}).and(zod.object({
+  "development": zod.string()
+})))
+})
+
+
+/**
+ * @summary EHI Goals dashboard data (full fiscal year attainment)
+ */
+export const getEhiGoalsQueryTargetDefault = `goal`;
+
+export const GetEhiGoalsQueryParams = zod.object({
+  "target": zod.enum(['proforma', 'business_plan', 'goal', 'waterfall']).default(getEhiGoalsQueryTargetDefault),
+  "startDate": zod.coerce.string().optional(),
+  "endDate": zod.coerce.string().optional()
+})
+
+export const GetEhiGoalsResponse = zod.object({
+  "appliedRange": zod.object({
+  "startDate": zod.string(),
+  "endDate": zod.string(),
+  "toDate": zod.string(),
+  "target": zod.string()
+}),
+  "metrics": zod.array(zod.object({
+  "metric": zod.string(),
+  "label": zod.string(),
+  "goalType": zod.string().nullable(),
+  "fullYearGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "attainmentPct": zod.number().nullable(),
+  "ptgPercent": zod.number().nullable()
+})),
+  "divisions": zod.array(zod.object({
+  "division": zod.string(),
+  "metric": zod.string(),
+  "label": zod.string(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}))
+})
+
+
+/**
+ * @summary Community List directory with YTD funnel counts
+ */
+export const GetCommunitiesResponse = zod.object({
+  "communities": zod.array(zod.object({
+  "development": zod.string(),
+  "division": zod.string(),
+  "city": zod.string(),
+  "state": zod.string(),
+  "postalCode": zod.string(),
+  "isRental": zod.boolean(),
+  "hasGoals": zod.boolean(),
+  "leadsYtd": zod.number(),
+  "toursYtd": zod.number(),
+  "salesYtd": zod.number()
+}))
+})
+
+
+/**
  * Runs a probe query and reports the active session context
  * @summary Verify Snowflake connectivity
  */

@@ -6,11 +6,23 @@ import { getDashboard } from "@/lib/workspaces";
 import NotFound from "@/pages/not-found";
 import OverviewWithTargetsPage from "@/pages/overview-with-targets";
 import LeasingPage from "@/pages/leasing";
+import WebsiteTrafficPage from "@/pages/website-traffic";
+import { LeadsPage, ToursPage, GrossSalesPage } from "@/pages/funnel-metric";
+import YearOverYearPage from "@/pages/year-over-year";
+import EhiGoalsPage from "@/pages/ehi-goals";
+import CommunityListPage from "@/pages/community-list";
 
 /** Dashboards that have been migrated get a dedicated component. */
 const MIGRATED: Record<string, React.ComponentType> = {
   "marketing/overview-with-targets": OverviewWithTargetsPage,
   "marketing/leasing": LeasingPage,
+  "marketing/website-traffic": WebsiteTrafficPage,
+  "marketing/leads": LeadsPage,
+  "marketing/tours": ToursPage,
+  "marketing/gross-sales": GrossSalesPage,
+  "marketing/year-over-year": YearOverYearPage,
+  "marketing/ehi-goals": EhiGoalsPage,
+  "marketing/community-list": CommunityListPage,
 };
 
 export default function DashboardPage() {

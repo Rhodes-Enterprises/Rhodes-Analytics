@@ -16,17 +16,24 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  CommunityList,
+  EhiGoals,
   ErrorMessage,
+  FunnelMetricDashboard,
+  GetEhiGoalsParams,
+  GetFunnelMetricParams,
   GetLeasingDashboardParams,
   GetOwtDashboardParams,
   GetOwtYoyParams,
+  GetWebsiteTrafficParams,
   HealthStatus,
   LeasingDashboard,
   LeasingFilterOptions,
   OwtDashboard,
   OwtFilterOptions,
   OwtYoy,
-  SnowflakeStatus
+  SnowflakeStatus,
+  WebsiteTraffic
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -289,6 +296,335 @@ export function useGetOwtYoy<TData = Awaited<ReturnType<typeof getOwtYoy>>, TErr
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetOwtYoyQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetWebsiteTrafficUrl = (params?: GetWebsiteTrafficParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/website-traffic?${stringifiedParams}` : `/api/dashboards/website-traffic`
+}
+
+/**
+ * @summary Website Traffic dashboard data (Google Analytics)
+ */
+export const getWebsiteTraffic = async (params?: GetWebsiteTrafficParams, options?: Parameters<typeof customFetch>[1]): Promise<WebsiteTraffic> => {
+
+  return customFetch<WebsiteTraffic>(getGetWebsiteTrafficUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetWebsiteTrafficQueryKey = (params?: GetWebsiteTrafficParams,) => {
+    return [
+    `/api/dashboards/website-traffic`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetWebsiteTrafficQueryOptions = <TData = Awaited<ReturnType<typeof getWebsiteTraffic>>, TError = ErrorType<ErrorMessage>>(params?: GetWebsiteTrafficParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getWebsiteTraffic>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetWebsiteTrafficQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getWebsiteTraffic>>> = ({ signal }) => getWebsiteTraffic(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getWebsiteTraffic>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetWebsiteTrafficQueryResult = NonNullable<Awaited<ReturnType<typeof getWebsiteTraffic>>>
+export type GetWebsiteTrafficQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Website Traffic dashboard data (Google Analytics)
+ */
+
+export function useGetWebsiteTraffic<TData = Awaited<ReturnType<typeof getWebsiteTraffic>>, TError = ErrorType<ErrorMessage>>(
+ params?: GetWebsiteTrafficParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getWebsiteTraffic>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetWebsiteTrafficQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetFunnelMetricUrl = (params: GetFunnelMetricParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/funnel?${stringifiedParams}` : `/api/dashboards/funnel`
+}
+
+/**
+ * @summary Funnel metric dashboard data (Leads, Tours, Gross Sales)
+ */
+export const getFunnelMetric = async (params: GetFunnelMetricParams, options?: Parameters<typeof customFetch>[1]): Promise<FunnelMetricDashboard> => {
+
+  return customFetch<FunnelMetricDashboard>(getGetFunnelMetricUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetFunnelMetricQueryKey = (params?: GetFunnelMetricParams,) => {
+    return [
+    `/api/dashboards/funnel`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetFunnelMetricQueryOptions = <TData = Awaited<ReturnType<typeof getFunnelMetric>>, TError = ErrorType<ErrorMessage>>(params: GetFunnelMetricParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getFunnelMetric>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetFunnelMetricQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getFunnelMetric>>> = ({ signal }) => getFunnelMetric(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getFunnelMetric>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetFunnelMetricQueryResult = NonNullable<Awaited<ReturnType<typeof getFunnelMetric>>>
+export type GetFunnelMetricQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Funnel metric dashboard data (Leads, Tours, Gross Sales)
+ */
+
+export function useGetFunnelMetric<TData = Awaited<ReturnType<typeof getFunnelMetric>>, TError = ErrorType<ErrorMessage>>(
+ params: GetFunnelMetricParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getFunnelMetric>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetFunnelMetricQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetEhiGoalsUrl = (params?: GetEhiGoalsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/ehi-goals?${stringifiedParams}` : `/api/dashboards/ehi-goals`
+}
+
+/**
+ * @summary EHI Goals dashboard data (full fiscal year attainment)
+ */
+export const getEhiGoals = async (params?: GetEhiGoalsParams, options?: Parameters<typeof customFetch>[1]): Promise<EhiGoals> => {
+
+  return customFetch<EhiGoals>(getGetEhiGoalsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetEhiGoalsQueryKey = (params?: GetEhiGoalsParams,) => {
+    return [
+    `/api/dashboards/ehi-goals`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetEhiGoalsQueryOptions = <TData = Awaited<ReturnType<typeof getEhiGoals>>, TError = ErrorType<ErrorMessage>>(params?: GetEhiGoalsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getEhiGoals>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetEhiGoalsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getEhiGoals>>> = ({ signal }) => getEhiGoals(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getEhiGoals>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetEhiGoalsQueryResult = NonNullable<Awaited<ReturnType<typeof getEhiGoals>>>
+export type GetEhiGoalsQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary EHI Goals dashboard data (full fiscal year attainment)
+ */
+
+export function useGetEhiGoals<TData = Awaited<ReturnType<typeof getEhiGoals>>, TError = ErrorType<ErrorMessage>>(
+ params?: GetEhiGoalsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getEhiGoals>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetEhiGoalsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetCommunitiesUrl = () => {
+
+
+
+
+  return `/api/dashboards/communities`
+}
+
+/**
+ * @summary Community List directory with YTD funnel counts
+ */
+export const getCommunities = async ( options?: Parameters<typeof customFetch>[1]): Promise<CommunityList> => {
+
+  return customFetch<CommunityList>(getGetCommunitiesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCommunitiesQueryKey = () => {
+    return [
+    `/api/dashboards/communities`
+    ] as const;
+    }
+
+
+export const getGetCommunitiesQueryOptions = <TData = Awaited<ReturnType<typeof getCommunities>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCommunitiesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunities>>> = ({ signal }) => getCommunities({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCommunitiesQueryResult = NonNullable<Awaited<ReturnType<typeof getCommunities>>>
+export type GetCommunitiesQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Community List directory with YTD funnel counts
+ */
+
+export function useGetCommunities<TData = Awaited<ReturnType<typeof getCommunities>>, TError = ErrorType<ErrorMessage>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCommunitiesQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

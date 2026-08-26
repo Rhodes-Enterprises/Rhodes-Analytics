@@ -1,0 +1,171 @@
+import { useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RTooltip,
+  Legend,
+} from "recharts";
+import {
+  useGetOwtYoy,
+  useGetOwtFilters,
+  useGetSnowflakeStatus,
+} from "@workspace/api-client-react";
+import { Layout } from "@/components/layout";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  ALL,
+  MONTH_NAMES,
+  Breadcrumb,
+  FilterSelect,
+  LiveStatusBadge,
+  fmt,
+} from "@/components/dashboard-shared";
+
+const MEASURE_LABELS: Record<string, string> = {
+  websiteUsers: "Website Users",
+  leads: "Leads",
+  tours: "Tours",
+  grossSales: "Gross Sales",
+};
+
+export default function YearOverYearPage() {
+  const [company, setCompany] = useState(ALL);
+  const [development, setDevelopment] = useState(ALL);
+
+  const filters = useGetOwtFilters();
+  const yoy = useGetOwtYoy({
+    ...(company !== ALL && { company }),
+    ...(development !== ALL && { development }),
+  });
+  const status = useGetSnowflakeStatus();
+
+  const developments = useMemo(() => {
+    const list = filters.data?.developments ?? [];
+    const scoped = company === ALL ? list : list.filter((d) => d.company === company);
+    return [...new Set(scoped.map((d) => d.development))];
+  }, [filters.data, company]);
+
+  return (
+    <Layout>
+      <div className="space-y-6">
+        <Breadcrumb page="Year Over Year" />
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Year Over Year</h1>
+          {yoy.data && (
+            <p className="text-sm text-muted-foreground mt-1">
+              {yoy.data.year} vs {yoy.data.priorYear} · monthly funnel metrics with business
+              plan goal
+            </p>
+          )}
+          <LiveStatusBadge
+            status={status.data}
+            checking={status.isLoading}
+            lastRefreshed={yoy.dataUpdatedAt}
+          />
+        </div>
+
+        <Card>
+          <CardContent className="pt-4 pb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+              <FilterSelect
+                label="Division"
+                value={company}
+                onChange={(v) => {
+                  setCompany(v);
+                  setDevelopment(ALL);
+                }}
+                options={filters.data?.companies ?? []}
+                testId="select-division"
+              />
+              <FilterSelect
+                label="Development"
+                value={development}
+                onChange={setDevelopment}
+                options={developments}
+                testId="select-development"
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {yoy.isError && (
+          <Alert variant="destructive">
+            <AlertTitle>Failed to load dashboard data</AlertTitle>
+            <AlertDescription>
+              {(yoy.error as Error)?.message ?? "Snowflake query failed."}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {yoy.isLoading && (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-80" />
+            ))}
+          </div>
+        )}
+
+        {yoy.data && (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {yoy.data.measures.map((m) => (
+              <Card key={m.measure} data-testid={`chart-yoy-${m.measure}`}>
+                <CardHeader>
+                  <CardTitle className="text-base">
+                    {MEASURE_LABELS[m.measure] ?? m.measure}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="h-72">
+                  <ResponsiveContainer>
+                    <ComposedChart
+                      data={m.points.map((p) => ({
+                        ...p,
+                        name: MONTH_NAMES[p.month - 1],
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="name" fontSize={12} />
+                      <YAxis fontSize={12} tickFormatter={(v) => fmt(v)} />
+                      <RTooltip formatter={(v: number) => fmt(v)} />
+                      <Legend />
+                      <Area
+                        type="monotone"
+                        dataKey="currentYear"
+                        name={String(yoy.data.year)}
+                        stroke="#3b82f6"
+                        fill="#3b82f6"
+                        fillOpacity={0.2}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="priorYear"
+                        name={String(yoy.data.priorYear)}
+                        stroke="#94a3b8"
+                        fill="#94a3b8"
+                        fillOpacity={0.15}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="goal"
+                        name="Business Plan"
+                        stroke="#ef4444"
+                        strokeDasharray="5 3"
+                        dot={false}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    </Layout>
+  );
+}
