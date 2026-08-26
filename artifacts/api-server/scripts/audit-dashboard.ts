@@ -25,6 +25,14 @@
  * wrong range. Baselines are bound to that expected range, never to the
  * response's echo of it.
  *
+ * The breakdown tables (divisions / developments) are audited per row: leads,
+ * tours, and sales against CRM-side baselines, and the website-user columns
+ * against GA-side baselines recomputed with plain GROUP BYs over
+ * MATCHED_COMPANY_NAME / MATCHED_DEVELOPMENT_NAME — catching regressions in
+ * the API's single GROUPING SETS query that the headline checks would miss.
+ * Distinct-user counts are not additive across rows, so website users get
+ * per-row comparisons only, never a sum-to-headline cross-check.
+ *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:dashboard
  *
@@ -46,6 +54,8 @@ const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
 interface DivisionRow {
   division: string;
+  totalWebsiteUsers: number;
+  newWebsiteUsers: number;
   leads: number;
   tours: number;
   sales: number;
@@ -54,6 +64,8 @@ interface DivisionRow {
 interface DevelopmentRow {
   development: string;
   division: string;
+  totalWebsiteUsers: number;
+  newWebsiteUsers: number;
   leads: number;
   tours: number;
   sales: number;
@@ -497,6 +509,151 @@ function sumRows<T>(rows: T[], pick: (r: T) => number): number {
   return total;
 }
 
+// ---------- Website-user breakdown audit (GA source) ----------
+
+interface GaBaselineRow {
+  COMPANY_NAME: string | null;
+  DEVELOPMENT_NAME?: string | null;
+  TOTAL_USERS: number;
+  NEW_USERS: number;
+}
+
+/**
+ * Mirrors the API's brand test for seeding breakdown rows from GA data
+ * (COMPANY_NAME.includes("Esperanza")). GA groups outside the brand are
+ * excluded from the dashboard by design, so a baseline-only group failing
+ * this test is not a missing row.
+ */
+function isEsperanzaCompany(name: string): boolean {
+  return name.includes("Esperanza");
+}
+
+/**
+ * Audits the website-user columns (totalWebsiteUsers / newWebsiteUsers) of
+ * the divisions and developments tables in the DEFAULT view. These columns
+ * come from a different source than leads/tours/sales — one GROUPING SETS
+ * query over FCT_GOOGLE_ANALYTICS_EVENT_LEVEL — so a GA-side grouping
+ * regression (wrong grouping level picked, aggregation keyed to the wrong
+ * column, dropped groups) would slip past the CRM-side checks. Baselines
+ * recompute each level independently with a plain GROUP BY over
+ * MATCHED_COMPANY_NAME / MATCHED_DEVELOPMENT_NAME and compare per row in
+ * both directions: every API row must match its baseline, and every
+ * non-zero Esperanza-brand baseline group must appear in the API rows.
+ *
+ * Deliberately NO sum-to-headline cross-check here: COUNT(DISTINCT
+ * USER_PSEUDO_ID) is not additive across companies or developments (the
+ * same user can visit several), so row sums legitimately differ from the
+ * headline and only per-row comparisons are meaningful.
+ */
+async function auditWebsiteUserBreakdowns(
+  overview: OverviewResponse,
+  expStart: string,
+  expTo: string,
+): Promise<boolean> {
+  console.log(`\n=== Breakdown tables: website users (default view) ===`);
+  console.log(
+    "note: distinct-user counts are not additive across rows — per-row checks only, no sum check",
+  );
+
+  const binds = [expStart, expTo];
+  const [byCompany, byDev] = await Promise.all([
+    querySnowflake<GaBaselineRow>(
+      `SELECT MATCHED_COMPANY_NAME AS COMPANY_NAME,
+              COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
+              COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      binds,
+    ),
+    querySnowflake<GaBaselineRow>(
+      `SELECT MATCHED_COMPANY_NAME AS COMPANY_NAME,
+              MATCHED_DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
+              COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
+              COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+       GROUP BY 1, 2`,
+      binds,
+    ),
+  ]);
+
+  const devKey = (c: string, dv: string) => `${c}\u0000${dv}`;
+
+  const measures = [
+    {
+      name: "totalUsers",
+      fromBaseline: (r: GaBaselineRow) => Number(r.TOTAL_USERS) || 0,
+      fromApi: (r: DivisionRow | DevelopmentRow) => Number(r.totalWebsiteUsers) || 0,
+    },
+    {
+      name: "newUsers",
+      fromBaseline: (r: GaBaselineRow) => Number(r.NEW_USERS) || 0,
+      fromApi: (r: DivisionRow | DevelopmentRow) => Number(r.newWebsiteUsers) || 0,
+    },
+  ];
+
+  let failed = false;
+
+  for (const m of measures) {
+    // --- 1. Division rows vs per-company baseline (both directions) ---
+    const baseByCompany = new Map<string, number>();
+    for (const r of byCompany) {
+      if (r.COMPANY_NAME) baseByCompany.set(r.COMPANY_NAME, m.fromBaseline(r));
+    }
+    const apiByCompany = new Map(
+      overview.divisions.map((r) => [r.division, m.fromApi(r)]),
+    );
+    // Every API division is checked against its baseline (0 when GA has no
+    // group for it); baseline-only companies count as missing rows only when
+    // the dashboard would seed them (Esperanza brands).
+    const companyNames = new Set([
+      ...apiByCompany.keys(),
+      ...[...baseByCompany.keys()].filter(isEsperanzaCompany),
+    ]);
+    for (const company of [...companyNames].sort()) {
+      const api = apiByCompany.get(company) ?? 0;
+      const baseline = baseByCompany.get(company) ?? 0;
+      if (api === 0 && baseline === 0) continue;
+      const d = divergedPct(api, baseline);
+      const ok = d <= TOLERANCE_PCT;
+      console.log(
+        `${ok ? "OK  " : "FAIL"} division ${m.name.padEnd(10)} ${company.padEnd(30)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+      );
+      if (!ok) failed = true;
+    }
+
+    // --- 2. Development rows vs per-(company, development) baseline ---
+    const baseByDev = new Map<string, number>();
+    for (const r of byDev) {
+      if (r.COMPANY_NAME && r.DEVELOPMENT_NAME) {
+        baseByDev.set(devKey(r.COMPANY_NAME, r.DEVELOPMENT_NAME), m.fromBaseline(r));
+      }
+    }
+    const apiByDev = new Map(
+      overview.developments.map((r) => [devKey(r.division, r.development), m.fromApi(r)]),
+    );
+    const devKeys = new Set([
+      ...apiByDev.keys(),
+      ...[...baseByDev.keys()].filter((k) => isEsperanzaCompany(k.split("\u0000")[0])),
+    ]);
+    for (const key of [...devKeys].sort()) {
+      const api = apiByDev.get(key) ?? 0;
+      const baseline = baseByDev.get(key) ?? 0;
+      if (api === 0 && baseline === 0) continue;
+      const [company, development] = key.split("\u0000");
+      const d = divergedPct(api, baseline);
+      const ok = d <= TOLERANCE_PCT;
+      console.log(
+        `${ok ? "OK  " : "FAIL"} devrow   ${m.name.padEnd(10)} ${`${development} (${company})`.padEnd(45)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+      );
+      if (!ok) failed = true;
+    }
+  }
+
+  return !failed;
+}
+
 // ---------- Representative filter selection ----------
 
 /**
@@ -609,12 +766,20 @@ async function main() {
   const breakdownsOk = await auditBreakdowns(defaultOverview, startDate, toDate);
   if (!breakdownsOk) anyFailed = true;
 
+  // Website-user columns of the same tables — separate GA-side baselines.
+  const gaBreakdownsOk = await auditWebsiteUserBreakdowns(
+    defaultOverview,
+    startDate,
+    toDate,
+  );
+  if (!gaBreakdownsOk) anyFailed = true;
+
   if (anyFailed) {
     console.error(
       "\nAUDIT FAILED: dashboard totals diverge from independent Snowflake baselines " +
         "in at least one scenario. Likely causes: join fan-out in the attribution " +
-        "dimension, a filter bound to the wrong column, ignored date parameters, " +
-        "changed filters, or stale cached data.",
+        "dimension, a filter bound to the wrong column, a GA grouping regression, " +
+        "ignored date parameters, changed filters, or stale cached data.",
     );
     process.exit(1);
   }
