@@ -22,12 +22,71 @@ export interface OwtFilterOptions {
   channels: string[];
 }
 
+export interface LeasingFilterOptions {
+  communities: string[];
+  channels: string[];
+}
+
+export type LeasingDashboardAppliedRange = {
+  startDate: string;
+  endDate: string;
+  toDate: string;
+};
+
+export type LeasingDashboardKpis = {
+  leaseGoal: number;
+  leaseTdGoal: number;
+  leasesRatified: number;
+  leasesCancelled: number;
+  netLeases: number;
+  ptgVariance: number;
+  /** @nullable */
+  ptgPercent: number | null;
+};
+
 export interface OwtGoalCell {
   fullSpanGoal: number;
   toDateGoal: number;
   actual: number;
   /** @nullable */
   ptgPercent: number | null;
+}
+
+export type LeasingDashboardMatrix = {
+  total: OwtGoalCell;
+  online: OwtGoalCell;
+  onsite: OwtGoalCell;
+  net: OwtGoalCell;
+};
+
+export interface LeasingCommunityRow {
+  community: string;
+  fullSpanGoal: number;
+  toDateGoal: number;
+  ratified: number;
+  onlineRatified: number;
+  onsiteRatified: number;
+  cancelled: number;
+  net: number;
+  /** @nullable */
+  ptgPercent: number | null;
+}
+
+export interface LeasingMonthlyPoint {
+  month: number;
+  ratified: number;
+  cancelled: number;
+  net: number;
+  goal: number;
+}
+
+export interface LeasingDashboard {
+  appliedRange: LeasingDashboardAppliedRange;
+  fiscalYear: number;
+  kpis: LeasingDashboardKpis;
+  matrix: LeasingDashboardMatrix;
+  communities: LeasingCommunityRow[];
+  monthly: LeasingMonthlyPoint[];
 }
 
 export type OwtDashboardAppliedRange = {
@@ -215,5 +274,18 @@ endDate?: OwtEndDateParameter;
 export type GetOwtYoyParams = {
 company?: OwtCompanyParameter;
 development?: OwtDevelopmentParameter;
+};
+
+export type GetLeasingDashboardParams = {
+community?: string;
+channel?: string;
+/**
+ * YYYY-MM-DD; defaults to Jan 1 of the current year
+ */
+startDate?: string;
+/**
+ * YYYY-MM-DD; defaults to Dec 31 of the current year
+ */
+endDate?: string;
 };
 

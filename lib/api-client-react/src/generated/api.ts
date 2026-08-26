@@ -17,9 +17,12 @@ import type {
 
 import type {
   ErrorMessage,
+  GetLeasingDashboardParams,
   GetOwtDashboardParams,
   GetOwtYoyParams,
   HealthStatus,
+  LeasingDashboard,
+  LeasingFilterOptions,
   OwtDashboard,
   OwtFilterOptions,
   OwtYoy,
@@ -364,6 +367,167 @@ export function useGetSnowflakeStatus<TData = Awaited<ReturnType<typeof getSnowf
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetSnowflakeStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetLeasingFiltersUrl = () => {
+
+
+
+
+  return `/api/dashboards/leasing/filters`
+}
+
+/**
+ * @summary Filter options for the Rhodes Living Leasing dashboard
+ */
+export const getLeasingFilters = async ( options?: Parameters<typeof customFetch>[1]): Promise<LeasingFilterOptions> => {
+
+  return customFetch<LeasingFilterOptions>(getGetLeasingFiltersUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetLeasingFiltersQueryKey = () => {
+    return [
+    `/api/dashboards/leasing/filters`
+    ] as const;
+    }
+
+
+export const getGetLeasingFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getLeasingFilters>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetLeasingFiltersQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLeasingFilters>>> = ({ signal }) => getLeasingFilters({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetLeasingFiltersQueryResult = NonNullable<Awaited<ReturnType<typeof getLeasingFilters>>>
+export type GetLeasingFiltersQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Filter options for the Rhodes Living Leasing dashboard
+ */
+
+export function useGetLeasingFilters<TData = Awaited<ReturnType<typeof getLeasingFilters>>, TError = ErrorType<ErrorMessage>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetLeasingFiltersQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetLeasingDashboardUrl = (params?: GetLeasingDashboardParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/dashboards/leasing?${stringifiedParams}` : `/api/dashboards/leasing`
+}
+
+/**
+ * @summary Rhodes Living Leasing dashboard data
+ */
+export const getLeasingDashboard = async (params?: GetLeasingDashboardParams, options?: Parameters<typeof customFetch>[1]): Promise<LeasingDashboard> => {
+
+  return customFetch<LeasingDashboard>(getGetLeasingDashboardUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetLeasingDashboardQueryKey = (params?: GetLeasingDashboardParams,) => {
+    return [
+    `/api/dashboards/leasing`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetLeasingDashboardQueryOptions = <TData = Awaited<ReturnType<typeof getLeasingDashboard>>, TError = ErrorType<ErrorMessage>>(params?: GetLeasingDashboardParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingDashboard>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetLeasingDashboardQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLeasingDashboard>>> = ({ signal }) => getLeasingDashboard(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getLeasingDashboard>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetLeasingDashboardQueryResult = NonNullable<Awaited<ReturnType<typeof getLeasingDashboard>>>
+export type GetLeasingDashboardQueryError = ErrorType<ErrorMessage>
+
+
+/**
+ * @summary Rhodes Living Leasing dashboard data
+ */
+
+export function useGetLeasingDashboard<TData = Awaited<ReturnType<typeof getLeasingDashboard>>, TError = ErrorType<ErrorMessage>>(
+ params?: GetLeasingDashboardParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingDashboard>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetLeasingDashboardQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

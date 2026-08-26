@@ -101,6 +101,71 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SnowflakeStatus"
+  /dashboards/leasing/filters:
+    get:
+      operationId: getLeasingFilters
+      tags: [dashboards]
+      summary: Filter options for the Rhodes Living Leasing dashboard
+      responses:
+        "200":
+          description: Filter options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeasingFilterOptions"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /dashboards/leasing:
+    get:
+      operationId: getLeasingDashboard
+      tags: [dashboards]
+      summary: Rhodes Living Leasing dashboard data
+      parameters:
+        - name: community
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: channel
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: startDate
+          in: query
+          required: false
+          schema:
+            type: string
+            description: YYYY-MM-DD; defaults to Jan 1 of the current year
+        - name: endDate
+          in: query
+          required: false
+          schema:
+            type: string
+            description: YYYY-MM-DD; defaults to Dec 31 of the current year
+      responses:
+        "200":
+          description: Dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeasingDashboard"
+        "400":
+          description: Invalid date or range (malformed date, reversed range, or range crossing a calendar year)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+        "502":
+          description: Snowflake error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
   /healthz:
     get:
       operationId: healthCheck
@@ -211,6 +276,110 @@ components:
           items:
             type: string
       required: [companies, developments, cohortQuarters, leadSources, channels]
+    LeasingFilterOptions:
+      type: object
+      properties:
+        communities:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+      required: [communities, channels]
+    LeasingDashboard:
+      type: object
+      properties:
+        appliedRange:
+          type: object
+          properties:
+            startDate:
+              type: string
+            endDate:
+              type: string
+            toDate:
+              type: string
+          required: [startDate, endDate, toDate]
+        fiscalYear:
+          type: number
+        kpis:
+          type: object
+          properties:
+            leaseGoal:
+              type: number
+            leaseTdGoal:
+              type: number
+            leasesRatified:
+              type: number
+            leasesCancelled:
+              type: number
+            netLeases:
+              type: number
+            ptgVariance:
+              type: number
+            ptgPercent:
+              type: ["number", "null"]
+          required:
+            [leaseGoal, leaseTdGoal, leasesRatified, leasesCancelled, netLeases, ptgVariance, ptgPercent]
+        matrix:
+          type: object
+          properties:
+            total:
+              $ref: "#/components/schemas/OwtGoalCell"
+            online:
+              $ref: "#/components/schemas/OwtGoalCell"
+            onsite:
+              $ref: "#/components/schemas/OwtGoalCell"
+            net:
+              $ref: "#/components/schemas/OwtGoalCell"
+          required: [total, online, onsite, net]
+        communities:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeasingCommunityRow"
+        monthly:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeasingMonthlyPoint"
+      required: [appliedRange, fiscalYear, kpis, matrix, communities, monthly]
+    LeasingCommunityRow:
+      type: object
+      properties:
+        community:
+          type: string
+        fullSpanGoal:
+          type: number
+        toDateGoal:
+          type: number
+        ratified:
+          type: number
+        onlineRatified:
+          type: number
+        onsiteRatified:
+          type: number
+        cancelled:
+          type: number
+        net:
+          type: number
+        ptgPercent:
+          type: ["number", "null"]
+      required:
+        [community, fullSpanGoal, toDateGoal, ratified, onlineRatified, onsiteRatified, cancelled, net, ptgPercent]
+    LeasingMonthlyPoint:
+      type: object
+      properties:
+        month:
+          type: number
+        ratified:
+          type: number
+        cancelled:
+          type: number
+        net:
+          type: number
+        goal:
+          type: number
+      required: [month, ratified, cancelled, net, goal]
     OwtGoalCell:
       type: object
       properties:

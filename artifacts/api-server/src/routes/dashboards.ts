@@ -6,6 +6,11 @@ import {
   type DashboardFilters,
   type TargetKind,
 } from "../lib/overview-targets";
+import {
+  getLeasingDashboard,
+  getLeasingFilterOptions,
+  type LeasingFilters,
+} from "../lib/leasing";
 
 const router: IRouter = Router();
 
@@ -123,6 +128,58 @@ router.get("/dashboards/overview-with-targets/yoy", async (req, res) => {
   try {
     const filters = buildFilters(req.query as Record<string, unknown>);
     res.json(await getYearOverYear(filters));
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+function buildLeasingFilters(query: Record<string, unknown>): LeasingFilters {
+  const today = todayChicago();
+  const year = today.slice(0, 4);
+  // Leasing defaults to the current year to date (RL goals are annual).
+  const startDate = parseDateOrDefault(str(query.startDate), `${year}-01-01`, "startDate");
+  const endDate = parseDateOrDefault(str(query.endDate), `${year}-12-31`, "endDate");
+  if (startDate > endDate) {
+    throw new BadRequestError("startDate must be on or before endDate");
+  }
+  if (startDate.slice(0, 4) !== endDate.slice(0, 4)) {
+    throw new BadRequestError(
+      "Date range must stay within a single calendar year (goals are issued per fiscal year)",
+    );
+  }
+  return {
+    community: str(query.community),
+    channel: str(query.channel),
+    startDate,
+    endDate,
+    toDate: today < startDate ? startDate : today > endDate ? endDate : today,
+  };
+}
+
+router.get("/dashboards/leasing/filters", async (_req, res) => {
+  try {
+    res.json(await getLeasingFilterOptions());
+  } catch (err) {
+    sendSnowflakeError(res, err);
+  }
+});
+
+router.get("/dashboards/leasing", async (req, res) => {
+  try {
+    const filters = buildLeasingFilters(req.query as Record<string, unknown>);
+    const data = await getLeasingDashboard(filters);
+    res.json({
+      appliedRange: {
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        toDate: filters.toDate,
+      },
+      fiscalYear: data.fiscalYear,
+      kpis: data.kpis,
+      matrix: data.matrix,
+      communities: data.communities,
+      monthly: data.monthly,
+    });
   } catch (err) {
     sendSnowflakeError(res, err);
   }

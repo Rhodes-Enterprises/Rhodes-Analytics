@@ -1,0 +1,556 @@
+import { useMemo, useState } from "react";
+import { Link } from "wouter";
+import { ChevronRight, RefreshCw, Database } from "lucide-react";
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Bar,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RTooltip,
+  Legend,
+} from "recharts";
+import {
+  useGetLeasingDashboard,
+  useGetLeasingFilters,
+  useGetSnowflakeStatus,
+  type LeasingDashboard,
+  type GetLeasingDashboardParams,
+} from "@workspace/api-client-react";
+import { Layout } from "@/components/layout";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+
+// ---------- formatting ----------
+
+const nf = new Intl.NumberFormat("en-US");
+function fmt(n: number | null | undefined, digits = 0): string {
+  if (n == null || Number.isNaN(n)) return "–";
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+function fmtPct(n: number | null | undefined, digits = 1): string {
+  if (n == null || Number.isNaN(n)) return "–";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
+
+/** PTG traffic-light: on-track, slipping, at-risk */
+function ptgColor(ptg: number | null | undefined): string {
+  if (ptg == null) return "text-muted-foreground";
+  if (ptg >= -2) return "text-emerald-600 dark:text-emerald-400";
+  if (ptg >= -15) return "text-amber-600 dark:text-amber-400";
+  return "text-red-600 dark:text-red-400";
+}
+function ptgBg(ptg: number | null | undefined): string {
+  if (ptg == null) return "";
+  if (ptg >= -2) return "bg-emerald-500/10";
+  if (ptg >= -15) return "bg-amber-500/10";
+  return "bg-red-500/10";
+}
+
+const ALL = "__all__";
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// ---------- page ----------
+
+export default function LeasingPage() {
+  const [community, setCommunity] = useState<string>(ALL);
+  const [channel, setChannel] = useState<string>(ALL);
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
+
+  const params: GetLeasingDashboardParams = {
+    ...(community !== ALL && { community }),
+    ...(channel !== ALL && { channel }),
+    ...(startDate && { startDate }),
+    ...(endDate && { endDate }),
+  };
+
+  const filters = useGetLeasingFilters();
+  const dash = useGetLeasingDashboard(params);
+  const status = useGetSnowflakeStatus();
+
+  const setQuarter = () => {
+    const now = new Date();
+    const q = Math.floor(now.getMonth() / 3);
+    const start = new Date(now.getFullYear(), q * 3, 1);
+    const end = new Date(now.getFullYear(), q * 3 + 3, 0);
+    const iso = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    setStartDate(iso(start));
+    setEndDate(iso(end));
+  };
+  const resetRange = () => {
+    setStartDate("");
+    setEndDate("");
+  };
+
+  return (
+    <Layout>
+      <div className="space-y-6">
+        <nav className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Link
+            href="/workspaces/marketing"
+            className="hover:text-foreground transition-colors"
+          >
+            Marketing Dashboards
+          </Link>
+          <ChevronRight className="h-3.5 w-3.5" />
+          <span className="text-foreground font-medium">
+            Rhodes Living Leasing
+          </span>
+        </nav>
+
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">
+              Rhodes Living Leasing
+            </h1>
+            {dash.data && (
+              <p className="text-sm text-muted-foreground mt-1">
+                {dash.data.appliedRange.startDate} →{" "}
+                {dash.data.appliedRange.endDate} · progress through{" "}
+                {dash.data.appliedRange.toDate}
+              </p>
+            )}
+            <LiveStatusBadge
+              status={status.data}
+              checking={status.isLoading}
+              lastRefreshed={dash.dataUpdatedAt}
+            />
+          </div>
+        </div>
+
+        {/* Filter bar */}
+        <Card>
+          <CardContent className="pt-4 pb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+              <FilterSelect
+                label="Community"
+                value={community}
+                onChange={setCommunity}
+                options={filters.data?.communities ?? []}
+                testId="select-community"
+              />
+              <FilterSelect
+                label="Channel"
+                value={channel}
+                onChange={setChannel}
+                options={filters.data?.channels ?? []}
+                testId="select-channel"
+              />
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Start</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  data-testid="input-start-date"
+                  className="w-full h-9 rounded-md border bg-background px-2 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">End</span>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  data-testid="input-end-date"
+                  className="w-full h-9 rounded-md border bg-background px-2 text-sm"
+                />
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={resetRange} data-testid="button-ytd">
+                Current Year (default)
+              </Button>
+              <Button size="sm" variant="outline" onClick={setQuarter} data-testid="button-quarter">
+                Current Quarter
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setCommunity(ALL);
+                  setChannel(ALL);
+                  resetRange();
+                }}
+                data-testid="button-clear-filters"
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Clear filters
+              </Button>
+              <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+                <LegendDot className="bg-emerald-500" label="On track" />
+                <LegendDot className="bg-amber-500" label="Slipping (2–15% behind)" />
+                <LegendDot className="bg-red-500" label="At risk (>15% behind)" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {dash.isError && (
+          <Alert variant="destructive">
+            <AlertTitle>Failed to load dashboard data</AlertTitle>
+            <AlertDescription>
+              {(dash.error as Error)?.message ?? "Snowflake query failed."}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {dash.isLoading && <DashboardSkeleton />}
+
+        {dash.data && (
+          <>
+            <KpiRow data={dash.data} />
+            <GoalMatrix data={dash.data} />
+            <CommunityTable data={dash.data} />
+            <MonthlyChart data={dash.data} />
+          </>
+        )}
+      </div>
+    </Layout>
+  );
+}
+
+// ---------- pieces ----------
+
+function LiveStatusBadge({
+  status,
+  checking,
+  lastRefreshed,
+}: {
+  status: { connected: boolean; database?: string; error?: string } | undefined;
+  checking: boolean;
+  lastRefreshed: number;
+}) {
+  const time =
+    lastRefreshed > 0
+      ? new Date(lastRefreshed).toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+        })
+      : null;
+  return (
+    <div
+      className="mt-1.5 flex items-center gap-1.5 text-xs"
+      data-testid="badge-data-source"
+    >
+      {checking && !status ? (
+        <span className="text-muted-foreground">Checking data source…</span>
+      ) : status?.connected ? (
+        <>
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+          </span>
+          <span className="font-medium text-emerald-700 dark:text-emerald-400">
+            Live · Snowflake
+          </span>
+          <Database className="h-3 w-3 text-muted-foreground" />
+          {time && (
+            <span className="text-muted-foreground">refreshed {time}</span>
+          )}
+        </>
+      ) : (
+        <>
+          <span className="h-2 w-2 rounded-full bg-red-500" />
+          <span className="font-medium text-red-600 dark:text-red-400">
+            Snowflake connection unavailable
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LegendDot({ className, label }: { className: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={cn("h-2 w-2 rounded-full", className)} />
+      {label}
+    </span>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+  testId,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  testId: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-9" data-testid={testId}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ALL}>All</SelectItem>
+          {options.map((o) => (
+            <SelectItem key={o} value={o}>
+              {o}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function KpiRow({ data }: { data: LeasingDashboard }) {
+  const { kpis } = data;
+  const items = [
+    { label: "Lease Goal", value: fmt(kpis.leaseGoal) },
+    { label: "Lease TD Goal", value: fmt(kpis.leaseTdGoal) },
+    { label: "Leases Ratified", value: fmt(kpis.leasesRatified) },
+    { label: "Leases Cancelled", value: fmt(kpis.leasesCancelled) },
+    { label: "Net Leases", value: fmt(kpis.netLeases) },
+    {
+      label: "PTG Variance",
+      value: fmt(kpis.ptgVariance, 1),
+      color: ptgColor(kpis.ptgPercent),
+    },
+    {
+      label: "PTG Percent",
+      value: fmtPct(kpis.ptgPercent, 2),
+      color: ptgColor(kpis.ptgPercent),
+      bg: ptgBg(kpis.ptgPercent),
+    },
+  ];
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+      {items.map((it) => (
+        <Card key={it.label} className={cn(it.bg)}>
+          <CardContent className="pt-4 pb-4">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+              {it.label}
+            </div>
+            <div
+              className={cn("text-2xl font-bold mt-1 tabular-nums", it.color)}
+              data-testid={`kpi-${it.label.toLowerCase().replace(/\s+/g, "-")}`}
+            >
+              {it.value}
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function MatrixRow({
+  label,
+  cell,
+  sub,
+}: {
+  label: string;
+  cell: {
+    fullSpanGoal: number;
+    toDateGoal: number;
+    actual: number;
+    ptgPercent: number | null;
+  };
+  sub?: string;
+}) {
+  return (
+    <tr className="border-b last:border-0">
+      <td className="py-2 pr-4 font-medium whitespace-nowrap">
+        {label}
+        {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+      </td>
+      <td className="py-2 px-3 text-right tabular-nums">{fmt(cell.fullSpanGoal)}</td>
+      <td className="py-2 px-3 text-right tabular-nums">{fmt(cell.toDateGoal)}</td>
+      <td className="py-2 px-3 text-right tabular-nums font-semibold">{fmt(cell.actual)}</td>
+      <td className={cn("py-2 pl-3 text-right tabular-nums font-semibold", ptgColor(cell.ptgPercent))}>
+        {fmtPct(cell.ptgPercent)}
+      </td>
+    </tr>
+  );
+}
+
+function GoalMatrix({ data }: { data: LeasingDashboard }) {
+  const m = data.matrix;
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">
+          Lease Goals — Actual vs Target
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table className="w-full text-sm" data-testid="table-lease-matrix">
+          <thead>
+            <tr className="border-b text-muted-foreground">
+              <th className="py-2 pr-4 text-left font-medium">Measure</th>
+              <th className="py-2 px-3 text-right font-medium">Full Span Goal</th>
+              <th className="py-2 px-3 text-right font-medium">To Date Goal</th>
+              <th className="py-2 px-3 text-right font-medium">Actual</th>
+              <th className="py-2 pl-3 text-right font-medium">PTG %</th>
+            </tr>
+          </thead>
+          <tbody>
+            <MatrixRow label="Leases Ratified" cell={m.total} />
+            <MatrixRow label="Online Leases Ratified" cell={m.online} />
+            <MatrixRow label="Onsite Leases Ratified" cell={m.onsite} />
+            <MatrixRow
+              label="Net Leases"
+              cell={m.net}
+              sub="Ratified − cancelled, vs the ratified goal"
+            />
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CommunityTable({ data }: { data: LeasingDashboard }) {
+  const rows = data.communities;
+  const totals = useMemo(() => {
+    const sum = (pick: (r: (typeof rows)[number]) => number) =>
+      rows.reduce((t, r) => t + pick(r), 0);
+    return {
+      fullSpanGoal: sum((r) => r.fullSpanGoal),
+      toDateGoal: sum((r) => r.toDateGoal),
+      ratified: sum((r) => r.ratified),
+      onlineRatified: sum((r) => r.onlineRatified),
+      onsiteRatified: sum((r) => r.onsiteRatified),
+      cancelled: sum((r) => r.cancelled),
+      net: sum((r) => r.net),
+    };
+  }, [rows]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">Community Summary</CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table className="w-full text-xs sm:text-sm" data-testid="table-communities">
+          <thead>
+            <tr className="border-b text-muted-foreground">
+              <th className="py-2 pr-3 text-left font-medium">Community</th>
+              <th className="py-2 px-2 text-right font-medium">Lease Goal</th>
+              <th className="py-2 px-2 text-right font-medium">TD Goal</th>
+              <th className="py-2 px-2 text-right font-medium">Ratified</th>
+              <th className="py-2 px-2 text-right font-medium">Online</th>
+              <th className="py-2 px-2 text-right font-medium">Onsite</th>
+              <th className="py-2 px-2 text-right font-medium">Cancelled</th>
+              <th className="py-2 px-2 text-right font-medium">Net</th>
+              <th className="py-2 px-2 text-right font-medium">PTG %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.community} className="border-b last:border-0">
+                <td className="py-1.5 pr-3 font-medium whitespace-nowrap">
+                  {r.community}
+                </td>
+                <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.fullSpanGoal)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.toDateGoal)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums font-semibold">{fmt(r.ratified)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.onlineRatified)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.onsiteRatified)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.cancelled)}</td>
+                <td className="py-1.5 px-2 text-right tabular-nums font-semibold">{fmt(r.net)}</td>
+                <td className={cn("py-1.5 px-2 text-right tabular-nums font-semibold", ptgColor(r.ptgPercent))}>
+                  {fmtPct(r.ptgPercent, 0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="border-t font-semibold">
+              <td className="py-2 pr-3">Total</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.fullSpanGoal)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.toDateGoal)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.ratified)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.onlineRatified)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.onsiteRatified)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.cancelled)}</td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.net)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MonthlyChart({ data }: { data: LeasingDashboard }) {
+  const chartData = data.monthly.map((p) => ({
+    month: MONTHS[p.month - 1],
+    Ratified: p.ratified,
+    Cancelled: p.cancelled,
+    Net: p.net,
+    Goal: +p.goal.toFixed(1),
+  }));
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">
+          Monthly Leases — {data.fiscalYear}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ResponsiveContainer width="100%" height={300}>
+          <ComposedChart data={chartData} margin={{ left: 8, right: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+            <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => nf.format(v)} width={48} />
+            <RTooltip formatter={(v: number) => nf.format(v)} />
+            <Legend />
+            <Bar dataKey="Ratified" fill="#005473" barSize={18} radius={2} />
+            <Bar dataKey="Cancelled" fill="#dc2626" barSize={18} radius={2} />
+            <Line type="monotone" dataKey="Net" stroke="#457537" strokeWidth={2} dot={false} />
+            <Line
+              type="monotone"
+              dataKey="Goal"
+              stroke="#A69211"
+              strokeDasharray="5 4"
+              strokeWidth={1.5}
+              dot={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        {Array.from({ length: 7 }).map((_, i) => (
+          <Skeleton key={i} className="h-24" />
+        ))}
+      </div>
+      <Skeleton className="h-72 w-full" />
+      <Skeleton className="h-72 w-full" />
+    </div>
+  );
+}

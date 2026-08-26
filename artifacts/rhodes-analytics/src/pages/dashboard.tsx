@@ -5,10 +5,12 @@ import { Layout } from "@/components/layout";
 import { getDashboard } from "@/lib/workspaces";
 import NotFound from "@/pages/not-found";
 import OverviewWithTargetsPage from "@/pages/overview-with-targets";
+import LeasingPage from "@/pages/leasing";
 
 /** Dashboards that have been migrated get a dedicated component. */
 const MIGRATED: Record<string, React.ComponentType> = {
   "marketing/overview-with-targets": OverviewWithTargetsPage,
+  "marketing/leasing": LeasingPage,
 };
 
 export default function DashboardPage() {

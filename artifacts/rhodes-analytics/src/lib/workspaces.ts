@@ -12,6 +12,7 @@ import {
   ListChecks,
   Database,
   Megaphone,
+  KeyRound,
 } from "lucide-react";
 
 export type DashboardStatus = "available" | "coming-soon";
@@ -50,6 +51,14 @@ export const WORKSPACES: Workspace[] = [
           "Sales and traffic performance against Proforma, Business Plan, Goal, and Waterfall targets with PTG tracking.",
         status: "available",
         icon: Target,
+      },
+      {
+        slug: "leasing",
+        name: "Rhodes Living Leasing",
+        description:
+          "Leases ratified, cancelled, and net vs RL goals for the Rhodes Living communities.",
+        status: "available",
+        icon: KeyRound,
       },
       {
         slug: "overview",

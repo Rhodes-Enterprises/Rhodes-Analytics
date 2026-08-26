@@ -211,6 +211,88 @@ export const GetSnowflakeStatusResponse = zod.object({
 
 
 /**
+ * @summary Filter options for the Rhodes Living Leasing dashboard
+ */
+export const GetLeasingFiltersResponse = zod.object({
+  "communities": zod.array(zod.string()),
+  "channels": zod.array(zod.string())
+})
+
+
+/**
+ * @summary Rhodes Living Leasing dashboard data
+ */
+export const GetLeasingDashboardQueryParams = zod.object({
+  "community": zod.coerce.string().optional(),
+  "channel": zod.coerce.string().optional(),
+  "startDate": zod.coerce.string().optional(),
+  "endDate": zod.coerce.string().optional()
+})
+
+export const GetLeasingDashboardResponse = zod.object({
+  "appliedRange": zod.object({
+  "startDate": zod.string(),
+  "endDate": zod.string(),
+  "toDate": zod.string()
+}),
+  "fiscalYear": zod.number(),
+  "kpis": zod.object({
+  "leaseGoal": zod.number(),
+  "leaseTdGoal": zod.number(),
+  "leasesRatified": zod.number(),
+  "leasesCancelled": zod.number(),
+  "netLeases": zod.number(),
+  "ptgVariance": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "matrix": zod.object({
+  "total": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "online": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "onsite": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "net": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
+}),
+  "communities": zod.array(zod.object({
+  "community": zod.string(),
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "ratified": zod.number(),
+  "onlineRatified": zod.number(),
+  "onsiteRatified": zod.number(),
+  "cancelled": zod.number(),
+  "net": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})),
+  "monthly": zod.array(zod.object({
+  "month": zod.number(),
+  "ratified": zod.number(),
+  "cancelled": zod.number(),
+  "net": zod.number(),
+  "goal": zod.number()
+}))
+})
+
+
+/**
  * Returns server health status
  * @summary Health check
  */
