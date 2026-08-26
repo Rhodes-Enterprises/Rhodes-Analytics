@@ -48,6 +48,17 @@
  * online + onsite < total, so there is deliberately NO sum-to-total
  * assumption — per-cell baselines only.
  *
+ * Because those baselines hardcode the SAME 'Online'/'Onsite' literals the
+ * API uses, they share its blind spot: if the upstream data relabels the
+ * channel values (e.g. dbt renames 'Online' to 'Digital'), both sides
+ * compute 0 and every per-cell check passes 0=0 while the dashboard ships a
+ * zeroed online/onsite section. The default view therefore runs a channel
+ * label-drift guard: a materially non-zero headline baseline whose Online
+ * AND Onsite baselines are BOTH zero fails the audit, naming the channel
+ * column, the expected labels, and the labels actually present in the data.
+ * Quiet windows (total below AUDIT_CHANNEL_GUARD_MIN_TOTAL, e.g. day one of
+ * a quarter) are exempt so they cannot false-positive.
+ *
  * The breakdown tables (divisions / developments) are audited per row: leads,
  * tours, and sales against CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
@@ -81,6 +92,9 @@
  *   AUDIT_API_BASE       base URL of the API (default http://localhost:$PORT/api,
  *                        falling back to port 8080)
  *   AUDIT_TOLERANCE_PCT  allowed relative divergence in percent (default 0.5)
+ *   AUDIT_CHANNEL_GUARD_MIN_TOTAL
+ *                        minimum headline baseline count for the channel
+ *                        label-drift guard to judge a metric (default 10)
  *
  * Exits 0 when all totals match within tolerance, 1 otherwise.
  */
@@ -94,6 +108,9 @@ const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
 const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
+const CHANNEL_GUARD_MIN_TOTAL = Number(
+  process.env.AUDIT_CHANNEL_GUARD_MIN_TOTAL ?? "10",
+);
 interface DivisionRow {
   division: string;
   totalWebsiteUsers: number;
@@ -199,16 +216,19 @@ interface ScenarioFilters {
 
 interface Scenario {
   name: string;
+
   filters: ScenarioFilters;
   /**
    * Also audit the divisions/developments breakdown tables under this
    * scenario's filters (baselines bound to the same filters).
    */
+
   withBreakdowns?: boolean;
   /**
    * Also audit the website-user columns of the breakdown tables (GA-side
    * baselines). Default view only: those baselines bind no filters.
    */
+
   withGaBreakdowns?: boolean;
   /**
    * Also audit the funnel ratios table (actuals recomputed from baseline
@@ -216,6 +236,14 @@ interface Scenario {
    * those baselines bind no filters.
    */
   withRatios?: boolean;
+  /**
+   * Run the channel label-drift guard: fail when a headline baseline is
+   * materially non-zero but its 'Online' AND 'Onsite' baselines are both
+   * zero — the all-zero signature of relabeled channel values upstream.
+   * Default view only: a channel-filtered scenario legitimately zeroes the
+   * opposite channel's cells.
+   */
+  withChannelLabelGuard?: boolean;
 }
 
 interface Frag {
@@ -437,6 +465,93 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     );
     if (!ok) failed = true;
   }
+
+  // ---- Channel label-drift guard ----
+  // The six per-cell checks above and the API's channel split hardcode the
+  // same 'Online'/'Onsite' literals (chan() in src/lib/overview-targets.ts).
+  // If upstream data relabels the channel values (e.g. dbt renames 'Online'
+  // to 'Digital' in DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL or
+  // DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL), BOTH sides compute 0, every
+  // per-cell check passes 0=0, and the dashboard ships a zeroed online/onsite
+  // section with no alarm. A materially non-zero headline baseline whose two
+  // channel baselines are BOTH zero is that signature: unlabeled rows
+  // legitimately make online + onsite < total, but at volume they never take
+  // both to exactly zero. Totals below CHANNEL_GUARD_MIN_TOTAL are treated as
+  // too quiet to judge (e.g. day one of a quarter) and cannot false-positive.
+  if (scenario.withChannelLabelGuard) {
+    const guards = [
+      {
+        metric: "leads",
+        total: leads,
+        online: onlineLeads,
+        onsite: onsiteLeads,
+        column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
+        labelsSql: `SELECT COALESCE(C.ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
+           FROM DM_CONTACTS C
+           WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
+           GROUP BY 1 ORDER BY N DESC`,
+        binds: [expStart, expTo, ...cf.binds] as (string | number)[],
+      },
+      {
+        metric: "tours",
+        total: tours,
+        online: onlineTours,
+        onsite: onsiteTours,
+        column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
+        labelsSql: `SELECT COALESCE(C.ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
+           FROM DM_CONTACTS C
+           WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
+           GROUP BY 1 ORDER BY N DESC`,
+        binds: [expStart, expTo, ...cf.binds] as (string | number)[],
+      },
+      {
+        metric: "sales",
+        total: sales,
+        online: onlineSales,
+        onsite: onsiteSales,
+        column: "DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL",
+        labelsSql: `SELECT COALESCE(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
+           FROM DM_DEALS X
+           WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+             AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
+           GROUP BY 1 ORDER BY N DESC`,
+        binds: [expStart, expTo, ...df.binds] as (string | number)[],
+      },
+    ];
+    for (const g of guards) {
+      const name = `chLabels:${g.metric}`.padEnd(12);
+      if (g.total < CHANNEL_GUARD_MIN_TOTAL) {
+        console.log(
+          `OK   ${name} total=${g.total} < ${CHANNEL_GUARD_MIN_TOTAL} — window too quiet to judge label drift`,
+        );
+        continue;
+      }
+      if (g.online > 0 || g.onsite > 0) {
+        console.log(
+          `OK   ${name} 'Online'/'Onsite' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
+        );
+        continue;
+      }
+      // Fetch the labels actually present so the failure names the fix.
+      const labelRows = await querySnowflake<{ LABEL: string; N: number }>(
+        g.labelsSql,
+        g.binds,
+      );
+      const present =
+        labelRows.map((r) => `'${r.LABEL}' (${Number(r.N) || 0})`).join(", ") ||
+        "(no rows)";
+      console.error(
+        `FAIL ${name} ${g.total} ${g.metric} in ${expStart}..${expTo} but ZERO match 'Online' and ZERO match 'Onsite' ` +
+          `on ${g.column} — the expected channel labels are missing from the data; labels present: ${present}. ` +
+          `The dashboard's channel split AND this audit's baselines both hardcode 'Online'/'Onsite' ` +
+          `(chan() in src/lib/overview-targets.ts; countContacts/countDeals here), so every online/onsite ` +
+          `cell reads 0 and the per-cell checks pass 0=0. If upstream renamed the channel values, update ` +
+          `those literals to the new labels.`,
+      );
+      failed = true;
+    }
+  }
+
   return { ok: !failed, rangeOk: true, overview, expStart, expTo };
 }
 
@@ -900,6 +1015,7 @@ async function main() {
       withBreakdowns: true,
       withGaBreakdowns: true,
       withRatios: true,
+      withChannelLabelGuard: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
@@ -963,9 +1079,10 @@ async function main() {
         "in at least one scenario. Likely causes: join fan-out in the attribution " +
         "dimension, a filter bound to the wrong column, a GA grouping regression, " +
         "an online/onsite split keyed to the wrong channel column or with swapped " +
-        "labels, a mis-wired funnel ratio, a stale ratio-goal name, ignored date " +
-        "parameters, changed filters, stale cached data, or mislabeled/hidden " +
-        "communities in the Community List.",
+        "labels, upstream renaming of the 'Online'/'Onsite' channel values (see any " +
+        "chLabels guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
+        "name, ignored date parameters, changed filters, stale cached data, or " +
+        "mislabeled/hidden communities in the Community List.",
     );
     process.exit(1);
   }
