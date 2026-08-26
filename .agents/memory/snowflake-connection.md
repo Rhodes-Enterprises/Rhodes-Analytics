@@ -12,3 +12,4 @@ description: How the api-server talks to Snowflake (Replit connector) and schema
 - Rate limit: the connector proxy enforces ~10 RPS per repl (HTTP 429 "Rate limit exceeded"). Audit/batch scripts that fire parallel baseline queries must serialize through a queue and retry on 429; also retry API fetches on 5xx since a cold-cache endpoint can trip the same limit and surface as 502.
 - Verify endpoint: GET /api/snowflake/status (probe query returning session context or a clear error).
 - Lesson: pnpm store contents can mask a missing package.json dependency — a dep can vanish from the manifest (e.g. in a merge) while dev still works. After merges, confirm snowflake-sdk is declared where it's imported.
+- The connector proxy rate-limits at 10 RPS per repl (HTTP 429). Bursty dashboards + audit scripts hitting it together will 502; `proxyJson` retries 429s with backoff — keep that retry when touching the snowflake lib.

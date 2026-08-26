@@ -102,9 +102,14 @@ function convertCell(raw: string | null, type: string): unknown {
   }
 }
 
+// The Snowflake proxy enforces a shared per-repl rate limit (10 RPS). Bursty
+// dashboards + the audit script can exceed it; retry 429s with backoff
+// instead of failing the request.
+const RATE_LIMIT_MAX_RETRIES = 5;
+
 async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
   const connectors = getConnectors();
-  const response = await connectors.proxy("snowflake", path, {
+  let response = await connectors.proxy("snowflake", path, {
     method: init.method,
     headers: {
       "Content-Type": "application/json",
@@ -113,6 +118,20 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
     },
     body: init.body,
   });
+  for (let attempt = 1; response.status === 429 && attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    await response.text().catch(() => undefined); // drain before retrying
+    const backoffMs = Math.min(1000 * attempt, 5000) + Math.floor(Math.random() * 250);
+    await new Promise((r) => setTimeout(r, backoffMs));
+    response = await connectors.proxy("snowflake", path, {
+      method: init.method,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...init.headers,
+      },
+      body: init.body,
+    });
+  }
   const text = await response.text();
   let json: ResultSet;
   try {

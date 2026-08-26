@@ -542,6 +542,12 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
   const companies = new Set<string>();
   for (const r of goals) if (r.COMPANY_NAME) companies.add(r.COMPANY_NAME);
   for (const r of companyUsers) if (r.COMPANY_NAME?.includes("Esperanza")) companies.add(r.COMPANY_NAME);
+  // Also seed from actuals: a company with leads/tours/sales but no goals
+  // and no GA rows must still appear (its COMPANY_NAME comes from the
+  // Esperanza-only attribution dimension, so no brand filter needed).
+  for (const rows of [leads, tours, sales]) {
+    for (const r of rows) if (r.COMPANY_NAME) companies.add(r.COMPANY_NAME);
+  }
   const divisions = [...companies].sort().map((company) => {
     const uRow = companyUsers.filter((r) => r.COMPANY_NAME === company);
     const cTotalUsers = sumBy(uRow, (r) => Number(r.TOTAL_USERS) || 0);
@@ -584,6 +590,11 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
   for (const r of goals) addPair(r.COMPANY_NAME, r.DEVELOPMENT_NAME);
   for (const r of devUsers) {
     if (r.COMPANY_NAME?.includes("Esperanza")) addPair(r.COMPANY_NAME, r.DEVELOPMENT_NAME);
+  }
+  // Also seed from actuals so developments with leads/tours/sales but no
+  // goals and no GA rows still get a row (previously dropped silently).
+  for (const rows of [leads, tours, sales]) {
+    for (const r of rows) addPair(r.COMPANY_NAME, r.DEVELOPMENT_NAME);
   }
   const developments = [...devPairs.values()]
     .sort(
