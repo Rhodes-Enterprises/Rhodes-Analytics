@@ -18,6 +18,12 @@
  * don't go stale; failure to find a non-empty value FAILS the audit rather
  * than silently skipping the scenario.
  *
+ * The divisions/developments breakdown tables are audited (auditBreakdowns)
+ * in the default view AND under the company filter and the explicit date
+ * range, with baselines bound to the same filters — so a filter-specific
+ * attribution bug (e.g. a company filter that leaks other divisions' rows
+ * into the breakdown) fails the audit instead of slipping through.
+ *
  * Every scenario independently computes the range it expects the API to
  * apply (requested dates, or the server's default quarter) and asserts the
  * response's appliedRange matches it exactly — so an endpoint that ignores
@@ -161,6 +167,16 @@ interface ScenarioFilters {
 interface Scenario {
   name: string;
   filters: ScenarioFilters;
+  /**
+   * Also audit the divisions/developments breakdown tables under this
+   * scenario's filters (baselines bound to the same filters).
+   */
+  withBreakdowns?: boolean;
+  /**
+   * Also audit the website-user columns of the breakdown tables (GA-side
+   * baselines). Default view only: those baselines bind no filters.
+   */
+  withGaBreakdowns?: boolean;
 }
 
 interface Frag {
@@ -239,9 +255,15 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
   return params;
 }
 
-// ---------- Scenario execution ----------
-
-async function auditScenario(scenario: Scenario): Promise<boolean> {
+interface ScenarioResult {
+  ok: boolean;
+  /** false when the API did not honor the requested/default dates */
+  rangeOk: boolean;
+  overview: OverviewResponse;
+  expStart: string;
+  expTo: string;
+}
+async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   const f = scenario.filters;
   console.log(`\n=== Scenario: ${scenario.name} ===`);
   const params = toQueryParams(f);
@@ -268,7 +290,7 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
       `FAIL appliedRange mismatch: expected ${expStart}..${expEnd} (toDate=${expTo}), ` +
         `got ${ar.startDate}..${ar.endDate} (toDate=${ar.toDate}) — the API did not honor the requested/default dates`,
     );
-    return false;
+    return { ok: false, rangeOk: false, overview, expStart, expTo };
   }
 
   const cf = contactFrag(f);
@@ -334,7 +356,7 @@ async function auditScenario(scenario: Scenario): Promise<boolean> {
     );
     if (!ok) failed = true;
   }
-  return !failed;
+  return { ok: !failed, rangeOk: true, overview, expStart, expTo };
 }
 
 // ---------- Breakdown table audit (divisions / developments) ----------
@@ -354,42 +376,55 @@ function divergedPct(api: number, baseline: number): number {
 }
 
 /**
- * Audits the divisions and developments breakdown tables of the DEFAULT view
- * against independent Snowflake baselines grouped the same way the API groups
- * them (via the deduplicated Esperanza dimension, which cannot fan out).
+ * Audits the divisions and developments breakdown tables of one scenario's
+ * response against independent Snowflake baselines grouped the same way the
+ * API groups them (via the deduplicated Esperanza dimension, which cannot
+ * fan out). The scenario's filters are bound into every baseline query, so
+ * the audit also covers filtered views.
  *
  * Checks, per metric (leads / tours / sales):
  *  1. Every API division row matches a per-company baseline, and every
- *     non-zero baseline company appears in the API rows (mis-attribution or
- *     dropped-company detection).
- *  2. The same for a sample of development rows: every non-zero baseline
+ *     non-zero baseline company appears in the API rows. Under a company
+ *     filter this doubles as leak detection: another division's non-zero
+ *     row fails against its zero baseline.
+ *  2. The same for development rows: every non-zero baseline
  *     (company, development) pair must be present and match.
  *  3. Cross-check: breakdown rows + unattributed remainder must sum to the
  *     headline total (rows not mapped by the dimension have no division row,
- *     so the audit accounts for them explicitly instead of fudging tolerance).
+ *     so the audit accounts for them explicitly instead of fudging
+ *     tolerance). Under a company filter the remainder is structurally zero
+ *     — the filter itself excludes unattributable rows — and the query
+ *     verifies that rather than assuming it.
  */
 async function auditBreakdowns(
+  scenario: Scenario,
   overview: OverviewResponse,
   expStart: string,
   expTo: string,
 ): Promise<boolean> {
-  console.log(`\n=== Breakdown tables (default view) ===`);
+  console.log(`\n=== Breakdown tables (${scenario.name}) ===`);
+
+  // Same filter fragments the headline baselines use (alias C for contacts,
+  // X for deals); appended inside each WHERE below, before GROUP BY.
+  const cf = contactFrag(scenario.filters);
+  const df = dealFrag(scenario.filters);
 
   const metrics = [
     {
       name: "leads",
       headline: overview.trafficMatrix.total.leads.actual,
+      binds: [expStart, expTo, ...cf.binds] as (string | number)[],
       byCompanySql: `
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
@@ -397,23 +432,24 @@ async function auditBreakdowns(
         WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
           AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))`,
+                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.leads) || 0,
     },
     {
       name: "tours",
       headline: overview.trafficMatrix.total.tours.actual,
+      binds: [expStart, expTo, ...cf.binds] as (string | number)[],
       byCompanySql: `
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
@@ -421,25 +457,26 @@ async function auditBreakdowns(
         WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
           AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))`,
+                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.tours) || 0,
     },
     {
       name: "sales",
       headline: overview.kpis.grossSales,
+      binds: [expStart, expTo, ...df.binds] as (string | number)[],
       byCompanySql: `
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_DEALS X
         JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
         WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
-          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_DEALS X
         JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
         WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
-          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
@@ -448,19 +485,18 @@ async function auditBreakdowns(
           AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
           AND (X.DEAL_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR X.DEAL_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))`,
+                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${df.sql}`,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.sales) || 0,
     },
   ];
 
   let failed = false;
-  const binds = [expStart, expTo];
 
   for (const m of metrics) {
     const [byCompany, byDev, unattributed] = await Promise.all([
-      querySnowflake<BreakdownBaselineRow>(m.byCompanySql, binds),
-      querySnowflake<BreakdownBaselineRow>(m.byDevSql, binds),
-      countScalar(m.unattributedSql, binds),
+      querySnowflake<BreakdownBaselineRow>(m.byCompanySql, m.binds),
+      querySnowflake<BreakdownBaselineRow>(m.byDevSql, m.binds),
+      countScalar(m.unattributedSql, m.binds),
     ]);
 
     // --- 1. Division rows vs per-company baseline (both directions) ---
@@ -764,33 +800,55 @@ async function main() {
   );
 
   const scenarios: Scenario[] = [
-    { name: "default view", filters: {} },
-    { name: `company filter (${company})`, filters: { company } },
+    {
+      name: "default view",
+      filters: {},
+      withBreakdowns: true,
+      withGaBreakdowns: true,
+    },
+    { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
     { name: `channel filter (${channel})`, filters: { channel } },
-    explicitRangeScenario(startDate),
+    { ...explicitRangeScenario(startDate), withBreakdowns: true },
   ];
-  console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
+  console.log(
+    `Scenarios: ${scenarios
+      .map((s) => `${s.name}${s.withBreakdowns ? " [+breakdowns]" : ""}`)
+      .join("; ")}`,
+  );
 
   let anyFailed = false;
   for (const scenario of scenarios) {
-    const ok = await auditScenario(scenario);
-    if (!ok) anyFailed = true;
+    const result = await auditScenario(scenario);
+    if (!result.ok) anyFailed = true;
+    if (!scenario.withBreakdowns && !scenario.withGaBreakdowns) continue;
+    if (!result.rangeOk) {
+      // Baselines would be bound to a range the API never applied; the
+      // appliedRange failure above already fails the run.
+      console.error(
+        `Skipping breakdown audits for "${scenario.name}" — appliedRange mismatch`,
+      );
+      continue;
+    }
+    if (scenario.withBreakdowns) {
+      const breakdownsOk = await auditBreakdowns(
+        scenario,
+        result.overview,
+        result.expStart,
+        result.expTo,
+      );
+      if (!breakdownsOk) anyFailed = true;
+    }
+    // Website-user columns of the same tables — separate GA-side baselines.
+    if (scenario.withGaBreakdowns) {
+      const gaBreakdownsOk = await auditWebsiteUserBreakdowns(
+        result.overview,
+        result.expStart,
+        result.expTo,
+      );
+      if (!gaBreakdownsOk) anyFailed = true;
+    }
   }
-
-  // Breakdown tables (divisions / developments) — audited on the default
-  // view, where every division and development is present.
-  const defaultOverview = await fetchOverview({});
-  const breakdownsOk = await auditBreakdowns(defaultOverview, startDate, toDate);
-  if (!breakdownsOk) anyFailed = true;
-
-  // Website-user columns of the same tables — separate GA-side baselines.
-  const gaBreakdownsOk = await auditWebsiteUserBreakdowns(
-    defaultOverview,
-    startDate,
-    toDate,
-  );
-  if (!gaBreakdownsOk) anyFailed = true;
 
   if (anyFailed) {
     console.error(
