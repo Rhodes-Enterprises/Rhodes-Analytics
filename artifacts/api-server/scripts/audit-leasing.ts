@@ -26,6 +26,15 @@
  *   actually present for that year from Snowflake and FAILS LOUDLY when
  *   the prior year has no RL goal data at all — otherwise every goal
  *   check would compare 0 == 0 and pass while covering nothing.
+ * - Chart-vs-table consistency (funnel trend): the Monthly Trends chart's
+ *   per-stage series (web traffic, leads, first tours, move-ins) and the
+ *   funnel totals table in the SAME response are fed by different queries,
+ *   so every scenario also asserts, per stage, Σ monthly actuals ==
+ *   funnel.<stage>.actual and Σ monthly goals == funnel.<stage>.fullSpanGoal
+ *   (float tolerance only — both sides aggregate the same data, so the
+ *   audit-wide percentage tolerance would mask real drift). Consistency-only
+ *   channel variants guarantee BOTH Online and Onsite are exercised even
+ *   though the baseline scenarios only visit the busiest channel.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:leasing
@@ -81,6 +90,12 @@ interface MatrixCell {
   ptgPercent: number | null;
 }
 
+interface FunnelCell {
+  fullSpanGoal: number;
+  toDateGoal: number;
+  actual: number;
+}
+
 interface CommunityRow {
   community: string;
   fullSpanGoal: number;
@@ -98,6 +113,14 @@ interface MonthlyPoint {
   cancelled: number;
   net: number;
   goal: number;
+  webTraffic: number;
+  webTrafficGoal: number;
+  leads: number;
+  leadsGoal: number;
+  firstTours: number;
+  firstToursGoal: number;
+  moveIns: number;
+  moveInsGoal: number;
 }
 
 interface LeasingResponse {
@@ -110,6 +133,12 @@ interface LeasingResponse {
     leasesCancelled: number;
     netLeases: number;
     ptgVariance: number;
+  };
+  funnel: {
+    webTraffic: FunnelCell;
+    leads: FunnelCell;
+    firstTours: FunnelCell;
+    moveIns: FunnelCell;
   };
   matrix: {
     total: MatrixCell;
@@ -179,6 +208,20 @@ interface Scenario {
    * nothing.
    */
   requireGoalData?: boolean;
+  /**
+   * Run ONLY the funnel trend-vs-totals consistency checks (no Snowflake
+   * baselines). Used to cover the channel not visited by the baseline
+   * scenarios without doubling the whole audit's query load.
+   */
+  consistencyOnly?: boolean;
+  /**
+   * Fail the funnel trend consistency check when every stage sums to zero
+   * on both the actuals side and the goals side. Set on scenarios whose
+   * data is known non-empty (default view, prior year): all-zero there
+   * means the check verified nothing — e.g. the funnel and monthly queries
+   * broke in unison or stage goal types silently resolved to none.
+   */
+  requireFunnelData?: boolean;
 }
 
 function toQueryParams(f: ScenarioFilters): Record<string, string> {
@@ -295,6 +338,28 @@ function check(label: string, apiValue: number, baseline: number): void {
   }
 }
 
+/**
+ * Float-precision comparison for consistency checks BETWEEN two fields of
+ * the same API response. Unlike close(), no percentage tolerance applies:
+ * both sides aggregate identical underlying data, so anything beyond
+ * accumulated floating-point rounding (goals are daily-distributed
+ * fractions summed in different groupings) is real drift. NaN — e.g. a
+ * renamed or missing response field — never passes.
+ */
+function closeFloat(a: number, b: number): boolean {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.abs(a - b) <= 1e-6 + Math.max(Math.abs(a), Math.abs(b)) * 1e-9;
+}
+
+function checkFloat(label: string, chartValue: number, tableValue: number): void {
+  if (closeFloat(chartValue, tableValue)) {
+    console.log(`  OK   ${label}: chart=${chartValue} table=${tableValue}`);
+  } else {
+    failures++;
+    console.error(`  FAIL ${label}: chart=${chartValue} table=${tableValue}`);
+  }
+}
+
 // ---------- Scenario execution ----------
 
 async function auditScenario(scenario: Scenario): Promise<void> {
@@ -321,6 +386,13 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     );
     return; // baselines against a wrong range would be meaningless
   }
+
+  if (scenario.consistencyOnly) {
+    console.log("-- funnel trend vs totals (consistency-only variant)");
+    auditFunnelTrend(resp, scenario);
+    return;
+  }
+
   const fiscalYear = Number(expStart.slice(0, 4));
   if (resp.fiscalYear !== fiscalYear) {
     failures++;
@@ -407,6 +479,10 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   // ---- Monthly series ----
   console.log("-- monthly");
   await auditMonthly(resp, f, fiscalYear, expStart, expEnd, expTo, effGoalType("total"));
+
+  // ---- Funnel trend vs totals (chart-vs-table consistency) ----
+  console.log("-- funnel trend vs totals");
+  auditFunnelTrend(resp, scenario);
 }
 
 /**
@@ -600,6 +676,92 @@ async function auditMonthly(
   }
 }
 
+// ---------- Funnel trend vs totals (chart-vs-table consistency) ----------
+
+const TREND_STAGES = [
+  { stage: "webTraffic", actualField: "webTraffic", goalField: "webTrafficGoal" },
+  { stage: "leads", actualField: "leads", goalField: "leadsGoal" },
+  { stage: "firstTours", actualField: "firstTours", goalField: "firstToursGoal" },
+  { stage: "moveIns", actualField: "moveIns", goalField: "moveInsGoal" },
+] as const;
+
+/**
+ * The Monthly Trends chart's per-stage series and the funnel totals table
+ * shown on the same page are fed by DIFFERENT queries (fetchMonthlyTraffic /
+ * fetchMonthlyContactStage / fetchMonthlyGoals vs fetchTrafficCount /
+ * fetchContactStageCounts / fetchGoals). Nothing upstream forces them to
+ * agree, so assert within the SAME response, per stage:
+ *   Σ monthly actuals == funnel.<stage>.actual       (both cover start..toDate)
+ *   Σ monthly goals   == funnel.<stage>.fullSpanGoal (both cover start..endDate)
+ * A missing monthly field or funnel cell fails loudly: Number(undefined) is
+ * NaN, and NaN never passes checkFloat.
+ */
+function auditFunnelTrend(resp: LeasingResponse, scenario: Scenario): void {
+  if (!resp.funnel || !Array.isArray(resp.monthly)) {
+    failures++;
+    console.error(
+      "  FAIL response is missing the funnel totals or the monthly series — " +
+        "the chart-vs-table consistency check cannot run",
+    );
+    return;
+  }
+  const sumField = (field: keyof MonthlyPoint): number =>
+    resp.monthly.reduce((t, p) => t + Number(p[field]), 0);
+
+  let maxActual = 0;
+  let maxGoal = 0;
+  for (const { stage, actualField, goalField } of TREND_STAGES) {
+    const cell = resp.funnel[stage];
+    if (!cell) {
+      failures++;
+      console.error(`  FAIL funnel.${stage} missing from the response`);
+      continue;
+    }
+    const actualSum = sumField(actualField);
+    const goalSum = sumField(goalField);
+    const tableActual = Number(cell.actual);
+    const tableGoal = Number(cell.fullSpanGoal);
+    checkFloat(
+      `trend[${stage}] Σ monthly.${actualField} vs funnel.${stage}.actual`,
+      actualSum,
+      tableActual,
+    );
+    checkFloat(
+      `trend[${stage}] Σ monthly.${goalField} vs funnel.${stage}.fullSpanGoal`,
+      goalSum,
+      tableGoal,
+    );
+    maxActual = Math.max(maxActual, Math.abs(actualSum), Math.abs(tableActual) || 0);
+    maxGoal = Math.max(maxGoal, Math.abs(goalSum), Math.abs(tableGoal) || 0);
+  }
+
+  // All-zero on both sides of every stage would "pass" while proving
+  // nothing. On scenarios whose data is known non-empty (default view and
+  // the prior year: FY2025 has web sessions, leads, and RL_Leads/RL_Tours
+  // goals), that outcome means the funnel and monthly queries broke in
+  // unison or the stage goal types silently resolved to none — fail loudly.
+  if (scenario.requireFunnelData) {
+    if (maxActual === 0) {
+      failures++;
+      console.error(
+        "  FAIL every funnel stage has zero actuals on both the chart and " +
+          "table sides — this scenario's data is known non-empty, so the " +
+          "consistency check verified nothing (funnel/monthly actual " +
+          "queries both empty or both broken)",
+      );
+    }
+    if (maxGoal === 0) {
+      failures++;
+      console.error(
+        "  FAIL every funnel stage has zero goals on both the chart and " +
+          "table sides — this fiscal year has RL stage goals in DM_GOALS " +
+          "(FY2025: RL_Leads/RL_Tours; FY2026+: all stages), so the stage " +
+          "goal-type resolution is silently matching nothing",
+      );
+    }
+  }
+}
+
 // ---------- Representative filter selection ----------
 
 /**
@@ -677,7 +839,7 @@ async function main() {
 
   const priorYear = Number(startDate.slice(0, 4)) - 1;
   const scenarios: Scenario[] = [
-    { name: "default view", filters: {} },
+    { name: "default view", filters: {}, requireFunnelData: true },
     { name: `community filter (${community})`, filters: { community } },
     { name: `channel filter (${channel})`, filters: { channel } },
     explicitRangeScenario(startDate),
@@ -688,8 +850,23 @@ async function main() {
         endDate: `${priorYear}-12-31`,
       },
       requireGoalData: true,
+      requireFunnelData: true,
     },
   ];
+
+  // The funnel trend-vs-totals net must cover BOTH channels: a channel
+  // filter swaps in per-channel stage goal types (RL_Online_Leads, ...), so
+  // a regression can hit one channel only. The baseline scenarios visit
+  // just the busiest channel — add consistency-only variants for the rest.
+  for (const ch of ["Online", "Onsite"]) {
+    if (!scenarios.some((s) => s.filters.channel === ch)) {
+      scenarios.push({
+        name: `channel filter (${ch}) — funnel trend consistency only`,
+        filters: { channel: ch },
+        consistencyOnly: true,
+      });
+    }
+  }
   console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
 
   for (const scenario of scenarios) {
@@ -699,9 +876,10 @@ async function main() {
   if (failures > 0) {
     console.error(
       `\nAUDIT FAILED: ${failures} check(s) diverge from independent Snowflake ` +
-        "baselines. Likely causes: a filter bound to the wrong column, missing " +
-        "TRIM on community, wrong goal-type resolution, ignored date parameters, " +
-        "or stale cached data.",
+        "baselines or internal consistency. Likely causes: a filter bound to " +
+        "the wrong column, missing TRIM on community, wrong goal-type " +
+        "resolution, ignored date parameters, stale cached data, or the " +
+        "monthly trend queries drifting from the funnel totals queries.",
     );
     process.exit(1);
   }
