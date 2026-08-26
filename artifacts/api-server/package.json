@@ -8,6 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "audit:all": "node scripts/audit-all.mjs",
     "audit:dashboard": "esbuild scripts/audit-dashboard.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-dashboard.mjs --log-level=warning && node dist/audit-dashboard.mjs",
     "audit:yoy": "esbuild scripts/audit-yoy.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-yoy.mjs --log-level=warning && node dist/audit-yoy.mjs",
     "audit:leasing": "esbuild scripts/audit-leasing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-leasing.mjs --log-level=warning && node dist/audit-leasing.mjs"
