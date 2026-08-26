@@ -255,9 +255,10 @@ function appliedRange(filters: DashboardFilters) {
 
 /**
  * Pre-populates the in-memory query cache for the default (current-quarter)
- * view of the Overview page and each marketing dashboard so the first visitor
- * after a restart gets warm responses. Fire-and-forget; failures only mean a
- * cold first load. Disable with WARM_DASHBOARD_CACHE=0 (or "false").
+ * view of the Overview page, each marketing dashboard, and the Leasing page
+ * (current year to date) so the first visitor after a restart gets warm
+ * responses. Fire-and-forget; failures only mean a cold first load. Disable
+ * with WARM_DASHBOARD_CACHE=0 (or "false").
  */
 export function warmDefaultDashboardCaches(logger: { info: Function; warn: Function }): void {
   const flag = process.env.WARM_DASHBOARD_CACHE;
@@ -280,6 +281,8 @@ export function warmDefaultDashboardCaches(logger: { info: Function; warn: Funct
     ),
     ["ehi-goals", () => getEhiGoals(ehiGoalsYearFilters(filters))],
     ["communities", () => getCommunityList()],
+    ["leasing-filters", () => getLeasingFilterOptions()],
+    ["leasing", () => getLeasingDashboard(buildLeasingFilters({}))],
   ];
   void (async () => {
     const failed: string[] = [];
