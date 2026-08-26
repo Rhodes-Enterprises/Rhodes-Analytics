@@ -255,9 +255,9 @@ function appliedRange(filters: DashboardFilters) {
 
 /**
  * Pre-populates the in-memory query cache for the default (current-quarter)
- * view of each marketing dashboard so the first visitor after a restart gets
- * warm responses. Fire-and-forget; failures only mean a cold first load.
- * Disable with WARM_DASHBOARD_CACHE=0 (or "false").
+ * view of the Overview page and each marketing dashboard so the first visitor
+ * after a restart gets warm responses. Fire-and-forget; failures only mean a
+ * cold first load. Disable with WARM_DASHBOARD_CACHE=0 (or "false").
  */
 export function warmDefaultDashboardCaches(logger: { info: Function; warn: Function }): void {
   const flag = process.env.WARM_DASHBOARD_CACHE;
@@ -269,6 +269,11 @@ export function warmDefaultDashboardCaches(logger: { info: Function; warn: Funct
   // proxy's ~10 req/s rate limit. A user request arriving mid-warm-up shares
   // in-flight queries via the cache's single-flight dedupe.
   const jobs: [string, () => Promise<unknown>][] = [
+    // Overview is the landing page, so warm it first: the first visitor after
+    // a restart almost always hits these three endpoints.
+    ["overview-filters", () => getFilterOptions()],
+    ["overview-with-targets", () => getOverviewWithTargets(filters)],
+    ["overview-yoy", () => getYearOverYear(filters)],
     ["website-traffic", () => getWebsiteTraffic(filters)],
     ...FUNNEL_METRICS.map(
       (m): [string, () => Promise<unknown>] => [`funnel:${m}`, () => getFunnelMetric(m, filters)],
