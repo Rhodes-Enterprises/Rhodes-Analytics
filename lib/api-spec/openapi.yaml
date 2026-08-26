@@ -971,6 +971,8 @@ components:
                 type: boolean
               hasGoals:
                 type: boolean
+              isSelling:
+                type: boolean
               leadsYtd:
                 type: number
               toursYtd:
@@ -986,6 +988,7 @@ components:
                 postalCode,
                 isRental,
                 hasGoals,
+                isSelling,
                 leadsYtd,
                 toursYtd,
                 salesYtd,

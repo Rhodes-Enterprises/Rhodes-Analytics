@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, Search } from "lucide-react";
 import { useGetCommunities, useGetSnowflakeStatus } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,15 +8,65 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Breadcrumb, LiveStatusBadge, fmt } from "@/components/dashboard-shared";
 
+type SortKey = "development" | "division" | "leadsYtd" | "toursYtd" | "salesYtd";
+type SortDir = "asc" | "desc";
+
+const NUMERIC_KEYS = new Set<SortKey>(["leadsYtd", "toursYtd", "salesYtd"]);
+
+function SortHeader({
+  label,
+  colKey,
+  sortKey,
+  sortDir,
+  onSort,
+  align = "left",
+  last = false,
+}: {
+  label: string;
+  colKey: SortKey;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (key: SortKey) => void;
+  align?: "left" | "right";
+  last?: boolean;
+}) {
+  const active = sortKey === colKey;
+  const Icon = active ? (sortDir === "asc" ? ArrowUp : ArrowDown) : ChevronsUpDown;
+  return (
+    <th
+      className={`py-2 ${last ? "" : "pr-4"} ${align === "right" ? "text-right" : ""}`}
+      aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(colKey)}
+        data-testid={`button-sort-${colKey}`}
+        className={`inline-flex items-center gap-1 hover:text-foreground ${
+          active ? "text-foreground font-medium" : ""
+        } ${align === "right" ? "flex-row-reverse" : ""}`}
+      >
+        {label}
+        <Icon className="h-3 w-3 shrink-0" />
+      </button>
+    </th>
+  );
+}
+
 export default function CommunityListPage() {
   const [search, setSearch] = useState("");
   const [onlyWithGoals, setOnlyWithGoals] = useState(false);
+  const [showNonSelling, setShowNonSelling] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("leadsYtd");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const dash = useGetCommunities();
   const status = useGetSnowflakeStatus();
 
+  const total = dash.data?.communities.length ?? 0;
+
   const rows = useMemo(() => {
     let list = dash.data?.communities ?? [];
+    if (!showNonSelling) list = list.filter((c) => c.isSelling);
     if (onlyWithGoals) list = list.filter((c) => c.hasGoals);
     const q = search.trim().toLowerCase();
     if (q) {
@@ -27,8 +77,24 @@ export default function CommunityListPage() {
           c.city.toLowerCase().includes(q),
       );
     }
-    return list;
-  }, [dash.data, search, onlyWithGoals]);
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const cmp = NUMERIC_KEYS.has(sortKey)
+        ? (a[sortKey] as number) - (b[sortKey] as number)
+        : String(a[sortKey]).localeCompare(String(b[sortKey]));
+      return cmp !== 0 ? dir * cmp : a.development.localeCompare(b.development);
+    });
+  }, [dash.data, search, onlyWithGoals, showNonSelling, sortKey, sortDir]);
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      // Numeric columns start with the biggest numbers on top.
+      setSortDir(NUMERIC_KEYS.has(key) ? "desc" : "asc");
+    }
+  };
 
   return (
     <Layout>
@@ -67,8 +133,17 @@ export default function CommunityListPage() {
               />
               Only communities with goals
             </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={showNonSelling}
+                onChange={(e) => setShowNonSelling(e.target.checked)}
+                data-testid="checkbox-show-non-selling"
+              />
+              Show non-selling projects
+            </label>
             <span className="text-xs text-muted-foreground ml-auto" data-testid="text-count">
-              {rows.length} communities
+              {rows.length} of {total} projects
             </span>
           </CardContent>
         </Card>
@@ -90,13 +165,47 @@ export default function CommunityListPage() {
               <table className="w-full text-sm" data-testid="table-communities">
                 <thead>
                   <tr className="border-b text-left text-xs text-muted-foreground">
-                    <th className="py-2 pr-4">Development</th>
-                    <th className="py-2 pr-4">Division</th>
+                    <SortHeader
+                      label="Development"
+                      colKey="development"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                    <SortHeader
+                      label="Division"
+                      colKey="division"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
                     <th className="py-2 pr-4">Location</th>
                     <th className="py-2 pr-4">Flags</th>
-                    <th className="py-2 pr-4 text-right">Leads YTD</th>
-                    <th className="py-2 pr-4 text-right">Tours YTD</th>
-                    <th className="py-2 text-right">Sales YTD</th>
+                    <SortHeader
+                      label="Leads YTD"
+                      colKey="leadsYtd"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                      align="right"
+                    />
+                    <SortHeader
+                      label="Tours YTD"
+                      colKey="toursYtd"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                      align="right"
+                    />
+                    <SortHeader
+                      label="Sales YTD"
+                      colKey="salesYtd"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                      align="right"
+                      last
+                    />
                   </tr>
                 </thead>
                 <tbody>
@@ -111,6 +220,11 @@ export default function CommunityListPage() {
                         <div className="flex gap-1">
                           {c.hasGoals && <Badge variant="secondary">Goals</Badge>}
                           {c.isRental && <Badge variant="outline">Rental</Badge>}
+                          {!c.isSelling && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              No activity
+                            </Badge>
+                          )}
                         </div>
                       </td>
                       <td className="py-1.5 pr-4 text-right">{fmt(c.leadsYtd)}</td>
@@ -118,6 +232,13 @@ export default function CommunityListPage() {
                       <td className="py-1.5 text-right">{fmt(c.salesYtd)}</td>
                     </tr>
                   ))}
+                  {rows.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-muted-foreground">
+                        No communities match the current filters.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </CardContent>

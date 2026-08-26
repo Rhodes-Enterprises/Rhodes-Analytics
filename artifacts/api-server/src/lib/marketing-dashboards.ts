@@ -628,7 +628,7 @@ export async function getEhiGoals(f: DashboardFilters) {
 export async function getCommunityList() {
   const yearStart = `${new Date().getFullYear()}-01-01`;
   const today = new Date().toISOString().slice(0, 10);
-  return cached(`communities:${today}`, async () => {
+  return cached(`communities:v2:${today}`, async () => {
     const rows = await querySnowflake<{
       DEVELOPMENT_NAME: string;
       COMPANY_NAME: string;
@@ -648,7 +648,7 @@ export async function getCommunityList() {
          WHERE COMPANY_NAME ILIKE '%esperanza%'
          QUALIFY ROW_NUMBER() OVER (
            PARTITION BY DEVELOPMENT_NAME
-           ORDER BY DEVELOPMENT_HAS_GOALS_FLAG DESC NULLS LAST, COMPANY_NAME
+           ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
          ) = 1
        ),
        L AS (
@@ -683,19 +683,30 @@ export async function getCommunityList() {
       [yearStart, today, yearStart, today, yearStart, today],
     );
     return {
-      communities: rows.map((r) => ({
-        development: r.DEVELOPMENT_NAME,
-        division: r.COMPANY_NAME,
-        city: r.CITY ?? "",
-        state: r.STATE ?? "",
-        postalCode: r.POSTAL_CODE ?? "",
-        isRental: r.RENTAL_COMMUNITY_FLAG === "Yes" || r.RENTAL_COMMUNITY_FLAG === "TRUE",
-        hasGoals:
-          r.DEVELOPMENT_HAS_GOALS_FLAG === "Yes" || r.DEVELOPMENT_HAS_GOALS_FLAG === "TRUE",
-        leadsYtd: n(r.LEADS_YTD),
-        toursYtd: n(r.TOURS_YTD),
-        salesYtd: n(r.SALES_YTD),
-      })),
+      communities: rows.map((r) => {
+        // Snowflake stores these as labels: 'Has Goals' / 'No Goals' and
+        // 'Rental' / 'For Sale'.
+        const hasGoals = r.DEVELOPMENT_HAS_GOALS_FLAG === "Has Goals";
+        const leadsYtd = n(r.LEADS_YTD);
+        const toursYtd = n(r.TOURS_YTD);
+        const salesYtd = n(r.SALES_YTD);
+        return {
+          development: r.DEVELOPMENT_NAME,
+          division: r.COMPANY_NAME,
+          city: r.CITY ?? "",
+          state: r.STATE ?? "",
+          postalCode: r.POSTAL_CODE ?? "",
+          isRental: r.RENTAL_COMMUNITY_FLAG === "Rental",
+          hasGoals,
+          // A "selling" community has goals or any YTD funnel activity. Rows with
+          // neither are internal projects (e.g. "16th Floor Renovation") that the
+          // UI hides by default.
+          isSelling: hasGoals || leadsYtd > 0 || toursYtd > 0 || salesYtd > 0,
+          leadsYtd,
+          toursYtd,
+          salesYtd,
+        };
+      }),
     };
   });
 }

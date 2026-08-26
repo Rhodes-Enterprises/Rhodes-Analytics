@@ -367,6 +367,7 @@ export const GetCommunitiesResponse = zod.object({
   "postalCode": zod.string(),
   "isRental": zod.boolean(),
   "hasGoals": zod.boolean(),
+  "isSelling": zod.boolean(),
   "leadsYtd": zod.number(),
   "toursYtd": zod.number(),
   "salesYtd": zod.number()

@@ -14,6 +14,7 @@ export type CommunityListCommunitiesItem = {
   postalCode: string;
   isRental: boolean;
   hasGoals: boolean;
+  isSelling: boolean;
   leadsYtd: number;
   toursYtd: number;
   salesYtd: number;
