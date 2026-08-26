@@ -37,6 +37,17 @@
  * picked via G_COMPANY=1 — which can regress independently of the per-row
  * values, so both get their own scalar GA baselines.
  *
+ * The six channel-split cells (trafficMatrix.online/onsite × leads, tours,
+ * sales) are audited in every scenario too, each against a baseline that
+ * re-counts the same source rows restricted to the channel column the
+ * dashboard keys on (ONSITE_ONLINE_SOURCE_CHANNEL for contacts,
+ * DEAL_ONSITE_ONLINE_SOURCE_CHANNEL for deals) with the literal 'Online' /
+ * 'Onsite' labels. A regression that keys the split off the wrong column or
+ * swaps the labels leaves every audited total unchanged, so only these
+ * per-cell checks can catch it. Rows with NULL channel legitimately make
+ * online + onsite < total, so there is deliberately NO sum-to-total
+ * assumption — per-cell baselines only.
+ *
  * The breakdown tables (divisions / developments) are audited per row: leads,
  * tours, and sales against CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
@@ -87,7 +98,17 @@ interface OverviewResponse {
   appliedRange: { startDate: string; endDate: string; toDate: string; target: string };
   kpis: { grossSales: number };
   trafficMatrix: {
-    online: { websiteUsers: { actual: number } };
+    online: {
+      websiteUsers: { actual: number };
+      leads: { actual: number };
+      tours: { actual: number };
+      sales: { actual: number };
+    };
+    onsite: {
+      leads: { actual: number };
+      tours: { actual: number };
+      sales: { actual: number };
+    };
     total: { leads: { actual: number }; tours: { actual: number } };
     /** Headline NEW-users count from the overall () grouping-set row */
     newWebsiteUsers: number;
@@ -300,23 +321,49 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   // Independent baselines — bound to the EXPECTED dates (start..elapsed
   // cutoff), same window the API applies to actuals, no attribution join
   // that could fan out counts.
-  const [leads, tours, sales, users, newUsers] = await Promise.all([
+  //
+  // The channel variants re-count the same rows restricted to the hardcoded
+  // 'Online' / 'Onsite' labels on the channel column the dashboard keys on.
+  // Composing with a scenario channel filter (already in cf/df) is correct by
+  // construction: a matching label is redundant, a contradicting one yields 0
+  // — exactly what the API's cell must show under that filter.
+  const countContacts = (
+    dateCol: "CONTACT_CREATE_DATE" | "EHI_MIN_FIRST_TOUR_DATE",
+    channel?: "Online" | "Onsite",
+  ) =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}`,
-      [expStart, expTo, ...cf.binds],
-    ),
-    countScalar(
-      `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}`,
-      [expStart, expTo, ...cf.binds],
-    ),
+       WHERE C.EHI_LEAD = 1 AND C.${dateCol} BETWEEN ? AND ?${cf.sql}${
+         channel ? " AND C.ONSITE_ONLINE_SOURCE_CHANNEL = ?" : ""
+       }`,
+      [expStart, expTo, ...cf.binds, ...(channel ? [channel] : [])],
+    );
+  const countDeals = (channel?: "Online" | "Onsite") =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_DEALS X
        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
-         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}`,
-      [expStart, expTo, ...df.binds],
-    ),
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}${
+           channel ? " AND X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?" : ""
+         }`,
+      [expStart, expTo, ...df.binds, ...(channel ? [channel] : [])],
+    );
+
+  const [
+    leads,
+    tours,
+    sales,
+    users,
+    newUsers,
+    onlineLeads,
+    onsiteLeads,
+    onlineTours,
+    onsiteTours,
+    onlineSales,
+    onsiteSales,
+  ] = await Promise.all([
+    countContacts("CONTACT_CREATE_DATE"),
+    countContacts("EHI_MIN_FIRST_TOUR_DATE"),
+    countDeals(),
     countScalar(
       `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
        WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
@@ -331,14 +378,30 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
        WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
       [expStart, expTo, ...gf.binds],
     ),
+    countContacts("CONTACT_CREATE_DATE", "Online"),
+    countContacts("CONTACT_CREATE_DATE", "Onsite"),
+    countContacts("EHI_MIN_FIRST_TOUR_DATE", "Online"),
+    countContacts("EHI_MIN_FIRST_TOUR_DATE", "Onsite"),
+    countDeals("Online"),
+    countDeals("Onsite"),
   ]);
 
+  const tm = overview.trafficMatrix;
   const checks: { name: string; api: number; baseline: number }[] = [
-    { name: "leads", api: overview.trafficMatrix.total.leads.actual, baseline: leads },
-    { name: "tours", api: overview.trafficMatrix.total.tours.actual, baseline: tours },
+    { name: "leads", api: tm.total.leads.actual, baseline: leads },
+    { name: "tours", api: tm.total.tours.actual, baseline: tours },
     { name: "sales", api: overview.kpis.grossSales, baseline: sales },
-    { name: "users", api: overview.trafficMatrix.online.websiteUsers.actual, baseline: users },
-    { name: "newUsers", api: overview.trafficMatrix.newWebsiteUsers, baseline: newUsers },
+    { name: "users", api: tm.online.websiteUsers.actual, baseline: users },
+    { name: "newUsers", api: tm.newWebsiteUsers, baseline: newUsers },
+    // Channel-split cells: a mis-keyed channel column or swapped Online/
+    // Onsite labels leaves every total above unchanged — only these
+    // per-cell comparisons catch that regression class.
+    { name: "onlineLeads", api: tm.online.leads.actual, baseline: onlineLeads },
+    { name: "onsiteLeads", api: tm.onsite.leads.actual, baseline: onsiteLeads },
+    { name: "onlineTours", api: tm.online.tours.actual, baseline: onlineTours },
+    { name: "onsiteTours", api: tm.onsite.tours.actual, baseline: onsiteTours },
+    { name: "onlineSales", api: tm.online.sales.actual, baseline: onlineSales },
+    { name: "onsiteSales", api: tm.onsite.sales.actual, baseline: onsiteSales },
   ];
 
   let failed = false;
@@ -352,7 +415,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     const ok = divergencePct <= TOLERANCE_PCT;
     const status = ok ? "OK  " : "FAIL";
     console.log(
-      `${status} ${c.name.padEnd(8)} api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`,
+      `${status} ${c.name.padEnd(12)} api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`,
     );
     if (!ok) failed = true;
   }
@@ -855,7 +918,8 @@ async function main() {
       "\nAUDIT FAILED: dashboard totals diverge from independent Snowflake baselines " +
         "in at least one scenario. Likely causes: join fan-out in the attribution " +
         "dimension, a filter bound to the wrong column, a GA grouping regression, " +
-        "ignored date parameters, changed filters, or stale cached data.",
+        "an online/onsite split keyed to the wrong channel column or with swapped " +
+        "labels, ignored date parameters, changed filters, or stale cached data.",
     );
     process.exit(1);
   }
