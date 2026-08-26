@@ -86,12 +86,23 @@ export interface LeasingCommunityRow {
   ptgPercent: number | null;
 }
 
+/**
+ * Monthly actual vs goal per funnel stage. Stage goals are 0 when no matching RL_* goal type exists for the fiscal year / channel filter.
+ */
 export interface LeasingMonthlyPoint {
   month: number;
   ratified: number;
   cancelled: number;
   net: number;
   goal: number;
+  webTraffic: number;
+  webTrafficGoal: number;
+  leads: number;
+  leadsGoal: number;
+  firstTours: number;
+  firstToursGoal: number;
+  moveIns: number;
+  moveInsGoal: number;
 }
 
 export interface LeasingDashboard {

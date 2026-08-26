@@ -292,28 +292,93 @@ async function fetchMonthly(
   );
 }
 
-/** Monthly goals cover the full requested span: startDate → endDate. */
-async function fetchMonthlyGoal(
+interface MonthlyGoalRow extends MonthlyRow {
+  GOAL_TYPE: string;
+}
+
+/**
+ * Monthly goals cover the full requested span: startDate → endDate.
+ * One query for all requested goal types (lease trend + funnel stages) to
+ * stay under the Snowflake proxy rate limit.
+ */
+async function fetchMonthlyGoals(
   f: LeasingFilters,
   fiscalYear: number,
-  goalType: string | undefined,
-): Promise<MonthlyRow[]> {
-  if (!goalType) return [];
-  const binds: (string | number)[] = [fiscalYear, goalType, f.startDate, f.endDate];
+  goalTypes: string[],
+): Promise<MonthlyGoalRow[]> {
+  if (goalTypes.length === 0) return [];
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const binds: (string | number)[] = [fiscalYear, ...goalTypes, f.startDate, f.endDate];
   let communitySql = "";
   if (f.community) {
     communitySql = " AND DEVELOPMENT_NAME = ?";
     binds.push(f.community);
   }
   const sql = `
-    SELECT MONTH(BUDGET_DATE) AS M, SUM(GOAL) AS N
+    SELECT GOAL_TYPE, MONTH(BUDGET_DATE) AS M, SUM(GOAL) AS N
     FROM DM_GOALS
-    WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ?
+    WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
       AND BUDGET_DATE BETWEEN ? AND ?${communitySql}
-    GROUP BY 1`;
+    GROUP BY 1, 2`;
   return cached(
-    `rlMonthlyGoal:${fiscalYear}:${goalType}:${f.startDate}:${f.endDate}:${f.community ?? ""}`,
-    () => querySnowflake<MonthlyRow>(sql, binds),
+    `rlMonthlyGoals:${fiscalYear}:${[...goalTypes].sort().join(",")}:${f.startDate}:${f.endDate}:${f.community ?? ""}`,
+    () => querySnowflake<MonthlyGoalRow>(sql, binds),
+  );
+}
+
+/** Monthly RL web sessions (same source/filters as fetchTrafficCount). */
+async function fetchMonthlyTraffic(f: LeasingFilters): Promise<MonthlyRow[]> {
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  let communitySql = "";
+  if (f.community) {
+    communitySql = " AND MATCHED_DEVELOPMENT_NAME = ?";
+    binds.push(f.community);
+  }
+  const sql = `
+    SELECT MONTH(GOOGLE_ANALYTICS_DATE) AS M, COUNT(*) AS N
+    FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+    WHERE PROPERTY = 'Rhodes Living'
+      AND IS_SESSION_START = 'Yes'
+      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}
+    GROUP BY 1`;
+  return cached(`rlMonthlyTraffic:${JSON.stringify(f)}`, () =>
+    querySnowflake<MonthlyRow>(sql, binds),
+  );
+}
+
+/** Monthly contact-stage counts (same definitions as fetchContactStageCounts). */
+async function fetchMonthlyContactStage(
+  f: LeasingFilters,
+  stage: "leads" | "firstTours" | "moveIns",
+): Promise<MonthlyRow[]> {
+  const dateExpr = {
+    leads: "X.CONTACT_CREATE_DATE",
+    firstTours: "X.RL_MIN_FIRST_TOUR_DATE",
+    moveIns: "TO_DATE(X.RL_MIN_MOVE_IN_DATE)",
+  }[stage];
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  const parts: string[] = [];
+  if (stage === "leads") {
+    parts.push(
+      "X.RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+    );
+  }
+  if (f.community) {
+    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("X.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const sql = `
+    SELECT MONTH(${dateExpr}) AS M, COUNT(*) AS N
+    FROM DM_CONTACTS X
+    WHERE ${dateExpr} BETWEEN ? AND ?${extra}
+    GROUP BY 1`;
+  return cached(`rlMonthlyFunnel:${stage}:${JSON.stringify(f)}`, () =>
+    querySnowflake<MonthlyRow>(sql, binds),
   );
 }
 
@@ -397,6 +462,25 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     const m = effectiveMetric("total");
     return m ? goalTypeByMetric.get(m) : undefined;
   })();
+  // Per-stage monthly goal types follow the same channel rules as the funnel
+  // matrix: stages without a goal for the effective metric get no goal (0s).
+  const stageTrendGoalType = (stage: FunnelStage): string | undefined => {
+    const m = effectiveMetric("total");
+    return m ? funnelGoalTypes.get(`${stage}:${m}`) : undefined;
+  };
+  const funnelTrendGoalTypes: Record<FunnelStage, string | undefined> = {
+    webTraffic: stageTrendGoalType("webTraffic"),
+    leads: stageTrendGoalType("leads"),
+    firstTours: stageTrendGoalType("firstTours"),
+    moveIns: stageTrendGoalType("moveIns"),
+  };
+  const monthlyGoalTypes = [
+    ...new Set(
+      [trendGoalType, ...Object.values(funnelTrendGoalTypes)].filter(
+        (t): t is string => Boolean(t),
+      ),
+    ),
+  ];
 
   const [
     goals,
@@ -404,22 +488,30 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     cancelled,
     monthlyRatified,
     monthlyCancelled,
-    monthlyGoal,
+    monthlyGoals,
     traffic,
     leadRows,
     tourRows,
     moveInRows,
+    monthlyTraffic,
+    monthlyLeads,
+    monthlyTours,
+    monthlyMoveIns,
   ] = await Promise.all([
     fetchGoals(f, fiscalYear, types),
     fetchLeaseCounts(f, "LEASE_RATIFIED_DATE"),
     fetchLeaseCounts(f, "CANCELLATION_DATE"),
     fetchMonthly(f, "LEASE_RATIFIED_DATE"),
     fetchMonthly(f, "CANCELLATION_DATE"),
-    fetchMonthlyGoal(f, fiscalYear, trendGoalType),
+    fetchMonthlyGoals(f, fiscalYear, monthlyGoalTypes),
     fetchTrafficCount(f),
     fetchContactStageCounts(f, "leads"),
     fetchContactStageCounts(f, "firstTours"),
     fetchContactStageCounts(f, "moveIns"),
+    fetchMonthlyTraffic(f),
+    fetchMonthlyContactStage(f, "leads"),
+    fetchMonthlyContactStage(f, "firstTours"),
+    fetchMonthlyContactStage(f, "moveIns"),
   ]);
 
   const goalTotal = (
@@ -556,12 +648,18 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     };
   });
 
-  // Monthly trend across the fiscal year (unfiltered by the date range so the
-  // chart always shows the full year context).
+  // Monthly trend per funnel stage. Actuals honor startDate → toDate
+  // (elapsed); goals cover startDate → endDate, matching the totals above.
   const byMonth = (rows: MonthlyRow[], m: number) =>
     rows
       .filter((r) => Number(r.M) === m)
       .reduce((t, r) => t + (Number(r.N) || 0), 0);
+  const goalByMonth = (type: string | undefined, m: number) =>
+    type
+      ? monthlyGoals
+          .filter((r) => r.GOAL_TYPE === type && Number(r.M) === m)
+          .reduce((t, r) => t + (Number(r.N) || 0), 0)
+      : 0;
   const monthly = Array.from({ length: 12 }, (_, i) => {
     const m = i + 1;
     const rat = byMonth(monthlyRatified, m);
@@ -571,7 +669,15 @@ export async function getLeasingDashboard(f: LeasingFilters) {
       ratified: rat,
       cancelled: can,
       net: rat - can,
-      goal: byMonth(monthlyGoal, m),
+      goal: goalByMonth(trendGoalType, m),
+      webTraffic: byMonth(monthlyTraffic, m),
+      webTrafficGoal: goalByMonth(funnelTrendGoalTypes.webTraffic, m),
+      leads: byMonth(monthlyLeads, m),
+      leadsGoal: goalByMonth(funnelTrendGoalTypes.leads, m),
+      firstTours: byMonth(monthlyTours, m),
+      firstToursGoal: goalByMonth(funnelTrendGoalTypes.firstTours, m),
+      moveIns: byMonth(monthlyMoveIns, m),
+      moveInsGoal: goalByMonth(funnelTrendGoalTypes.moveIns, m),
     };
   });
 

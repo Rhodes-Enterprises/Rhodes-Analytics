@@ -504,6 +504,9 @@ components:
         [community, fullSpanGoal, toDateGoal, ratified, onlineRatified, onsiteRatified, cancelled, net, ptgPercent]
     LeasingMonthlyPoint:
       type: object
+      description: >
+        Monthly actual vs goal per funnel stage. Stage goals are 0 when no
+        matching RL_* goal type exists for the fiscal year / channel filter.
       properties:
         month:
           type: number
@@ -515,7 +518,24 @@ components:
           type: number
         goal:
           type: number
-      required: [month, ratified, cancelled, net, goal]
+        webTraffic:
+          type: number
+        webTrafficGoal:
+          type: number
+        leads:
+          type: number
+        leadsGoal:
+          type: number
+        firstTours:
+          type: number
+        firstToursGoal:
+          type: number
+        moveIns:
+          type: number
+        moveInsGoal:
+          type: number
+      required:
+        [month, ratified, cancelled, net, goal, webTraffic, webTrafficGoal, leads, leadsGoal, firstTours, firstToursGoal, moveIns, moveInsGoal]
     OwtGoalCell:
       type: object
       properties:

@@ -518,8 +518,16 @@ export const GetLeasingDashboardResponse = zod.object({
   "ratified": zod.number(),
   "cancelled": zod.number(),
   "net": zod.number(),
-  "goal": zod.number()
-}))
+  "goal": zod.number(),
+  "webTraffic": zod.number(),
+  "webTrafficGoal": zod.number(),
+  "leads": zod.number(),
+  "leadsGoal": zod.number(),
+  "firstTours": zod.number(),
+  "firstToursGoal": zod.number(),
+  "moveIns": zod.number(),
+  "moveInsGoal": zod.number()
+}).describe('Monthly actual vs goal per funnel stage. Stage goals are 0 when no matching RL_\* goal type exists for the fiscal year \/ channel filter.\n'))
 })
 
 

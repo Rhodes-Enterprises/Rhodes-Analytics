@@ -545,42 +545,122 @@ function CommunityTable({ data }: { data: LeasingDashboard }) {
   );
 }
 
+type MonthlyPoint = LeasingDashboard["monthly"][number];
+
+const TREND_STAGES = [
+  { key: "leases", label: "Leases" },
+  { key: "webTraffic", label: "Web Traffic" },
+  { key: "leads", label: "Leads" },
+  { key: "firstTours", label: "First Tours" },
+  { key: "moveIns", label: "Move-Ins" },
+] as const;
+type TrendStageKey = (typeof TREND_STAGES)[number]["key"];
+
+const STAGE_SERIES: Record<
+  Exclude<TrendStageKey, "leases">,
+  (p: MonthlyPoint) => { actual: number; goal: number }
+> = {
+  webTraffic: (p) => ({ actual: p.webTraffic, goal: p.webTrafficGoal }),
+  leads: (p) => ({ actual: p.leads, goal: p.leadsGoal }),
+  firstTours: (p) => ({ actual: p.firstTours, goal: p.firstToursGoal }),
+  moveIns: (p) => ({ actual: p.moveIns, goal: p.moveInsGoal }),
+};
+
 function MonthlyChart({ data }: { data: LeasingDashboard }) {
-  const chartData = data.monthly.map((p) => ({
+  const [stage, setStage] = useState<TrendStageKey>("leases");
+  const stageLabel = TREND_STAGES.find((s) => s.key === stage)?.label ?? "";
+
+  const leaseData = data.monthly.map((p) => ({
     month: MONTHS[p.month - 1],
     Ratified: p.ratified,
     Cancelled: p.cancelled,
     Net: p.net,
     Goal: +p.goal.toFixed(1),
   }));
+  const stageData =
+    stage === "leases"
+      ? []
+      : data.monthly.map((p) => {
+          const { actual, goal } = STAGE_SERIES[stage](p);
+          return {
+            month: MONTHS[p.month - 1],
+            Actual: actual,
+            Goal: +goal.toFixed(1),
+          };
+        });
+  // A stage with no matching RL_* goal (older years, channel filters) comes
+  // back as all-zero goals — drop the line rather than plot a flat zero.
+  const hasStageGoal = stageData.some((p) => p.Goal !== 0);
+
   return (
-    <Card>
+    <Card data-testid="card-monthly-trends">
       <CardHeader className="pb-2">
-        <CardTitle className="text-base">
-          Monthly Leases — {data.fiscalYear}
-        </CardTitle>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">
+            Monthly Trends — {data.fiscalYear}
+          </CardTitle>
+          <div className="flex flex-wrap gap-1">
+            {TREND_STAGES.map((s) => (
+              <Button
+                key={s.key}
+                size="sm"
+                variant={stage === s.key ? "default" : "outline"}
+                onClick={() => setStage(s.key)}
+                data-testid={`button-trend-${s.key}`}
+              >
+                {s.label}
+              </Button>
+            ))}
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={300}>
-          <ComposedChart data={chartData} margin={{ left: 8, right: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => nf.format(v)} width={48} />
-            <RTooltip formatter={(v: number) => nf.format(v)} />
-            <Legend />
-            <Bar dataKey="Ratified" fill="#005473" barSize={18} radius={2} />
-            <Bar dataKey="Cancelled" fill="#dc2626" barSize={18} radius={2} />
-            <Line type="monotone" dataKey="Net" stroke="#457537" strokeWidth={2} dot={false} />
-            <Line
-              type="monotone"
-              dataKey="Goal"
-              stroke="#A69211"
-              strokeDasharray="5 4"
-              strokeWidth={1.5}
-              dot={false}
-            />
-          </ComposedChart>
+          {stage === "leases" ? (
+            <ComposedChart data={leaseData} margin={{ left: 8, right: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => nf.format(v)} width={48} />
+              <RTooltip formatter={(v: number) => nf.format(v)} />
+              <Legend />
+              <Bar dataKey="Ratified" fill="#005473" barSize={18} radius={2} />
+              <Bar dataKey="Cancelled" fill="#dc2626" barSize={18} radius={2} />
+              <Line type="monotone" dataKey="Net" stroke="#457537" strokeWidth={2} dot={false} />
+              <Line
+                type="monotone"
+                dataKey="Goal"
+                stroke="#A69211"
+                strokeDasharray="5 4"
+                strokeWidth={1.5}
+                dot={false}
+              />
+            </ComposedChart>
+          ) : (
+            <ComposedChart data={stageData} margin={{ left: 8, right: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => nf.format(v)} width={56} />
+              <RTooltip formatter={(v: number) => nf.format(v)} />
+              <Legend />
+              <Bar dataKey="Actual" fill="#005473" barSize={18} radius={2} />
+              {hasStageGoal && (
+                <Line
+                  type="monotone"
+                  dataKey="Goal"
+                  stroke="#A69211"
+                  strokeDasharray="5 4"
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              )}
+            </ComposedChart>
+          )}
         </ResponsiveContainer>
+        {stage !== "leases" && !hasStageGoal && (
+          <p className="mt-2 text-xs text-muted-foreground" data-testid="text-no-stage-goal">
+            No {stageLabel.toLowerCase()} goal exists for this year/filter combination.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
