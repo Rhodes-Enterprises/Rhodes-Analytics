@@ -53,3 +53,53 @@ export function useCommittedDate(raw: string, clearDelayMs = 600): string {
 
   return committed;
 }
+
+export interface CommittedDateRange {
+  /** Last valid (non-inverted) committed pair — safe to use in query params. */
+  startDate: string;
+  endDate: string;
+  /** True while both inputs hold complete dates but the end is before the start. */
+  invertedRange: boolean;
+}
+
+/**
+ * Range-level companion to {@link useCommittedDate}: commits each date the
+ * same way, but additionally refuses to apply a pair whose end date is before
+ * its start date. Querying an inverted range "succeeds" with all-zero metrics,
+ * which reads as "no activity in this period" instead of "impossible range".
+ *
+ * While the pair is inverted, the previous valid pair stays applied (the same
+ * latching behavior as half-typed dates) and `invertedRange` is true so the
+ * page can show an inline hint. Fixing either date applies immediately.
+ */
+export function useCommittedDateRange(
+  rawStart: string,
+  rawEnd: string,
+  clearDelayMs = 600,
+): CommittedDateRange {
+  const committedStart = useCommittedDate(rawStart, clearDelayMs);
+  const committedEnd = useCommittedDate(rawEnd, clearDelayMs);
+
+  // Committed values are always complete YYYY-MM-DD strings (or ""), so
+  // lexicographic comparison matches chronological order.
+  const invertedRange =
+    committedStart !== "" &&
+    committedEnd !== "" &&
+    committedEnd < committedStart;
+
+  const [applied, setApplied] = useState(() => ({
+    startDate: invertedRange ? "" : committedStart,
+    endDate: invertedRange ? "" : committedEnd,
+  }));
+
+  useEffect(() => {
+    if (invertedRange) return; // keep the previous valid pair applied
+    setApplied((prev) =>
+      prev.startDate === committedStart && prev.endDate === committedEnd
+        ? prev
+        : { startDate: committedStart, endDate: committedEnd },
+    );
+  }, [committedStart, committedEnd, invertedRange]);
+
+  return { ...applied, invertedRange };
+}

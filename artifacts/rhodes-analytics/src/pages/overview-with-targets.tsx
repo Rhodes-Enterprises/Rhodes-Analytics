@@ -26,7 +26,8 @@ import {
   type GetOwtDashboardParams,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
-import { useCommittedDate } from "@/hooks/use-committed-date";
+import { useCommittedDateRange } from "@/hooks/use-committed-date";
+import { InvertedRangeHint } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -92,9 +93,13 @@ export default function OverviewWithTargetsPage() {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   // Only complete, plausible dates reach the API; while a date is half-typed
-  // the previously applied range stays in effect (no 400 flashes mid-edit).
-  const appliedStartDate = useCommittedDate(startDate);
-  const appliedEndDate = useCommittedDate(endDate);
+  // or the end date is before the start date, the previously applied range
+  // stays in effect (no 400 flashes or misleading all-zero metrics mid-edit).
+  const {
+    startDate: appliedStartDate,
+    endDate: appliedEndDate,
+    invertedRange,
+  } = useCommittedDateRange(startDate, endDate);
 
   const params: GetOwtDashboardParams = {
     target,
@@ -257,6 +262,7 @@ export default function OverviewWithTargetsPage() {
                 />
               </div>
             </div>
+            <InvertedRangeHint show={invertedRange} />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={setYtd} data-testid="button-ytd">
                 Current Year

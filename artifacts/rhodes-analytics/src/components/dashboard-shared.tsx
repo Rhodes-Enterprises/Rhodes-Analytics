@@ -177,3 +177,20 @@ export function FilterSelect({
     </div>
   );
 }
+
+/**
+ * Gentle inline hint shown under the date inputs while the typed end date is
+ * before the start date. The dashboards keep the last valid range applied
+ * (see useCommittedDateRange) instead of querying the impossible range.
+ */
+export function InvertedRangeHint({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <p
+      className="mt-2 text-xs text-amber-600 dark:text-amber-500"
+      data-testid="hint-inverted-date-range"
+    >
+      End date is before the start date — still showing the last valid range.
+    </p>
+  );
+}
