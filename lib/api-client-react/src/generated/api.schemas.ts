@@ -144,6 +144,15 @@ export type OwtDashboardTrafficMatrixOnsite = {
   sales: OwtGoalCell;
 };
 
+/**
+ * Leads/tours/sales with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the totals shown.
+ */
+export type OwtDashboardTrafficMatrixUnknown = {
+  leads: number;
+  tours: number;
+  sales: number;
+};
+
 export type OwtDashboardTrafficMatrixTotal = {
   leads: OwtGoalCell;
   tours: OwtGoalCell;
@@ -152,6 +161,8 @@ export type OwtDashboardTrafficMatrixTotal = {
 export type OwtDashboardTrafficMatrix = {
   online: OwtDashboardTrafficMatrixOnline;
   onsite: OwtDashboardTrafficMatrixOnsite;
+  /** Leads/tours/sales with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the totals shown. */
+  unknown: OwtDashboardTrafficMatrixUnknown;
   total: OwtDashboardTrafficMatrixTotal;
   newWebsiteUsers: number;
 };

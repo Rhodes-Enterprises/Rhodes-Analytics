@@ -602,6 +602,21 @@ components:
                 sales:
                   $ref: "#/components/schemas/OwtGoalCell"
               required: [leads, tours, sales]
+            unknown:
+              type: object
+              description: >-
+                Leads/tours/sales with no Online/Onsite channel label
+                ('Unknown' or missing in the CRM). Actuals only — no goals
+                exist for this bucket. online + onsite + unknown reconciles
+                with the totals shown.
+              properties:
+                leads:
+                  type: number
+                tours:
+                  type: number
+                sales:
+                  type: number
+              required: [leads, tours, sales]
             total:
               type: object
               properties:
@@ -612,7 +627,7 @@ components:
               required: [leads, tours]
             newWebsiteUsers:
               type: number
-          required: [online, onsite, total, newWebsiteUsers]
+          required: [online, onsite, unknown, total, newWebsiteUsers]
         divisions:
           type: array
           items:

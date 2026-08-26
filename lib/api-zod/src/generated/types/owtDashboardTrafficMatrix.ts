@@ -8,10 +8,13 @@
 import type { OwtDashboardTrafficMatrixOnline } from './owtDashboardTrafficMatrixOnline';
 import type { OwtDashboardTrafficMatrixOnsite } from './owtDashboardTrafficMatrixOnsite';
 import type { OwtDashboardTrafficMatrixTotal } from './owtDashboardTrafficMatrixTotal';
+import type { OwtDashboardTrafficMatrixUnknown } from './owtDashboardTrafficMatrixUnknown';
 
 export type OwtDashboardTrafficMatrix = {
   online: OwtDashboardTrafficMatrixOnline;
   onsite: OwtDashboardTrafficMatrixOnsite;
+  /** Leads/tours/sales with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the totals shown. */
+  unknown: OwtDashboardTrafficMatrixUnknown;
   total: OwtDashboardTrafficMatrixTotal;
   newWebsiteUsers: number;
 };

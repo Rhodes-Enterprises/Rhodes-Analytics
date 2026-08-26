@@ -37,16 +37,19 @@
  * picked via G_COMPANY=1 — which can regress independently of the per-row
  * values, so both get their own scalar GA baselines.
  *
- * The six channel-split cells (trafficMatrix.online/onsite × leads, tours,
- * sales) are audited in every scenario too, each against a baseline that
- * re-counts the same source rows restricted to the channel column the
- * dashboard keys on (ONSITE_ONLINE_SOURCE_CHANNEL for contacts,
- * DEAL_ONSITE_ONLINE_SOURCE_CHANNEL for deals) with the literal 'Online' /
- * 'Onsite' labels. A regression that keys the split off the wrong column or
- * swaps the labels leaves every audited total unchanged, so only these
- * per-cell checks can catch it. Rows with NULL channel legitimately make
- * online + onsite < total, so there is deliberately NO sum-to-total
- * assumption — per-cell baselines only.
+ * The nine channel-split cells (trafficMatrix.online/onsite/unknown ×
+ * leads, tours, sales) are audited in every scenario too, each against a
+ * baseline that re-counts the same source rows restricted on the channel
+ * column the dashboard keys on (ONSITE_ONLINE_SOURCE_CHANNEL for contacts,
+ * DEAL_ONSITE_ONLINE_SOURCE_CHANNEL for deals): the literal 'Online' /
+ * 'Onsite' labels for those cells, and rows carrying NEITHER label
+ * ('Unknown', NULL, or any other value) for the dashboard's unknown bucket.
+ * A regression that keys the split off the wrong column or swaps the labels
+ * leaves every audited total unchanged, so only these per-cell checks can
+ * catch it. The unknown cells are recounted from source rows exactly like
+ * the labeled ones — the API deliberately never derives them as
+ * total − online − onsite — so there is still NO sum-to-total assumption
+ * anywhere: per-cell baselines only.
  *
  * Because those baselines hardcode the SAME 'Online'/'Onsite' literals the
  * API uses, they share its blind spot: if the upstream data relabels the
@@ -152,6 +155,8 @@ interface OverviewResponse {
       tours: { actual: number };
       sales: { actual: number };
     };
+    /** Rows with neither 'Online' nor 'Onsite' label — shown so the split adds up */
+    unknown: { leads: number; tours: number; sales: number };
     total: { leads: { actual: number }; tours: { actual: number } };
     /** Headline NEW-users count from the overall () grouping-set row */
     newWebsiteUsers: number;
@@ -370,28 +375,53 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   //
   // The channel variants re-count the same rows restricted to the hardcoded
   // 'Online' / 'Onsite' labels on the channel column the dashboard keys on.
+  // 'unlabeled' recounts rows carrying NEITHER literal ('Unknown', NULL, or
+  // any other value) — the bucket behind trafficMatrix.unknown. It is a
+  // direct recount of source rows, never total − online − onsite, so the
+  // audit keeps per-cell baselines with no sum-to-total assumption.
   // Composing with a scenario channel filter (already in cf/df) is correct by
   // construction: a matching label is redundant, a contradicting one yields 0
   // — exactly what the API's cell must show under that filter.
+  const unlabeledFrag = (col: string) =>
+    ` AND (${col} IS NULL OR ${col} NOT IN ('Online','Onsite'))`;
+  type ChannelBucket = "Online" | "Onsite" | "unlabeled";
   const countContacts = (
     dateCol: "CONTACT_CREATE_DATE" | "EHI_MIN_FIRST_TOUR_DATE",
-    channel?: "Online" | "Onsite",
+    channel?: ChannelBucket,
   ) =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_CONTACTS C
        WHERE C.EHI_LEAD = 1 AND C.${dateCol} BETWEEN ? AND ?${cf.sql}${
-         channel ? " AND C.ONSITE_ONLINE_SOURCE_CHANNEL = ?" : ""
+         channel === "unlabeled"
+           ? unlabeledFrag("C.ONSITE_ONLINE_SOURCE_CHANNEL")
+           : channel
+             ? " AND C.ONSITE_ONLINE_SOURCE_CHANNEL = ?"
+             : ""
        }`,
-      [expStart, expTo, ...cf.binds, ...(channel ? [channel] : [])],
+      [
+        expStart,
+        expTo,
+        ...cf.binds,
+        ...(channel && channel !== "unlabeled" ? [channel] : []),
+      ],
     );
-  const countDeals = (channel?: "Online" | "Onsite") =>
+  const countDeals = (channel?: ChannelBucket) =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_DEALS X
        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}${
-           channel ? " AND X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?" : ""
+           channel === "unlabeled"
+             ? unlabeledFrag("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL")
+             : channel
+               ? " AND X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?"
+               : ""
          }`,
-      [expStart, expTo, ...df.binds, ...(channel ? [channel] : [])],
+      [
+        expStart,
+        expTo,
+        ...df.binds,
+        ...(channel && channel !== "unlabeled" ? [channel] : []),
+      ],
     );
 
   const [
@@ -406,6 +436,9 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     onsiteTours,
     onlineSales,
     onsiteSales,
+    unlabeledLeads,
+    unlabeledTours,
+    unlabeledSales,
   ] = await Promise.all([
     countContacts("CONTACT_CREATE_DATE"),
     countContacts("EHI_MIN_FIRST_TOUR_DATE"),
@@ -430,6 +463,9 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     countContacts("EHI_MIN_FIRST_TOUR_DATE", "Onsite"),
     countDeals("Online"),
     countDeals("Onsite"),
+    countContacts("CONTACT_CREATE_DATE", "unlabeled"),
+    countContacts("EHI_MIN_FIRST_TOUR_DATE", "unlabeled"),
+    countDeals("unlabeled"),
   ]);
 
   const tm = overview.trafficMatrix;
@@ -448,6 +484,12 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     { name: "onsiteTours", api: tm.onsite.tours.actual, baseline: onsiteTours },
     { name: "onlineSales", api: tm.online.sales.actual, baseline: onlineSales },
     { name: "onsiteSales", api: tm.onsite.sales.actual, baseline: onsiteSales },
+    // The unknown bucket (no Online/Onsite label) the dashboard now shows so
+    // the split visibly adds up — same per-cell treatment as the six cells
+    // above, each against its own independent recount.
+    { name: "unknownLeads", api: tm.unknown.leads, baseline: unlabeledLeads },
+    { name: "unknownTours", api: tm.unknown.tours, baseline: unlabeledTours },
+    { name: "unknownSales", api: tm.unknown.sales, baseline: unlabeledSales },
   ];
 
   let failed = false;
@@ -467,8 +509,8 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   }
 
   // ---- Channel label-drift guard ----
-  // The six per-cell checks above and the API's channel split hardcode the
-  // same 'Online'/'Onsite' literals (chan() in src/lib/overview-targets.ts).
+  // The per-cell channel checks above and the API's channel split hardcode
+  // the same 'Online'/'Onsite' literals (chan() in src/lib/overview-targets.ts).
   // If upstream data relabels the channel values (e.g. dbt renames 'Online'
   // to 'Digital' in DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL or
   // DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL), BOTH sides compute 0, every

@@ -491,8 +491,51 @@ function MatrixRow({
   );
 }
 
+/**
+ * Actual-only matrix row for the unknown-channel bucket (rows with no
+ * Online/Onsite label). No goals exist for that bucket, so the goal and
+ * PTG columns show a dash; the share of the corresponding total makes the
+ * size of the attribution gap obvious at a glance.
+ */
+function UnknownRow({
+  label,
+  actual,
+  total,
+  totalName,
+}: {
+  label: string;
+  actual: number;
+  total: number;
+  totalName: string;
+}) {
+  const pct = total > 0 && actual > 0 ? (actual / total) * 100 : null;
+  const share = pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
+  return (
+    <tr
+      className="border-b last:border-0"
+      data-testid={`row-${label.toLowerCase().replace(/\s+/g, "-")}`}
+    >
+      <td className="py-2 pr-4 font-medium whitespace-nowrap">
+        {label}
+        {share != null && (
+          <div className="text-xs text-muted-foreground">
+            {share}% of {totalName}
+          </div>
+        )}
+      </td>
+      <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">–</td>
+      <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">–</td>
+      <td className="py-2 px-3 text-right tabular-nums font-semibold">{fmt(actual)}</td>
+      <td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">–</td>
+    </tr>
+  );
+}
 function TrafficMatrix({ data }: { data: OwtDashboard }) {
   const m = data.trafficMatrix;
+  const u = m.unknown;
+  // When every row is labeled (or a channel filter zeroes the bucket),
+  // online + onsite already equals the totals — hide the empty section.
+  const hasUnknown = u.leads > 0 || u.tours > 0 || u.sales > 0;
   const section = (title: string) => (
     <tr className="bg-muted/50">
       <td colSpan={5} className="py-1.5 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -530,11 +573,45 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
             <MatrixRow label="Onsite Leads" cell={m.onsite.leads} />
             <MatrixRow label="Onsite Tours" cell={m.onsite.tours} />
             <MatrixRow label="Onsite Sales" cell={m.onsite.sales} />
+            {hasUnknown && (
+              <>
+                {section("Unknown — no online/onsite label")}
+                <UnknownRow
+                  label="Unknown Leads"
+                  actual={u.leads}
+                  total={m.total.leads.actual}
+                  totalName="total leads"
+                />
+                <UnknownRow
+                  label="Unknown Tours"
+                  actual={u.tours}
+                  total={m.total.tours.actual}
+                  totalName="total tours"
+                />
+                <UnknownRow
+                  label="Unknown Sales"
+                  actual={u.sales}
+                  total={data.kpis.grossSales}
+                  totalName="gross sales"
+                />
+              </>
+            )}
             {section("Total")}
             <MatrixRow label="Total Leads" cell={m.total.leads} />
             <MatrixRow label="Total Tours" cell={m.total.tours} />
           </tbody>
         </table>
+        {hasUnknown && (
+          <p
+            className="mt-3 text-xs text-muted-foreground"
+            data-testid="note-unknown-channel"
+          >
+            Unknown = no Online/Onsite channel label in the CRM — an
+            attribution gap worth fixing at the source. Online + Onsite +
+            Unknown adds up to Total Leads, Total Tours, and the Gross Sales
+            KPI. Goals are not set for the Unknown bucket.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

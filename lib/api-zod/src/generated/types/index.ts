@@ -46,6 +46,7 @@ export * from './owtDashboardTrafficMatrix';
 export * from './owtDashboardTrafficMatrixOnline';
 export * from './owtDashboardTrafficMatrixOnsite';
 export * from './owtDashboardTrafficMatrixTotal';
+export * from './owtDashboardTrafficMatrixUnknown';
 export * from './owtDealChannelParameter';
 export * from './owtDevelopmentParameter';
 export * from './owtDevelopmentRow';

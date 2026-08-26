@@ -472,6 +472,18 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
         (!development || r.DEVELOPMENT_NAME === development),
     );
 
+  // Rows carrying NEITHER 'Online' nor 'Onsite' on the channel column — the
+  // CRM's literal 'Unknown', a NULL, or any other label. Counted directly
+  // from the same grouped source rows, deliberately NOT derived as
+  // total − online − onsite, so each bucket stays independently auditable
+  // per cell (the audit makes no sum-to-total assumption).
+  const chanUnlabeled = (rows: ActualRow[]) =>
+    sumBy(
+      rows,
+      (r) => Number(r.N) || 0,
+      (r) => r.CHANNEL !== "Online" && r.CHANNEL !== "Onsite",
+    );
+
   // Distinct-count rows come at three grouping levels; pick the right one.
   const overallUsers = users.find((r) => Number(r.G_COMPANY) === 1);
   const companyUsers = users.filter(
@@ -493,6 +505,9 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     sales: chan(sales),
     onlineSales: chan(sales, "Online"),
     onsiteSales: chan(sales, "Onsite"),
+    unknownLeads: chanUnlabeled(leads),
+    unknownTours: chanUnlabeled(tours),
+    unknownSales: chanUnlabeled(sales),
   };
 
   // KPI row (gross sales vs target)
@@ -524,6 +539,15 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
       leads: cell("onsite_leads", actuals.onsiteLeads),
       tours: cell("onsite_first_tours", actuals.onsiteTours),
       sales: cell("onsite_gross_sales", actuals.onsiteSales),
+    },
+    // Leads/tours/sales with no Online/Onsite channel label ('Unknown' or
+    // missing in the CRM). No goals exist for this bucket — actuals only —
+    // but surfacing it makes the split reconcile visibly:
+    // online + onsite + unknown equals the totals.
+    unknown: {
+      leads: actuals.unknownLeads,
+      tours: actuals.unknownTours,
+      sales: actuals.unknownSales,
     },
     total: {
       leads: cell("leads", actuals.leads),

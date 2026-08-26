@@ -101,6 +101,11 @@ export const GetOwtDashboardResponse = zod.object({
   "ptgPercent": zod.number().nullable()
 })
 }),
+  "unknown": zod.object({
+  "leads": zod.number(),
+  "tours": zod.number(),
+  "sales": zod.number()
+}).describe('Leads\/tours\/sales with no Online\/Onsite channel label (\'Unknown\' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the totals shown.'),
   "total": zod.object({
   "leads": zod.object({
   "fullSpanGoal": zod.number(),
