@@ -11,18 +11,28 @@
  *
  * Besides the default (no query params) view, the audit exercises
  * representative FILTERED requests — a company, a development, a channel,
- * and an explicit date range — because filter-only regressions (a filter
- * bound to the wrong column, a fan-out that triggers only for specific
- * developments) would otherwise slip through. Filter values are picked
- * dynamically from Snowflake (busiest in the current default range) so they
- * don't go stale; failure to find a non-empty value FAILS the audit rather
- * than silently skipping the scenario.
+ * a lead source, a contact cohort quarter, and an explicit date range —
+ * because filter-only regressions (a filter bound to the wrong column, a
+ * fan-out that triggers only for specific developments) would otherwise
+ * slip through. Filter values are picked dynamically from Snowflake
+ * (busiest in the current default range) so they don't go stale; failure
+ * to find a non-empty value FAILS the audit rather than silently skipping
+ * the scenario.
+ *
+ * Baseline filter semantics deliberately mirror the API's asymmetry:
+ * leadSource filters both contacts (LEAD_SOURCE_OVERVIEW) and deals
+ * (DEAL_LEAD_SOURCE_OVERVIEW), while cohortQuarter filters contacts only —
+ * so under a cohortQuarter filter the sales baseline stays unfiltered, and
+ * neither filter ever touches the GA (website users) baselines. A baseline
+ * bound differently from the API's own filter semantics would report fake
+ * divergence, so the fragments below must track overview-targets.ts.
  *
  * The divisions/developments breakdown tables are audited (auditBreakdowns)
- * in the default view AND under the company filter and the explicit date
- * range, with baselines bound to the same filters — so a filter-specific
- * attribution bug (e.g. a company filter that leaks other divisions' rows
- * into the breakdown) fails the audit instead of slipping through.
+ * in the default view AND under the company, lead-source, and cohort-quarter
+ * filters and the explicit date range, with baselines bound to the same
+ * filters — so a filter-specific attribution bug (e.g. a company filter
+ * that leaks other divisions' rows into the breakdown) fails the audit
+ * instead of slipping through.
  *
  * Every scenario independently computes the range it expects the API to
  * apply (requested dates, or the server's default quarter) and asserts the
@@ -121,11 +131,17 @@
  *                        minimum total GA users (across all properties) for
  *                        the GA property label-drift guard to judge the
  *                        window (default 10)
+ *   AUDIT_SF_CONCURRENCY max in-flight baseline Snowflake queries (default 1:
+ *                        serialized, respecting the proxy's ~10 RPS limit)
+ *   AUDIT_SF_MAX_ATTEMPTS
+ *                        attempts per baseline query on transient Snowflake
+ *                        errors (429/5xx/dropped connections), exponential
+ *                        backoff between tries (default 5)
  *
  * Exits 0 when all totals match within tolerance, 1 otherwise.
  */
 
-import { querySnowflake } from "../src/lib/snowflake";
+import { querySnowflake as querySnowflakeRaw } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaPropertyLabels } from "./ga-property-guard";
 import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
@@ -136,6 +152,27 @@ const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
 const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
+// The Snowflake proxy enforces ~10 requests/second per REPL — a budget
+// shared with the API server's own parallel query fan-out and anything
+// else running in the workspace. Bursts from this script's Promise.all
+// batches (11 headline baselines per scenario after the channel-split
+// checks, 6 representative-filter picks, 3 per breakdown metric) have
+// died mid-run with transient fetch failures / 502s, and even fully
+// serialized queries can catch a 429 when the rest of the repl is busy —
+// leaving later scenarios unexecuted, which is a false "safety net ran"
+// signal. Two defenses, both scoped to this script's baseline queries:
+//   1. a queue — call sites keep their Promise.all shape, but queries
+//      execute serially by default (AUDIT_SF_CONCURRENCY raises the
+//      in-flight cap when experimenting locally); audit correctness never
+//      depends on ordering, only on binds;
+//   2. bounded exponential backoff on TRANSIENT errors only (rate limits,
+//      5xx, dropped connections). Real errors — SQL compilation, missing
+//      grants — rethrow immediately: retrying those would only delay the
+//      failure the audit exists to surface. The slot is held during
+//      backoff so retries never widen the script's footprint.
+const SF_CONCURRENCY = Math.max(1, Number(process.env.AUDIT_SF_CONCURRENCY ?? "1"));
+
+const SF_MAX_ATTEMPTS = Math.max(1, Number(process.env.AUDIT_SF_MAX_ATTEMPTS ?? "5"));
 const CHANNEL_GUARD_MIN_TOTAL = Number(
   process.env.AUDIT_CHANNEL_GUARD_MIN_TOTAL ?? "10",
 );
@@ -202,7 +239,7 @@ async function fetchOverview(params: Record<string, string>): Promise<OverviewRe
 }
 
 async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
-  const rows = await querySnowflake<{ N: number }>(sql, binds);
+  const rows = await sfQuery<{ N: number }>(sql, binds);
   return Number(rows[0]?.N) || 0;
 }
 
@@ -240,6 +277,17 @@ interface ScenarioFilters {
   development?: string;
   /** Applied as contactChannel AND dealChannel, like the dashboard UI does */
   channel?: string;
+  /**
+   * Filters contacts (LEAD_SOURCE_OVERVIEW) AND deals
+   * (DEAL_LEAD_SOURCE_OVERVIEW); GA has no lead-source dimension.
+   */
+  leadSource?: string;
+  /**
+   * Filters contacts only (EHI_COHORT_QUARTER) — the API's dealFilters and
+   * gaFilters have no cohort dimension, so sales and website-user baselines
+   * must stay unfiltered under it.
+   */
+  cohortQuarter?: string;
   startDate?: string;
   endDate?: string;
 }
@@ -303,6 +351,14 @@ function contactFrag(f: ScenarioFilters): Frag {
     parts.push("C.CONTACT_EHI_COMMUNITY_OF_INTEREST = ?");
     binds.push(f.development);
   }
+  if (f.cohortQuarter) {
+    parts.push("C.EHI_COHORT_QUARTER = ?");
+    binds.push(f.cohortQuarter);
+  }
+  if (f.leadSource) {
+    parts.push("C.LEAD_SOURCE_OVERVIEW = ?");
+    binds.push(f.leadSource);
+  }
   if (f.channel) {
     parts.push("C.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
     binds.push(f.channel);
@@ -324,6 +380,12 @@ function dealFrag(f: ScenarioFilters): Frag {
     parts.push("X.DEAL_EHI_COMMUNITY_OF_INTEREST = ?");
     binds.push(f.development);
   }
+  if (f.leadSource) {
+    parts.push("X.DEAL_LEAD_SOURCE_OVERVIEW = ?");
+    binds.push(f.leadSource);
+  }
+  // cohortQuarter deliberately NOT applied: the API's dealFilters has no
+  // cohort dimension, so the deal baselines must stay unfiltered under it.
   if (f.channel) {
     parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
     binds.push(f.channel);
@@ -343,7 +405,8 @@ function gaFrag(f: ScenarioFilters): Frag {
     parts.push("MATCHED_DEVELOPMENT_NAME = ?");
     binds.push(f.development);
   }
-  // GA has no channel dimension in the dashboard; channel does not apply.
+  // GA has no channel, lead-source, or cohort dimension in the dashboard;
+  // those filters do not apply (mirrors the API's gaFilters).
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
 }
 
@@ -355,6 +418,8 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
     params.contactChannel = f.channel;
     params.dealChannel = f.channel;
   }
+  if (f.leadSource) params.leadSource = f.leadSource;
+  if (f.cohortQuarter) params.cohortQuarter = f.cohortQuarter;
   if (f.startDate) params.startDate = f.startDate;
   if (f.endDate) params.endDate = f.endDate;
   return params;
@@ -608,7 +673,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         continue;
       }
       // Fetch the labels actually present so the failure names the fix.
-      const labelRows = await querySnowflake<{ LABEL: string; N: number }>(
+      const labelRows = await sfQuery<{ LABEL: string; N: number }>(
         g.labelsSql,
         g.binds,
       );
@@ -776,8 +841,8 @@ async function auditBreakdowns(
 
   for (const m of metrics) {
     const [byCompany, byDev, unattributed] = await Promise.all([
-      querySnowflake<BreakdownBaselineRow>(m.byCompanySql, m.binds),
-      querySnowflake<BreakdownBaselineRow>(m.byDevSql, m.binds),
+      sfQuery<BreakdownBaselineRow>(m.byCompanySql, m.binds),
+      sfQuery<BreakdownBaselineRow>(m.byDevSql, m.binds),
       countScalar(m.unattributedSql, m.binds),
     ]);
 
@@ -893,7 +958,7 @@ async function auditWebsiteUserBreakdowns(
 
   const binds = [expStart, expTo];
   const [byCompany, byDev] = await Promise.all([
-    querySnowflake<GaBaselineRow>(
+    sfQuery<GaBaselineRow>(
       `SELECT MATCHED_COMPANY_NAME AS COMPANY_NAME,
               COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
               COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
@@ -902,7 +967,7 @@ async function auditWebsiteUserBreakdowns(
        GROUP BY 1`,
       binds,
     ),
-    querySnowflake<GaBaselineRow>(
+    sfQuery<GaBaselineRow>(
       `SELECT MATCHED_COMPANY_NAME AS COMPANY_NAME,
               MATCHED_DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
               COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
@@ -1007,16 +1072,26 @@ interface ChannelCountRow {
 }
 /**
  * Pick representative filter values dynamically: the Esperanza company,
- * development, and channel with the most leads in the given range, so the
- * filtered scenarios always exercise non-trivial data. Missing values make
- * the audit FAIL — a silently skipped scenario is not coverage.
+ * development, channel, lead source, and contact cohort quarter with the
+ * most leads in the given range, so the filtered scenarios always exercise
+ * non-trivial data. Among lead sources, prefer the busiest one that also
+ * has ratified deals in range — the deal-side DEAL_LEAD_SOURCE_OVERVIEW
+ * binding checked only against zero rows would prove nothing. Missing
+ * values make the audit FAIL — a silently skipped scenario is not coverage.
  */
 async function pickRepresentativeFilters(
   startDate: string,
   toDate: string,
-): Promise<{ company: string; development: string; channel: string }> {
-  const [companyRows, devRows, channelRows] = await Promise.all([
-    querySnowflake<{ COMPANY_NAME: string }>(
+): Promise<{
+  company: string;
+  development: string;
+  channel: string;
+  leadSource: string;
+  cohortQuarter: string;
+}> {
+  const [companyRows, devRows, channelRows, leadSourceRows, dealSourceRows, cohortRows] =
+    await Promise.all([
+    sfQuery<{ COMPANY_NAME: string }>(
       `SELECT D.COMPANY_NAME, COUNT(*) AS N
        FROM DM_CONTACTS C
        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
@@ -1024,7 +1099,7 @@ async function pickRepresentativeFilters(
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
     ),
-    querySnowflake<{ DEVELOPMENT_NAME: string }>(
+    sfQuery<{ DEVELOPMENT_NAME: string }>(
       `SELECT D.DEVELOPMENT_NAME, COUNT(*) AS N
        FROM DM_CONTACTS C
        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
@@ -1032,7 +1107,7 @@ async function pickRepresentativeFilters(
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
     ),
-    querySnowflake<{ CH: string }>(
+    sfQuery<{ CH: string }>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
        FROM DM_CONTACTS C
        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
@@ -1040,14 +1115,49 @@ async function pickRepresentativeFilters(
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
     ),
+    // All lead sources by contact-lead volume (not LIMIT 1): the pick below
+    // prefers one that also has deals, falling back to the overall busiest.
+    sfQuery<{ LS: string }>(
+      `SELECT C.LEAD_SOURCE_OVERVIEW AS LS, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+         AND C.LEAD_SOURCE_OVERVIEW IS NOT NULL
+       GROUP BY 1 ORDER BY N DESC`,
+      [startDate, toDate],
+    ),
+    sfQuery<{ LS: string }>(
+      `SELECT DISTINCT X.DEAL_LEAD_SOURCE_OVERVIEW AS LS
+       FROM DM_DEALS X
+       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+         AND X.DEAL_LEAD_SOURCE_OVERVIEW IS NOT NULL`,
+      [startDate, toDate],
+    ),
+    sfQuery<{ CQ: string }>(
+      `SELECT C.EHI_COHORT_QUARTER AS CQ, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+         AND C.EHI_COHORT_QUARTER IS NOT NULL
+       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+      [startDate, toDate],
+    ),
   ]);
   const company = companyRows[0]?.COMPANY_NAME;
   const development = devRows[0]?.DEVELOPMENT_NAME;
   const channel = channelRows[0]?.CH;
+  // Busiest lead source that also has ratified deals in range, so the
+  // deal-side binding is exercised with non-zero data whenever possible;
+  // otherwise the busiest by leads alone (deal checks then compare 0 vs 0).
+  const dealSources = new Set(dealSourceRows.map((r) => r.LS));
+  const leadSource =
+    leadSourceRows.find((r) => dealSources.has(r.LS))?.LS ?? leadSourceRows[0]?.LS;
+  const cohortQuarter = cohortRows[0]?.CQ;
   const missing = [
     !company && "company",
     !development && "development",
     !channel && "channel",
+    !leadSource && "lead source",
+    !cohortQuarter && "cohort quarter",
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(
@@ -1055,7 +1165,13 @@ async function pickRepresentativeFilters(
         "cannot exercise the required filtered scenarios (empty source data or broken dimension)",
     );
   }
-  return { company: company!, development: development!, channel: channel! };
+  return {
+    company: company!,
+    development: development!,
+    channel: channel!,
+    leadSource: leadSource!,
+    cohortQuarter: cohortQuarter!,
+  };
 }
 
 /**
@@ -1089,10 +1205,8 @@ async function main() {
   const toDate = expectedToDate(startDate, endDate);
   console.log(`Default range: ${startDate}..${endDate}, toDate=${toDate}`);
 
-  const { company, development, channel } = await pickRepresentativeFilters(
-    startDate,
-    toDate,
-  );
+  const { company, development, channel, leadSource, cohortQuarter } =
+    await pickRepresentativeFilters(startDate, toDate);
 
   const scenarios: Scenario[] = [
     {
@@ -1107,6 +1221,20 @@ async function main() {
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
     { name: `channel filter (${channel})`, filters: { channel } },
+    // leadSource must hit DM_CONTACTS.LEAD_SOURCE_OVERVIEW AND
+    // DM_DEALS.DEAL_LEAD_SOURCE_OVERVIEW; cohortQuarter must hit contacts
+    // ONLY (sales stay unfiltered). Breakdown audits are on for both so a
+    // wrong-column binding also can't hide inside the per-division rows.
+    {
+      name: `lead-source filter (${leadSource})`,
+      filters: { leadSource },
+      withBreakdowns: true,
+    },
+    {
+      name: `cohort-quarter filter (${cohortQuarter})`,
+      filters: { cohortQuarter },
+      withBreakdowns: true,
+    },
     { ...explicitRangeScenario(startDate), withBreakdowns: true },
   ];
   console.log(
@@ -1227,21 +1355,21 @@ async function auditRatios(
   const binds = [expStart, expTo];
 
   const [leadRows, tourRows, salesRows, users, goalRows] = await Promise.all([
-    querySnowflake<ChannelCountRow>(
+    sfQuery<ChannelCountRow>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_CONTACTS C
        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
-    querySnowflake<ChannelCountRow>(
+    sfQuery<ChannelCountRow>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_CONTACTS C
        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
-    querySnowflake<ChannelCountRow>(
+    sfQuery<ChannelCountRow>(
       `SELECT X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_DEALS X
        WHERE ${isSaleSql("X")}
@@ -1254,7 +1382,7 @@ async function auditRatios(
        WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
       binds,
     ),
-    querySnowflake<RatioGoalBaselineRow>(
+    sfQuery<RatioGoalBaselineRow>(
       `SELECT MARKETING_GOAL_NAME_RATIOS AS NAME, MARKETING_GOAL_RATIOS AS VAL
        FROM DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS
        WHERE MARKETING_GOAL_YEAR = ?`,
@@ -1461,7 +1589,7 @@ async function auditCommunities(): Promise<boolean> {
   const apiRows = body.communities;
 
   const [dimRows, leadRows, tourRows, saleRows] = await Promise.all([
-    querySnowflake<DimRawRow>(
+    sfQuery<DimRawRow>(
       `SELECT DEVELOPMENT_NAME, COMPANY_NAME,
               DEVELOPMENT_HAS_GOALS_FLAG, RENTAL_COMMUNITY_FLAG
        FROM DM_COMPANY_DEVELOPMENT
@@ -1471,7 +1599,7 @@ async function auditCommunities(): Promise<boolean> {
     // today's UTC date (N_TODAY) — the only slice the endpoint's per-UTC-day
     // cache can legitimately lag behind. Bind order: COUNT_IF's ? precedes
     // the WHERE BETWEEN binds in SQL text order.
-    querySnowflake<YtdBaselineRow>(
+    sfQuery<YtdBaselineRow>(
       `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(CONTACT_CREATE_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
@@ -1479,7 +1607,7 @@ async function auditCommunities(): Promise<boolean> {
        GROUP BY 1`,
       [todayUtc, ytdStart, todayUtc],
     ),
-    querySnowflake<YtdBaselineRow>(
+    sfQuery<YtdBaselineRow>(
       `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(EHI_MIN_FIRST_TOUR_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
@@ -1487,7 +1615,7 @@ async function auditCommunities(): Promise<boolean> {
        GROUP BY 1`,
       [todayUtc, ytdStart, todayUtc],
     ),
-    querySnowflake<YtdBaselineRow>(
+    sfQuery<YtdBaselineRow>(
       `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(CONTRACT_RATIFIED_DATE = ?) AS N_TODAY
        FROM DM_DEALS
@@ -1762,4 +1890,41 @@ interface YtdBaselineRow {
   DEV: string | null;
   N: number;
   N_TODAY: number;
+}
+
+let sfActive = 0;
+
+const sfWaiters: (() => void)[] = [];
+
+function isTransientSnowflakeError(message: string): boolean {
+  return /HTTP 429|Rate limit exceeded|HTTP 50[234]|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up/i.test(
+    message,
+  );
+}
+async function sfQuery<T extends object>(
+  sql: string,
+  binds: (string | number)[] = [],
+): Promise<T[]> {
+  while (sfActive >= SF_CONCURRENCY) {
+    await new Promise<void>((resolve) => sfWaiters.push(resolve));
+  }
+  sfActive++;
+  try {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await querySnowflakeRaw<T>(sql, binds);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt >= SF_MAX_ATTEMPTS || !isTransientSnowflakeError(msg)) throw err;
+        const delayMs = Math.min(10_000, 1000 * 2 ** (attempt - 1));
+        console.log(
+          `  (transient Snowflake error; retry ${attempt}/${SF_MAX_ATTEMPTS - 1} in ${delayMs}ms: ${msg.slice(0, 140)})`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  } finally {
+    sfActive--;
+    sfWaiters.shift()?.();
+  }
 }
