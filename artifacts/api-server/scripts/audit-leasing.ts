@@ -20,6 +20,12 @@
  *   ignores date parameters fails instead of being compared against its
  *   own wrong range. Baselines bind to the expected range, never to the
  *   response's echo of it.
+ * - A PRIOR fiscal year scenario (the full previous calendar year)
+ *   exercises the RL goal-type fallback: FY2025 only has RL_Leases, while
+ *   FY2026+ uses RL_Leases_Ratified. The scenario resolves the goal type
+ *   actually present for that year from Snowflake and FAILS LOUDLY when
+ *   the prior year has no RL goal data at all — otherwise every goal
+ *   check would compare 0 == 0 and pass while covering nothing.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:leasing
@@ -165,6 +171,14 @@ interface ScenarioFilters {
 interface Scenario {
   name: string;
   filters: ScenarioFilters;
+  /**
+   * Fail the scenario when its fiscal year resolves no RL total goal type
+   * or the goals within the range sum to zero. Set on the prior-year
+   * scenario, which exists to pin the goal-type fallback: without goal
+   * data every goal check compares 0 == 0 and would pass while testing
+   * nothing.
+   */
+  requireGoalData?: boolean;
 }
 
 function toQueryParams(f: ScenarioFilters): Record<string, string> {
@@ -314,6 +328,10 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   }
 
   const gt = await resolveGoalTypes(fiscalYear);
+  console.log(
+    `Resolved goal types (FY${fiscalYear}): total=${gt.total ?? "(none)"}, ` +
+      `online=${gt.online ?? "(none)"}, onsite=${gt.onsite ?? "(none)"}`,
+  );
 
   // Channel-scoped goal semantics (documented dashboard behavior): when a
   // channel filter is applied, "total"/"net" compare against that channel's
@@ -342,6 +360,19 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     baselineGoal(effGoalType("online"), fiscalYear, expStart, expEnd, expTo, f.community),
     baselineGoal(effGoalType("onsite"), fiscalYear, expStart, expEnd, expTo, f.community),
   ]);
+
+  // Scenarios that exist to pin goal behavior (the prior-year fallback)
+  // must not "pass" by comparing zeros against zeros.
+  if (scenario.requireGoalData && (!gt.total || gTotal.fullSpan === 0)) {
+    failures++;
+    console.error(
+      `  FAIL no RL goal data for FY${fiscalYear}: total goal type=` +
+        `${gt.total ?? "(none)"}, full-span goal sum=${gTotal.fullSpan} — ` +
+        "this scenario pins the prior-year goal fallback, so empty goal data " +
+        "means the fallback is NOT being tested (goals missing from DM_GOALS, " +
+        "or the audit's prior-year selection needs updating)",
+    );
+  }
 
   // ---- KPIs ----
   console.log("-- kpis");
@@ -644,11 +675,20 @@ async function main() {
 
   const { community, channel } = await pickRepresentativeFilters(startDate, toDate);
 
+  const priorYear = Number(startDate.slice(0, 4)) - 1;
   const scenarios: Scenario[] = [
     { name: "default view", filters: {} },
     { name: `community filter (${community})`, filters: { community } },
     { name: `channel filter (${channel})`, filters: { channel } },
     explicitRangeScenario(startDate),
+    {
+      name: `prior fiscal year (${priorYear}) — RL goal-type fallback`,
+      filters: {
+        startDate: `${priorYear}-01-01`,
+        endDate: `${priorYear}-12-31`,
+      },
+      requireGoalData: true,
+    },
   ];
   console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
 
