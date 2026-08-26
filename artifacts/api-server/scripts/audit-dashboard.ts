@@ -1,12 +1,29 @@
 /**
  * Dashboard number regression audit.
  *
- * Compares the API's default GET /api/dashboards/overview-with-targets
- * response against independent Snowflake baseline queries with identical
- * filters. The baselines deliberately avoid the DM_COMPANY_DEVELOPMENT
- * attribution join used by the API's data layer — a fan-out in that join
- * once inflated actuals ~1.5x, which is exactly the regression class this
- * audit exists to catch.
+ * Compares the API's GET /api/dashboards/overview-with-targets response
+ * against independent Snowflake baseline queries with identical filters.
+ * The baselines deliberately avoid the DM_COMPANY_DEVELOPMENT attribution
+ * join used by the API's data layer — a fan-out in that join once inflated
+ * actuals ~1.5x, which is exactly the regression class this audit exists to
+ * catch. Where a company filter needs the dimension, the baseline uses a
+ * semi-join (IN subquery) that cannot fan out by construction.
+ *
+ * Besides the default (no query params) view, the audit exercises
+ * representative FILTERED requests — a company, a development, a channel,
+ * and an explicit date range — because filter-only regressions (a filter
+ * bound to the wrong column, a fan-out that triggers only for specific
+ * developments) would otherwise slip through. Filter values are picked
+ * dynamically from Snowflake (busiest in the current default range) so they
+ * don't go stale; failure to find a non-empty value FAILS the audit rather
+ * than silently skipping the scenario.
+ *
+ * Every scenario independently computes the range it expects the API to
+ * apply (requested dates, or the server's default quarter) and asserts the
+ * response's appliedRange matches it exactly — so an endpoint that ignores
+ * date parameters fails the audit instead of being compared against its own
+ * wrong range. Baselines are bound to that expected range, never to the
+ * response's echo of it.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:dashboard
@@ -36,8 +53,9 @@ interface OverviewResponse {
   };
 }
 
-async function fetchOverview(): Promise<OverviewResponse> {
-  const url = `${API_BASE}/dashboards/overview-with-targets`;
+async function fetchOverview(params: Record<string, string>): Promise<OverviewResponse> {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${API_BASE}/dashboards/overview-with-targets${qs ? `?${qs}` : ""}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`GET ${url} failed with HTTP ${res.status}: ${await res.text()}`);
@@ -50,35 +68,200 @@ async function countScalar(sql: string, binds: (string | number)[]): Promise<num
   return Number(rows[0]?.N) || 0;
 }
 
-async function main() {
-  console.log(`Auditing ${API_BASE}/dashboards/overview-with-targets (tolerance ${TOLERANCE_PCT}%)`);
-  const overview = await fetchOverview();
-  const { startDate, endDate, toDate, target } = overview.appliedRange;
-  console.log(`Applied range: ${startDate}..${endDate}, toDate=${toDate}, target=${target}`);
+// ---------- Expected range computation (independent of the API) ----------
 
-  // Independent baselines — same date filters the API applies to actuals
-  // (start..toDate), no attribution join that could fan out counts.
+/** Same business-day convention the API uses. */
+function todayChicago(): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(
+    new Date(),
+  );
+}
+
+/** Default range the API applies with no date params: the current quarter. */
+function defaultQuarterRange(): { startDate: string; endDate: string } {
+  const today = todayChicago();
+  const t = new Date(today + "T00:00:00");
+  const q = Math.floor(t.getMonth() / 3);
+  const startDate = `${t.getFullYear()}-${String(q * 3 + 1).padStart(2, "0")}-01`;
+  const qEnd = new Date(t.getFullYear(), q * 3 + 3, 0);
+  const endDate = `${qEnd.getFullYear()}-${String(qEnd.getMonth() + 1).padStart(2, "0")}-${String(qEnd.getDate()).padStart(2, "0")}`;
+  return { startDate, endDate };
+}
+
+/** Elapsed cutoff: today clamped into [startDate, endDate]. */
+function expectedToDate(startDate: string, endDate: string): string {
+  const today = todayChicago();
+  return today < startDate ? startDate : today > endDate ? endDate : today;
+}
+
+// ---------- Baseline filter fragments ----------
+
+// Deduplicated Esperanza company→development mapping, mirroring the API's
+// DEV_DIM. Used ONLY inside IN (...) semi-joins so it cannot fan out rows.
+const DEV_DIM = `(
+  SELECT COMPANY_NAME, DEVELOPMENT_NAME
+  FROM DM_COMPANY_DEVELOPMENT
+  WHERE COMPANY_NAME ILIKE '%esperanza%'
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY DEVELOPMENT_NAME
+    ORDER BY DEVELOPMENT_HAS_GOALS_FLAG DESC NULLS LAST, COMPANY_NAME
+  ) = 1
+)`;
+
+/**
+ * Filters a scenario applies, expressed once and translated into both the
+ * API query string and equivalent baseline WHERE fragments per source.
+ */
+interface ScenarioFilters {
+  company?: string;
+  development?: string;
+  /** Applied as contactChannel AND dealChannel, like the dashboard UI does */
+  channel?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+interface Scenario {
+  name: string;
+  filters: ScenarioFilters;
+}
+
+interface Frag {
+  sql: string;
+  binds: (string | number)[];
+}
+
+/** Baseline fragments for DM_CONTACTS (alias C). */
+function contactFrag(f: ScenarioFilters): Frag {
+  const parts: string[] = [];
+  const binds: (string | number)[] = [];
+  if (f.company) {
+    parts.push(
+      `C.CONTACT_EHI_COMMUNITY_OF_INTEREST IN (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)`,
+    );
+    binds.push(f.company);
+  }
+  if (f.development) {
+    parts.push("C.CONTACT_EHI_COMMUNITY_OF_INTEREST = ?");
+    binds.push(f.development);
+  }
+  if (f.channel) {
+    parts.push("C.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
+}
+
+/** Baseline fragments for DM_DEALS (alias X). */
+function dealFrag(f: ScenarioFilters): Frag {
+  const parts: string[] = [];
+  const binds: (string | number)[] = [];
+  if (f.company) {
+    parts.push(
+      `X.DEAL_EHI_COMMUNITY_OF_INTEREST IN (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)`,
+    );
+    binds.push(f.company);
+  }
+  if (f.development) {
+    parts.push("X.DEAL_EHI_COMMUNITY_OF_INTEREST = ?");
+    binds.push(f.development);
+  }
+  if (f.channel) {
+    parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
+}
+
+/** Baseline fragments for FCT_GOOGLE_ANALYTICS_EVENT_LEVEL. */
+function gaFrag(f: ScenarioFilters): Frag {
+  const parts: string[] = [];
+  const binds: (string | number)[] = [];
+  if (f.company) {
+    parts.push("MATCHED_COMPANY_NAME = ?");
+    binds.push(f.company);
+  }
+  if (f.development) {
+    parts.push("MATCHED_DEVELOPMENT_NAME = ?");
+    binds.push(f.development);
+  }
+  // GA has no channel dimension in the dashboard; channel does not apply.
+  return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
+}
+
+function toQueryParams(f: ScenarioFilters): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (f.company) params.company = f.company;
+  if (f.development) params.development = f.development;
+  if (f.channel) {
+    params.contactChannel = f.channel;
+    params.dealChannel = f.channel;
+  }
+  if (f.startDate) params.startDate = f.startDate;
+  if (f.endDate) params.endDate = f.endDate;
+  return params;
+}
+
+// ---------- Scenario execution ----------
+
+async function auditScenario(scenario: Scenario): Promise<boolean> {
+  const f = scenario.filters;
+  console.log(`\n=== Scenario: ${scenario.name} ===`);
+  const params = toQueryParams(f);
+  console.log(
+    `Params: ${Object.keys(params).length ? JSON.stringify(params) : "(none — default view)"}`,
+  );
+
+  // Compute the range the API MUST apply — requested dates, or the default
+  // quarter — before looking at the response, then assert the response
+  // honored it. This catches an endpoint that silently ignores date params.
+  const defaults = defaultQuarterRange();
+  const expStart = f.startDate ?? defaults.startDate;
+  const expEnd = f.endDate ?? defaults.endDate;
+  const expTo = expectedToDate(expStart, expEnd);
+
+  const overview = await fetchOverview(params);
+  const ar = overview.appliedRange;
+  console.log(
+    `Applied range: ${ar.startDate}..${ar.endDate}, toDate=${ar.toDate}, target=${ar.target}`,
+  );
+
+  if (ar.startDate !== expStart || ar.endDate !== expEnd || ar.toDate !== expTo) {
+    console.error(
+      `FAIL appliedRange mismatch: expected ${expStart}..${expEnd} (toDate=${expTo}), ` +
+        `got ${ar.startDate}..${ar.endDate} (toDate=${ar.toDate}) — the API did not honor the requested/default dates`,
+    );
+    return false;
+  }
+
+  const cf = contactFrag(f);
+  const df = dealFrag(f);
+  const gf = gaFrag(f);
+
+  // Independent baselines — bound to the EXPECTED dates (start..elapsed
+  // cutoff), same window the API applies to actuals, no attribution join
+  // that could fan out counts.
   const [leads, tours, sales, users] = await Promise.all([
     countScalar(
-      `SELECT COUNT(*) AS N FROM DM_CONTACTS
-       WHERE EHI_LEAD = 1 AND CONTACT_CREATE_DATE BETWEEN ? AND ?`,
-      [startDate, toDate],
+      `SELECT COUNT(*) AS N FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}`,
+      [expStart, expTo, ...cf.binds],
     ),
     countScalar(
-      `SELECT COUNT(*) AS N FROM DM_CONTACTS
-       WHERE EHI_LEAD = 1 AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?`,
-      [startDate, toDate],
+      `SELECT COUNT(*) AS N FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}`,
+      [expStart, expTo, ...cf.binds],
     ),
     countScalar(
-      `SELECT COUNT(*) AS N FROM DM_DEALS
-       WHERE PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
-         AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?`,
-      [startDate, toDate],
+      `SELECT COUNT(*) AS N FROM DM_DEALS X
+       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}`,
+      [expStart, expTo, ...df.binds],
     ),
     countScalar(
       `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
-      [startDate, toDate],
+       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
+      [expStart, expTo, ...gf.binds],
     ),
   ]);
 
@@ -104,15 +287,125 @@ async function main() {
     );
     if (!ok) failed = true;
   }
+  return !failed;
+}
 
-  if (failed) {
+// ---------- Representative filter selection ----------
+
+/**
+ * Pick representative filter values dynamically: the Esperanza company,
+ * development, and channel with the most leads in the given range, so the
+ * filtered scenarios always exercise non-trivial data. Missing values make
+ * the audit FAIL — a silently skipped scenario is not coverage.
+ */
+async function pickRepresentativeFilters(
+  startDate: string,
+  toDate: string,
+): Promise<{ company: string; development: string; channel: string }> {
+  const [companyRows, devRows, channelRows] = await Promise.all([
+    querySnowflake<{ COMPANY_NAME: string }>(
+      `SELECT D.COMPANY_NAME, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+      [startDate, toDate],
+    ),
+    querySnowflake<{ DEVELOPMENT_NAME: string }>(
+      `SELECT D.DEVELOPMENT_NAME, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+      [startDate, toDate],
+    ),
+    querySnowflake<{ CH: string }>(
+      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
+       FROM DM_CONTACTS C
+       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+         AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
+       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+      [startDate, toDate],
+    ),
+  ]);
+  const company = companyRows[0]?.COMPANY_NAME;
+  const development = devRows[0]?.DEVELOPMENT_NAME;
+  const channel = channelRows[0]?.CH;
+  const missing = [
+    !company && "company",
+    !development && "development",
+    !channel && "channel",
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(
+      `No representative ${missing.join(", ")} found in ${startDate}..${toDate} — ` +
+        "cannot exercise the required filtered scenarios (empty source data or broken dimension)",
+    );
+  }
+  return { company: company!, development: development!, channel: channel! };
+}
+
+/**
+ * Explicit date-range scenario: January of the current default year when it
+ * has fully elapsed (stable results), otherwise a deterministic single-day
+ * range on the default quarter's start date. Both differ from the default
+ * quarter bounds, so an endpoint that ignores date params fails the
+ * appliedRange assertion. Never skipped.
+ */
+function explicitRangeScenario(defaultStart: string): Scenario {
+  const year = defaultStart.slice(0, 4);
+  const jan31 = `${year}-01-31`;
+  if (todayChicago() > jan31) {
+    return {
+      name: "explicit date range (January)",
+      filters: { startDate: `${year}-01-01`, endDate: jan31 },
+    };
+  }
+  return {
+    name: `explicit date range (single day ${defaultStart})`,
+    filters: { startDate: defaultStart, endDate: defaultStart },
+  };
+}
+
+async function main() {
+  console.log(
+    `Auditing ${API_BASE}/dashboards/overview-with-targets (tolerance ${TOLERANCE_PCT}%)`,
+  );
+
+  const { startDate, endDate } = defaultQuarterRange();
+  const toDate = expectedToDate(startDate, endDate);
+  console.log(`Default range: ${startDate}..${endDate}, toDate=${toDate}`);
+
+  const { company, development, channel } = await pickRepresentativeFilters(
+    startDate,
+    toDate,
+  );
+
+  const scenarios: Scenario[] = [
+    { name: "default view", filters: {} },
+    { name: `company filter (${company})`, filters: { company } },
+    { name: `development filter (${development})`, filters: { development } },
+    { name: `channel filter (${channel})`, filters: { channel } },
+    explicitRangeScenario(startDate),
+  ];
+  console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
+
+  let anyFailed = false;
+  for (const scenario of scenarios) {
+    const ok = await auditScenario(scenario);
+    if (!ok) anyFailed = true;
+  }
+
+  if (anyFailed) {
     console.error(
-      "\nAUDIT FAILED: dashboard totals diverge from independent Snowflake baselines. " +
-        "Likely causes: join fan-out in the attribution dimension, changed filters, or stale cached data.",
+      "\nAUDIT FAILED: dashboard totals diverge from independent Snowflake baselines " +
+        "in at least one scenario. Likely causes: join fan-out in the attribution " +
+        "dimension, a filter bound to the wrong column, ignored date parameters, " +
+        "changed filters, or stale cached data.",
     );
     process.exit(1);
   }
-  console.log("\nAudit passed: all totals within tolerance.");
+  console.log("\nAudit passed: all totals within tolerance across all scenarios.");
   process.exit(0);
 }
 
