@@ -12,7 +12,8 @@
     "audit:cache-swr": "esbuild scripts/audit-cache-swr.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-cache-swr.mjs --log-level=warning && node dist/audit-cache-swr.mjs",
     "audit:dashboard": "esbuild scripts/audit-dashboard.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-dashboard.mjs --log-level=warning && node dist/audit-dashboard.mjs",
     "audit:yoy": "esbuild scripts/audit-yoy.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-yoy.mjs --log-level=warning && node dist/audit-yoy.mjs",
-    "audit:leasing": "esbuild scripts/audit-leasing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-leasing.mjs --log-level=warning && node dist/audit-leasing.mjs"
+    "audit:leasing": "esbuild scripts/audit-leasing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-leasing.mjs --log-level=warning && node dist/audit-leasing.mjs",
+    "audit:ui": "esbuild scripts/audit-ui.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-ui.mjs --log-level=warning && node dist/audit-ui.mjs"
   },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.3",
@@ -33,6 +34,7 @@
     "esbuild": "0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
     "pino-pretty": "^13.1.3",
+    "playwright-core": "^1.62.1",
     "thread-stream": "3.1.0"
   }
 }

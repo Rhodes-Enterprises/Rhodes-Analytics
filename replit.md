@@ -11,6 +11,7 @@ _Replace the heading above with the project's name, and this line with one sente
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - `pnpm --filter @workspace/api-server run audit:all` — run EVERY dashboard audit in one command (auto-discovers all `audit:*` scripts in the api-server package, runs them sequentially to respect the Snowflake proxy's ~10 RPS limit, exits 1 if any fail). Builds the api-server and boots its own private copy on port 8099 so it always audits the current code; set `AUDIT_API_BASE` to point it at an already-running server instead. Registered as the `audit` validation step. Run this before shipping any data-layer change.
 - `pnpm --filter @workspace/api-server run audit:dashboard` — audit dashboard totals against independent Snowflake baseline queries (API server must be running); fails on divergence > 0.5% (tune with `AUDIT_TOLERANCE_PCT`)
+- `pnpm --filter @workspace/api-server run audit:ui` — last-mile UI binding audit: builds the rhodes-analytics app, loads Overview with Targets in headless Chromium (playwright-core + Nix `chromium`), and verifies every rendered KPI/matrix/ratio/breakdown cell against the page's own `overview-with-targets` response (formatting-normalized). Catches swapped columns / wrong-field bindings that all API audits miss. Needs `AUDIT_API_BASE` (audit:all provides it).
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Stack
