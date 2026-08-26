@@ -109,21 +109,68 @@ function convertCell(raw: string | null, type: string): unknown {
 // All other failures still throw loudly.
 const RATE_LIMIT_MAX_RETRIES = 5;
 
+// Retries alone are not enough: the ~10 RPS budget is shared by the whole
+// repl (API server AND audit processes), and every proxied request counts —
+// statement POSTs, status polls, partition fetches. Boot cache warming plus
+// a running audit can fan out enough parallel requests that sustained 429s
+// exhaust the bounded retries and surface as user-facing 502s. So every
+// proxied request passes through a process-wide gate that caps in-flight
+// requests and spaces request starts, keeping each process at or below
+// ~5 req/s; the retries then only absorb cross-process overlap, not
+// same-process bursts. Tune via env if the proxy budget ever changes.
+const MAX_IN_FLIGHT = Math.max(1, Number(process.env.SNOWFLAKE_MAX_IN_FLIGHT ?? "5"));
+const MIN_START_SPACING_MS = Math.max(
+  0,
+  Number(process.env.SNOWFLAKE_MIN_START_SPACING_MS ?? "200"),
+);
+
+let inFlightRequests = 0;
+let nextStartAt = 0;
+const slotWaiters: (() => void)[] = [];
+
+async function acquireProxySlot(): Promise<void> {
+  while (inFlightRequests >= MAX_IN_FLIGHT) {
+    await new Promise<void>((resolve) => slotWaiters.push(resolve));
+  }
+  inFlightRequests++;
+  const now = Date.now();
+  const startAt = Math.max(now, nextStartAt);
+  nextStartAt = startAt + MIN_START_SPACING_MS;
+  if (startAt > now) await new Promise((r) => setTimeout(r, startAt - now));
+}
+
+function releaseProxySlot(): void {
+  inFlightRequests--;
+  slotWaiters.shift()?.();
+}
+
 async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
   for (let attempt = 0; ; attempt++) {
-    const connectors = getConnectors();
-    const response = await connectors.proxy("snowflake", path, {
-      method: init.method,
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        ...init.headers,
-      },
-      body: init.body,
-    });
-    const text = await response.text();
-    if (response.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
-      const retryAfterSec = Number(response.headers.get("retry-after"));
+    let status: number;
+    let text: string;
+    let retryAfterHeader: string | null;
+    await acquireProxySlot();
+    try {
+      const connectors = getConnectors();
+      const response = await connectors.proxy("snowflake", path, {
+        method: init.method,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...init.headers,
+        },
+        body: init.body,
+      });
+      status = response.status;
+      retryAfterHeader = response.headers.get("retry-after");
+      text = await response.text();
+    } finally {
+      // Release before any retry sleep so a throttled request doesn't hold
+      // a slot while it waits.
+      releaseProxySlot();
+    }
+    if (status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+      const retryAfterSec = Number(retryAfterHeader);
       const baseMs =
         Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 1000;
       // Cap growth and add jitter so a burst of throttled queries doesn't
@@ -137,15 +184,15 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
       json = JSON.parse(text) as ResultSet;
     } catch {
       throw new Error(
-        `Snowflake API returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`,
+        `Snowflake API returned non-JSON response (HTTP ${status}): ${text.slice(0, 200)}`,
       );
     }
-    if (!response.ok && response.status !== 202) {
+    if ((status < 200 || status >= 300) && status !== 202) {
       throw new Error(
-        `Snowflake query failed (HTTP ${response.status}): ${json.message ?? text.slice(0, 200)}`,
+        `Snowflake query failed (HTTP ${status}): ${json.message ?? text.slice(0, 200)}`,
       );
     }
-    return { status: response.status, json };
+    return { status, json };
   }
 }
 

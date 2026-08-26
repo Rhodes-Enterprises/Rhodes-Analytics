@@ -64,8 +64,9 @@
  *
  * The website-user metrics share the same blind-spot class through the GA
  * property: the API's GA queries and this audit's GA baselines both
- * hardcode PROPERTY = 'Esperanza Homes' (and the Leasing pages hardcode
- * 'Rhodes Living'), so an upstream property rename zeroes both sides and
+ * filter on the shared GA_PROPERTY_NAME constant in src/lib/business-defs.ts
+ * (the Leasing pages hardcode 'Rhodes Living'), so an upstream property
+ * rename zeroes both sides and
  * every user-count check passes 0=0 while the dashboard ships zeroed
  * traffic numbers. The default view therefore also runs the shared GA
  * property label-drift guard (ga-property-guard.ts, also run by
@@ -127,6 +128,7 @@
 import { querySnowflake } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaPropertyLabels } from "./ga-property-guard";
+import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
 
 // Default to the API server's own local port (same PORT contract the server
 // uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
@@ -422,7 +424,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   ) =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.${dateCol} BETWEEN ? AND ?${cf.sql}${
+       WHERE ${isLeadSql("C")} AND C.${dateCol} BETWEEN ? AND ?${cf.sql}${
          channel === "unlabeled"
            ? unlabeledFrag("C.ONSITE_ONLINE_SOURCE_CHANNEL")
            : channel
@@ -439,7 +441,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   const countDeals = (channel?: ChannelBucket) =>
     countScalar(
       `SELECT COUNT(*) AS N FROM DM_DEALS X
-       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+       WHERE ${isSaleSql("X")}
          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}${
            channel === "unlabeled"
              ? unlabeledFrag("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL")
@@ -476,7 +478,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     countDeals(),
     countScalar(
       `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
+       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
       [expStart, expTo, ...gf.binds],
     ),
     // NEW-users headline: same GA source and filters, restricted to first-time
@@ -485,7 +487,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     countScalar(
       `SELECT COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS N
        FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
+       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
       [expStart, expTo, ...gf.binds],
     ),
     countContacts("CONTACT_CREATE_DATE", "Online"),
@@ -561,7 +563,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
         labelsSql: `SELECT COALESCE(C.ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
            FROM DM_CONTACTS C
-           WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
+           WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
            GROUP BY 1 ORDER BY N DESC`,
         binds: [expStart, expTo, ...cf.binds] as (string | number)[],
       },
@@ -573,7 +575,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
         labelsSql: `SELECT COALESCE(C.ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
            FROM DM_CONTACTS C
-           WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
+           WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
            GROUP BY 1 ORDER BY N DESC`,
         binds: [expStart, expTo, ...cf.binds] as (string | number)[],
       },
@@ -585,7 +587,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         column: "DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL",
         labelsSql: `SELECT COALESCE(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
            FROM DM_DEALS X
-           WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+           WHERE ${isSaleSql("X")}
              AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
            GROUP BY 1 ORDER BY N DESC`,
         binds: [expStart, expTo, ...df.binds] as (string | number)[],
@@ -698,18 +700,18 @@ async function auditBreakdowns(
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
+        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
+        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
         FROM DM_CONTACTS C
-        WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
           AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
                   (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
@@ -723,18 +725,18 @@ async function auditBreakdowns(
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
+        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_CONTACTS C
         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
+        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
         FROM DM_CONTACTS C
-        WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
           AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
                   (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
@@ -748,20 +750,20 @@ async function auditBreakdowns(
         SELECT D.COMPANY_NAME, COUNT(*) AS N
         FROM DM_DEALS X
         JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+        WHERE ${isSaleSql("X")}
           AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
         GROUP BY 1`,
       byDevSql: `
         SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
         FROM DM_DEALS X
         JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+        WHERE ${isSaleSql("X")}
           AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
         GROUP BY 1, 2`,
       unattributedSql: `
         SELECT COUNT(*) AS N
         FROM DM_DEALS X
-        WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+        WHERE ${isSaleSql("X")}
           AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
           AND (X.DEAL_EHI_COMMUNITY_OF_INTEREST IS NULL
                OR X.DEAL_EHI_COMMUNITY_OF_INTEREST NOT IN
@@ -896,7 +898,7 @@ async function auditWebsiteUserBreakdowns(
               COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
               COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
        FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
@@ -906,7 +908,7 @@ async function auditWebsiteUserBreakdowns(
               COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
               COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
        FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
        GROUP BY 1, 2`,
       binds,
     ),
@@ -1018,7 +1020,7 @@ async function pickRepresentativeFilters(
       `SELECT D.COMPANY_NAME, COUNT(*) AS N
        FROM DM_CONTACTS C
        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
     ),
@@ -1026,14 +1028,14 @@ async function pickRepresentativeFilters(
       `SELECT D.DEVELOPMENT_NAME, COUNT(*) AS N
        FROM DM_CONTACTS C
        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
     ),
     querySnowflake<{ CH: string }>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
        FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
          AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [startDate, toDate],
@@ -1228,28 +1230,28 @@ async function auditRatios(
     querySnowflake<ChannelCountRow>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
     querySnowflake<ChannelCountRow>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
     querySnowflake<ChannelCountRow>(
       `SELECT X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
        FROM DM_DEALS X
-       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+       WHERE ${isSaleSql("X")}
          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       binds,
     ),
     countScalar(
       `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
+       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
       binds,
     ),
     querySnowflake<RatioGoalBaselineRow>(
@@ -1473,7 +1475,7 @@ async function auditCommunities(): Promise<boolean> {
       `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(CONTACT_CREATE_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
-       WHERE EHI_LEAD = 1 AND CONTACT_CREATE_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql()} AND CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       [todayUtc, ytdStart, todayUtc],
     ),
@@ -1481,7 +1483,7 @@ async function auditCommunities(): Promise<boolean> {
       `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(EHI_MIN_FIRST_TOUR_DATE = ?) AS N_TODAY
        FROM DM_CONTACTS
-       WHERE EHI_LEAD = 1 AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+       WHERE ${isLeadSql()} AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       [todayUtc, ytdStart, todayUtc],
     ),
@@ -1489,7 +1491,7 @@ async function auditCommunities(): Promise<boolean> {
       `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
               COUNT_IF(CONTRACT_RATIFIED_DATE = ?) AS N_TODAY
        FROM DM_DEALS
-       WHERE PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+       WHERE ${isSaleSql()}
          AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
        GROUP BY 1`,
       [todayUtc, ytdStart, todayUtc],

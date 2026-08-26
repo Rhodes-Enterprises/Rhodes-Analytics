@@ -4,7 +4,8 @@
  *
  * The Overview dashboard's website-user metrics (fetchWebsiteUsers /
  * getYearOverYear in src/lib/overview-targets.ts) and the audits' own GA
- * baselines all hardcode PROPERTY = 'Esperanza Homes' against
+ * baselines all filter PROPERTY via the shared GA_PROPERTY_NAME constant
+ * (src/lib/business-defs.ts) against
  * FCT_GOOGLE_ANALYTICS_EVENT_LEVEL; the Leasing pages hardcode
  * PROPERTY = 'Rhodes Living' the same way (fetchTrafficCount /
  * fetchMonthlyTraffic in src/lib/leasing.ts). If an analytics property is
@@ -23,13 +24,14 @@
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
+import { GA_PROPERTY_NAME } from "../src/lib/business-defs";
 
 export const GA_PROPERTY_GUARD_MIN_TOTAL = Number(
   process.env.AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL ?? "10",
 );
 
 interface ExpectedGaProperty {
-  /** Literal PROPERTY value the dashboard queries and baselines hardcode. */
+  /** PROPERTY value the dashboard queries and baselines filter on. */
   value: string;
   /** Where the literal lives, so a failure names the exact fix. */
   usedBy: string;
@@ -42,10 +44,11 @@ interface ExpectedGaProperty {
  */
 export const EXPECTED_GA_PROPERTIES: ExpectedGaProperty[] = [
   {
-    value: "Esperanza Homes",
+    value: GA_PROPERTY_NAME,
     usedBy:
       "The Overview dashboard's website-user metrics (fetchWebsiteUsers/getYearOverYear in " +
-      "src/lib/overview-targets.ts) AND the GA baselines in audit-dashboard.ts/audit-yoy.ts",
+      "src/lib/overview-targets.ts) AND the GA baselines in audit-dashboard.ts/audit-yoy.ts " +
+      "(all via GA_PROPERTY_NAME / isGaTrafficSql() in src/lib/business-defs.ts)",
   },
   {
     value: "Rhodes Living",
@@ -107,9 +110,9 @@ export async function auditGaPropertyLabels(
       `FAIL ${name} GA rows exist in ${expStart}..${expTo} (${total} distinct users) but ZERO ` +
         `match PROPERTY = '${exp.value}' on FCT_GOOGLE_ANALYTICS_EVENT_LEVEL.PROPERTY — the ` +
         `expected analytics property is missing from the data; properties present: ${present}. ` +
-        `${exp.usedBy} hardcode this literal, so every affected website-traffic number ` +
+        `${exp.usedBy} depend on this value, so every affected website-traffic number ` +
         `computes 0 and its checks pass 0=0. If the property was renamed upstream, update ` +
-        `those literals to the new name.`,
+        `that definition to the new name.`,
     );
     failed = true;
   }

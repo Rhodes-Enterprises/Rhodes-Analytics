@@ -18,8 +18,9 @@
  * it is audited with the same rigor. Business-plan goal points are also
  * checked against DM_GOALS directly.
  *
- * The websiteUsers baselines hardcode the same PROPERTY = 'Esperanza Homes'
- * literal the API uses, so a renamed analytics property upstream would zero
+ * The websiteUsers baselines filter on the same shared GA property constant
+ * the API uses (GA_PROPERTY_NAME in src/lib/business-defs.ts), so a renamed
+ * analytics property upstream would zero
  * both sides and every point would pass 0=0 while the chart ships zeroed
  * traffic. The run therefore starts with the shared GA property label-drift
  * guard (ga-property-guard.ts, same guard audit-dashboard.ts runs) over the
@@ -46,6 +47,7 @@
 import { querySnowflake } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaPropertyLabels } from "./ga-property-guard";
+import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
 
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
@@ -202,28 +204,28 @@ function baselineSql(measure: string, frag: Frag): { sql: string; binds: (string
     case "leads":
       return {
         sql: `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-              WHERE C.EHI_LEAD = 1
+              WHERE ${isLeadSql("C")}
                 AND YEAR(C.CONTACT_CREATE_DATE) = ? AND MONTH(C.CONTACT_CREATE_DATE) = ?${frag.sql}`,
         binds: frag.binds,
       };
     case "tours":
       return {
         sql: `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-              WHERE C.EHI_LEAD = 1
+              WHERE ${isLeadSql("C")}
                 AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) = ? AND MONTH(C.EHI_MIN_FIRST_TOUR_DATE) = ?${frag.sql}`,
         binds: frag.binds,
       };
     case "grossSales":
       return {
         sql: `SELECT COUNT(*) AS N FROM DM_DEALS X
-              WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+              WHERE ${isSaleSql("X")}
                 AND YEAR(X.CONTRACT_RATIFIED_DATE) = ? AND MONTH(X.CONTRACT_RATIFIED_DATE) = ?${frag.sql}`,
         binds: frag.binds,
       };
     case "websiteUsers":
       return {
         sql: `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-              WHERE PROPERTY = 'Esperanza Homes'
+              WHERE ${isGaTrafficSql()}
                 AND YEAR(GOOGLE_ANALYTICS_DATE) = ? AND MONTH(GOOGLE_ANALYTICS_DATE) = ?${frag.sql}`,
         binds: frag.binds,
       };
@@ -373,14 +375,14 @@ async function pickRepresentativeFilters(
       `SELECT D.COMPANY_NAME, COUNT(*) AS N
        FROM DM_CONTACTS C
        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE C.EHI_LEAD = 1 AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+       WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [year - 1, year],
     ),
     querySnowflake<{ CH: string }>(
       `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
        FROM DM_CONTACTS C
-       WHERE C.EHI_LEAD = 1 AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+       WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
          AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
        GROUP BY 1 ORDER BY N DESC LIMIT 1`,
       [year - 1, year],

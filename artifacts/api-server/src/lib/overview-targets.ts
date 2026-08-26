@@ -1,5 +1,6 @@
 import { querySnowflake } from "./snowflake";
 import { DEV_DIM } from "./dev-dim";
+import { isGaTrafficSql, isLeadSql, isSaleSql } from "./business-defs";
 import { createQueryCache } from "./query-cache";
 
 /**
@@ -15,7 +16,6 @@ import { createQueryCache } from "./query-cache";
 // loads stay warm all day — without any timer that would keep the Snowflake
 // warehouse awake. Semantics and rate-limit notes live in lib/query-cache.ts.
 // (Also shared by marketing-dashboards.ts via this export.)
-
 export type TargetKind = "proforma" | "business_plan" | "goal" | "waterfall";
 
 export interface DashboardFilters {
@@ -251,7 +251,7 @@ async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<A
     FROM DM_CONTACTS C
     LEFT JOIN ${DEV_DIM} D
       ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-    WHERE C.EHI_LEAD = 1
+    WHERE ${isLeadSql("C")}
       AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
     GROUP BY 1, 2, 3`;
   return cached(`leadActuals:${dateCol}:${JSON.stringify(f)}`, () =>
@@ -269,7 +269,7 @@ async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
     FROM DM_DEALS X
     LEFT JOIN ${DEV_DIM} D
       ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-    WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+    WHERE ${isSaleSql("X")}
       AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
     GROUP BY 1, 2, 3`;
   return cached(`salesActuals:${JSON.stringify(f)}`, () =>
@@ -298,7 +298,7 @@ async function fetchWebsiteUsers(f: DashboardFilters): Promise<UsersRow[]> {
            COUNT(DISTINCT USER_PSEUDO_ID) AS TOTAL_USERS,
            COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-    WHERE PROPERTY = 'Esperanza Homes'
+    WHERE ${isGaTrafficSql()}
       AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}
     GROUP BY GROUPING SETS (
       (),
@@ -365,7 +365,7 @@ export async function getFilterOptions() {
       ),
       querySnowflake<{ L: string }>(
         `SELECT LEAD_SOURCE_OVERVIEW AS L FROM DM_CONTACTS
-         WHERE EHI_LEAD = 1 AND LEAD_SOURCE_OVERVIEW IS NOT NULL
+         WHERE ${isLeadSql()} AND LEAD_SOURCE_OVERVIEW IS NOT NULL
          GROUP BY 1 ORDER BY COUNT(*) DESC`,
       ),
       querySnowflake<{ CH: string }>(
@@ -676,7 +676,7 @@ export async function getYearOverYear(f: DashboardFilters) {
       `SELECT YEAR(GOOGLE_ANALYTICS_DATE) Y, MONTH(GOOGLE_ANALYTICS_DATE) M,
               COUNT(DISTINCT USER_PSEUDO_ID) N
        FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE PROPERTY = 'Esperanza Homes'
+       WHERE ${isGaTrafficSql()}
          AND YEAR(GOOGLE_ANALYTICS_DATE) IN (?, ?)${gaf.sql}
        GROUP BY 1, 2`,
       [prior, year, ...gaf.binds],
@@ -686,7 +686,7 @@ export async function getYearOverYear(f: DashboardFilters) {
        FROM DM_CONTACTS C
        LEFT JOIN ${DEV_DIM} D
          ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE C.EHI_LEAD = 1 AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)${cf.sql}
+       WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)${cf.sql}
        GROUP BY 1, 2`,
       [prior, year, ...cf.binds],
     ),
@@ -695,7 +695,7 @@ export async function getYearOverYear(f: DashboardFilters) {
        FROM DM_CONTACTS C
        LEFT JOIN ${DEV_DIM} D
          ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE C.EHI_LEAD = 1 AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)${cf.sql}
+       WHERE ${isLeadSql("C")} AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)${cf.sql}
        GROUP BY 1, 2`,
       [prior, year, ...cf.binds],
     ),
@@ -704,7 +704,7 @@ export async function getYearOverYear(f: DashboardFilters) {
        FROM DM_DEALS X
        LEFT JOIN ${DEV_DIM} D
          ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+       WHERE ${isSaleSql("X")}
          AND YEAR(X.CONTRACT_RATIFIED_DATE) IN (?, ?)${df.sql}
        GROUP BY 1, 2`,
       [prior, year, ...df.binds],

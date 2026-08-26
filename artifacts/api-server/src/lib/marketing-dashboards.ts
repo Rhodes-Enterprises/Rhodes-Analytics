@@ -1,5 +1,6 @@
 import { querySnowflake } from "./snowflake";
 import { DEV_DIM, devDimSql } from "./dev-dim";
+import { isGaTrafficSql, isLeadSql, isSaleSql } from "./business-defs";
 import {
   cached,
   listGoalTypes,
@@ -96,7 +97,7 @@ export async function getWebsiteTraffic(f: DashboardFilters) {
   const scope = gaWhere.join(" ");
 
   const base = `FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-    WHERE PROPERTY = 'Esperanza Homes'
+    WHERE ${isGaTrafficSql()}
       AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ? ${scope}`;
   const rangeBinds = [f.startDate, f.toDate, ...gaBinds];
 
@@ -263,7 +264,7 @@ async function fetchFunnelActuals(metric: FunnelMetric, f: DashboardFilters): Pr
       FROM DM_DEALS X
       LEFT JOIN ${DEV_DIM} D
         ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-      WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+      WHERE ${isSaleSql("X")}
         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ? ${extra.join(" ")}
       GROUP BY 1, 2, 3, 4, 5`;
   } else {
@@ -278,7 +279,7 @@ async function fetchFunnelActuals(metric: FunnelMetric, f: DashboardFilters): Pr
       FROM DM_CONTACTS C
       LEFT JOIN ${DEV_DIM} D
         ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-      WHERE C.EHI_LEAD = 1
+      WHERE ${isLeadSql("C")}
         AND C.${dateCol} BETWEEN ? AND ? ${extra.join(" ")}
       GROUP BY 1, 2, 3, 4, 5`;
   }
@@ -509,13 +510,13 @@ export async function getEhiGoals(f: DashboardFilters) {
                 D.COMPANY_NAME, COUNT(*) AS N
          FROM DM_CONTACTS C
          LEFT JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-         WHERE C.EHI_LEAD = 1 AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+         WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
          GROUP BY 1, 2, 3
          UNION ALL
          SELECT 'tours', C.ONSITE_ONLINE_SOURCE_CHANNEL, D.COMPANY_NAME, COUNT(*)
          FROM DM_CONTACTS C
          LEFT JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-         WHERE C.EHI_LEAD = 1 AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+         WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
          GROUP BY 1, 2, 3`,
         [f.startDate, f.toDate, f.startDate, f.toDate],
       ),
@@ -525,7 +526,7 @@ export async function getEhiGoals(f: DashboardFilters) {
         `SELECT X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, D.COMPANY_NAME, COUNT(*) AS N
          FROM DM_DEALS X
          LEFT JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-         WHERE X.PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         WHERE ${isSaleSql("X")}
            AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
          GROUP BY 1, 2`,
         [f.startDate, f.toDate],
@@ -537,7 +538,7 @@ export async function getEhiGoals(f: DashboardFilters) {
                 GROUPING(MATCHED_COMPANY_NAME) AS G_COMPANY,
                 COUNT(DISTINCT USER_PSEUDO_ID) AS USERS
          FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-         WHERE PROPERTY = 'Esperanza Homes' AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+         WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
          GROUP BY GROUPING SETS ((), (MATCHED_COMPANY_NAME))`,
         [f.startDate, f.toDate],
       ),
@@ -668,19 +669,19 @@ export async function getCommunityList() {
        L AS (
          SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS LEADS
          FROM DM_CONTACTS
-         WHERE EHI_LEAD = 1 AND CONTACT_CREATE_DATE BETWEEN ? AND ?
+         WHERE ${isLeadSql()} AND CONTACT_CREATE_DATE BETWEEN ? AND ?
          GROUP BY 1
        ),
        T AS (
          SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS TOURS
          FROM DM_CONTACTS
-         WHERE EHI_LEAD = 1 AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+         WHERE ${isLeadSql()} AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
          GROUP BY 1
        ),
        S AS (
          SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS SALES
          FROM DM_DEALS
-         WHERE PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         WHERE ${isSaleSql()}
            AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
          GROUP BY 1
        )
