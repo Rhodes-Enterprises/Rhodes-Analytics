@@ -64,28 +64,18 @@
  */
 
 import { querySnowflake as rawQuerySnowflake } from "../src/lib/snowflake";
+import { fetchJsonWithRetry } from "./lib/fetch-retry";
 
 /**
  * The Snowflake proxy rate-limits per repl (~10 RPS). The audit fires
  * bursts of parallel baseline queries, so serialize them through a small
- * queue with retry-on-429 backoff instead of failing the whole run.
+ * queue so the burst doesn't trip the limit in the first place. Transient
+ * failures that still occur — 429s, dropped connections — are retried with
+ * backoff inside the shared Snowflake helper (src/lib/snowflake.ts).
  */
 let queue: Promise<unknown> = Promise.resolve();
 function querySnowflake<T>(sql: string, binds?: (string | number)[]): Promise<T[]> {
-  const run = async (): Promise<T[]> => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await rawQuerySnowflake<T>(sql, binds);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (attempt < 5 && (msg.includes("429") || msg.includes("Rate limit"))) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-          continue;
-        }
-        throw err;
-      }
-    }
-  };
+  const run = (): Promise<T[]> => rawQuerySnowflake<T>(sql, binds);
   const next = queue.then(run, run);
   queue = next.catch(() => undefined);
   return next;
@@ -174,18 +164,9 @@ async function fetchLeasing(params: Record<string, string>): Promise<LeasingResp
   const qs = new URLSearchParams(params).toString();
   const url = `${API_BASE}/dashboards/leasing${qs ? `?${qs}` : ""}`;
   // On a cold cache the API fires its own burst of Snowflake queries, which
-  // can trip the per-repl rate limit and surface as a 502. Retry a few
-  // times with backoff before failing the audit.
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url);
-    if (res.ok) return (await res.json()) as LeasingResponse;
-    const body = await res.text();
-    if (attempt < 4 && res.status >= 500) {
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-      continue;
-    }
-    throw new Error(`GET ${url} failed with HTTP ${res.status}: ${body}`);
-  }
+  // can trip the per-repl rate limit and surface as a transient 5xx;
+  // fetchJsonWithRetry absorbs that (and dropped connections) with backoff.
+  return fetchJsonWithRetry<LeasingResponse>(url);
 }
 
 // ---------- Expected range computation (independent of the API) ----------

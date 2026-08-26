@@ -47,6 +47,7 @@
 import { querySnowflake } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaPropertyLabels } from "./ga-property-guard";
+import { fetchJsonWithRetry } from "./lib/fetch-retry";
 import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
 
 const API_BASE =
@@ -69,31 +70,21 @@ interface YoyResponse {
 async function fetchYoy(params: Record<string, string>): Promise<YoyResponse> {
   const qs = new URLSearchParams(params).toString();
   const url = `${API_BASE}/dashboards/overview-with-targets/yoy${qs ? `?${qs}` : ""}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`GET ${url} failed with HTTP ${res.status}: ${await res.text()}`);
-  }
-  return (await res.json()) as YoyResponse;
+  // Transport hiccups (dropped connection, transient 5xx while the server's
+  // own Snowflake burst warms up) are retried; real 4xx failures are not.
+  return fetchJsonWithRetry<YoyResponse>(url);
 }
 
 /**
- * Baseline queries run sequentially and retry on the Snowflake proxy's
- * 10 RPS rate limit (HTTP 429) with a short backoff.
+ * Baseline queries run sequentially (the Snowflake proxy rate-limits at
+ * ~10 RPS). Transient transport failures — 429s, dropped connections —
+ * are retried with backoff inside the shared Snowflake helper
+ * (src/lib/snowflake.ts); a query that still fails is a real error and
+ * must fail the audit.
  */
 async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const rows = await querySnowflake<{ N: number }>(sql, binds);
-      return Number(rows[0]?.N) || 0;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (attempt < 5 && msg.includes("429")) {
-        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-        continue;
-      }
-      throw err;
-    }
-  }
+  const rows = await querySnowflake<{ N: number }>(sql, binds);
+  return Number(rows[0]?.N) || 0;
 }
 
 /** Same business-day convention the API uses. */

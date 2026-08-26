@@ -144,6 +144,7 @@
 import { querySnowflake as querySnowflakeRaw } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaPropertyLabels } from "./ga-property-guard";
+import { fetchJsonWithRetry } from "./lib/fetch-retry";
 import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
 
 // Default to the API server's own local port (same PORT contract the server
@@ -231,11 +232,9 @@ interface OverviewResponse {
 async function fetchOverview(params: Record<string, string>): Promise<OverviewResponse> {
   const qs = new URLSearchParams(params).toString();
   const url = `${API_BASE}/dashboards/overview-with-targets${qs ? `?${qs}` : ""}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`GET ${url} failed with HTTP ${res.status}: ${await res.text()}`);
-  }
-  return (await res.json()) as OverviewResponse;
+  // Transport hiccups (dropped connection, transient 5xx while the server's
+  // own Snowflake burst warms up) are retried; real 4xx failures are not.
+  return fetchJsonWithRetry<OverviewResponse>(url);
 }
 
 async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
@@ -1576,12 +1575,15 @@ async function auditCommunities(): Promise<boolean> {
   console.log(`YTD window: ${ytdStart}..${todayUtc}`);
 
   const url = `${API_BASE}/dashboards/communities`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    console.error(`FAIL GET ${url} -> HTTP ${res.status}: ${await res.text()}`);
+  let body: { communities: CommunityRow[] };
+  try {
+    // Transport hiccups and transient 429/5xx are retried by the shared
+    // helper; a persistent or non-transient failure is a real audit failure.
+    body = await fetchJsonWithRetry<{ communities: CommunityRow[] }>(url);
+  } catch (err) {
+    console.error(`FAIL GET ${url}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
-  const body = (await res.json()) as { communities: CommunityRow[] };
   if (!Array.isArray(body.communities)) {
     console.error("FAIL response has no communities array");
     return false;

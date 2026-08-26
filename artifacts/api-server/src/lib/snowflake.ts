@@ -1,5 +1,15 @@
 import { ReplitConnectors } from "@replit/connectors-sdk";
 import { logger } from "./logger";
+import {
+  RATE_LIMIT_BACKOFF_CAP_MS,
+  RATE_LIMIT_MAX_RETRIES,
+  TRANSIENT_MAX_RETRIES,
+  isTransientNetworkError,
+  retryAfterBaseMs,
+  sleep,
+  summarizeError,
+  transientBackoffMs,
+} from "./transient";
 
 /**
  * Snowflake access via the Replit Snowflake connector (SQL REST API through
@@ -102,13 +112,6 @@ function convertCell(raw: string | null, type: string): unknown {
   }
 }
 
-// The connector proxy rate-limits to ~10 requests/second per repl and
-// answers HTTP 429 with a Retry-After. Parallel dashboard loads and the
-// audit script can burst past that, so 429s are retried (bounded, honoring
-// Retry-After, capped backoff) instead of surfacing as user-visible 502s.
-// All other failures still throw loudly.
-const RATE_LIMIT_MAX_RETRIES = 5;
-
 // Retries alone are not enough: the ~10 RPS budget is shared by the whole
 // repl (API server AND audit processes), and every proxied request counts —
 // statement POSTs, status polls, partition fetches. Boot cache warming plus
@@ -145,14 +148,18 @@ function releaseProxySlot(): void {
 }
 
 async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
+  let status = 0;
+  let text = "";
+  let retryAfterHeader: string | null = null;
+  let attempts = 0;
   for (let attempt = 0; ; attempt++) {
-    let status: number;
-    let text: string;
-    let retryAfterHeader: string | null;
+    attempts = attempt + 1;
+    let failed = false;
+    let caught: unknown;
     await acquireProxySlot();
     try {
-      const connectors = getConnectors();
-      const response = await connectors.proxy("snowflake", path, {
+      // A fresh client per attempt — the SDK handles token refresh per call.
+      const response = await getConnectors().proxy("snowflake", path, {
         method: init.method,
         headers: {
           "Content-Type": "application/json",
@@ -163,49 +170,80 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
       });
       status = response.status;
       retryAfterHeader = response.headers.get("retry-after");
+      // Read the body inside the try: a connection dropped mid-body (e.g.
+      // "terminated" / ECONNRESET) is just as transient as a failed connect.
       text = await response.text();
+    } catch (err) {
+      failed = true;
+      caught = err;
     } finally {
-      // Release before any retry sleep so a throttled request doesn't hold
-      // a slot while it waits.
+      // Release before any retry sleep so a throttled or failed request
+      // doesn't hold a slot while it waits.
       releaseProxySlot();
     }
-    if (status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
-      const retryAfterSec = Number(retryAfterHeader);
-      const baseMs =
-        Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 1000;
-      // Cap growth and add jitter so a burst of throttled queries doesn't
-      // retry in lockstep or wait unboundedly long.
-      const delayMs = Math.min(baseMs * (attempt + 1), 5000) + Math.floor(Math.random() * 250);
-      await new Promise((r) => setTimeout(r, delayMs));
+    if (failed) {
+      if (attempt < TRANSIENT_MAX_RETRIES && isTransientNetworkError(caught)) {
+        logger.warn(
+          { path, attempt: attempts, err: summarizeError(caught) },
+          "Transient Snowflake proxy network error — retrying",
+        );
+        await sleep(transientBackoffMs(attempt));
+        continue;
+      }
+      throw caught;
+    }
+    // 429 gets a larger budget than other retryable statuses: it is explicit
+    // backpressure, and a saturated proxy can stay saturated for tens of
+    // seconds while a parallel dashboard load drains.
+    const maxRetries = status === 429 ? RATE_LIMIT_MAX_RETRIES : TRANSIENT_MAX_RETRIES;
+    if (isRetryableStatus(status) && attempt < maxRetries) {
+      // On 429 the proxy says how long to back off — honor it (still capped
+      // and jittered so a burst of throttled queries doesn't retry in
+      // lockstep or wait unboundedly long).
+      const baseMs = status === 429 ? retryAfterBaseMs(retryAfterHeader) : undefined;
+      logger.warn(
+        { path, attempt: attempts, status },
+        "Transient Snowflake proxy HTTP status — retrying",
+      );
+      await sleep(
+        transientBackoffMs(attempt, baseMs, status === 429 ? RATE_LIMIT_BACKOFF_CAP_MS : undefined),
+      );
       continue;
     }
-    let json: ResultSet;
-    try {
-      json = JSON.parse(text) as ResultSet;
-    } catch {
-      throw new Error(
-        `Snowflake API returned non-JSON response (HTTP ${status}): ${text.slice(0, 200)}`,
-      );
-    }
-    if ((status < 200 || status >= 300) && status !== 202) {
-      throw new Error(
-        `Snowflake query failed (HTTP ${status}): ${json.message ?? text.slice(0, 200)}`,
-      );
-    }
-    return { status, json };
+    break;
   }
-}
 
-const POLL_INTERVAL_MS = 1000;
+  let json: ResultSet;
+  try {
+    json = JSON.parse(text) as ResultSet;
+  } catch {
+    throw new Error(
+      `Snowflake API returned non-JSON response (HTTP ${status}${
+        isRetryableStatus(status) ? ` after ${attempts} attempts` : ""
+      }): ${text.slice(0, 200)}`,
+    );
+  }
+  if ((status < 200 || status >= 300) && status !== 202) {
+    throw new Error(
+      `Snowflake query failed (HTTP ${status}${
+        isRetryableStatus(status) ? ` after ${attempts} attempts` : ""
+      }): ${json.message ?? text.slice(0, 200)}`,
+    );
+  }
+  return { status, json };
+}
 const POLL_TIMEOUT_MS = 120_000;
 
+function pollDelayMs(poll: number): number {
+  return Math.min(1000 + Math.max(0, poll - 3) * 500, 3000) + Math.floor(Math.random() * 250);
+}
 async function pollStatement(handle: string): Promise<ResultSet> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
-  for (;;) {
+  for (let poll = 0; ; poll++) {
     if (Date.now() > deadline) {
       throw new Error(`Snowflake statement ${handle} timed out after ${POLL_TIMEOUT_MS / 1000}s`);
     }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await sleep(pollDelayMs(poll));
     const { status, json } = await proxyJson(`/api/v2/statements/${handle}`, { method: "GET" });
     if (status === 200) return json;
     // 202: still running — keep polling.
@@ -319,4 +357,9 @@ export async function checkSnowflake(): Promise<SnowflakeStatus> {
         : "Unable to reach Snowflake. See server logs for details.";
     return { connected: false, error: generic };
   }
+}
+
+/** 429 = proxy rate limit; 5xx = gateway/upstream hiccup. Other 4xx are real errors. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
 }
