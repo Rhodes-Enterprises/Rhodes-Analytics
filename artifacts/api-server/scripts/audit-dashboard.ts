@@ -65,6 +65,15 @@
  * goal name that no longer resolves in the input table, or an input-table
  * goal row the dashboard silently drops all fail the audit.
  *
+ * The Community List (GET /api/dashboards/communities) is audited against the
+ * raw DM_COMPANY_DEVELOPMENT rows plus plain YTD GROUP BYs: total/selling/
+ * hasGoals/isRental counts, per-community flag comparison (the intended
+ * per-development semantics are recomputed in JS, not by reusing the API's
+ * QUALIFY dedup), the isSelling invariant over the API's own YTD numbers, and
+ * a label-domain guard on the flag columns — 'Has Goals'/'Rental' are text
+ * labels, not booleans, so a silent upstream relabel would zero every badge
+ * on both sides and still "match" without that guard.
+ *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:dashboard
  *
@@ -794,6 +803,17 @@ async function auditWebsiteUserBreakdowns(
   return !failed;
 }
 
+interface CommunityRow {
+  development: string;
+  division: string;
+  isRental: boolean;
+  hasGoals: boolean;
+  isSelling: boolean;
+  leadsYtd: number;
+  toursYtd: number;
+  salesYtd: number;
+}
+
 interface ChannelCountRow {
   CHANNEL: string | null;
   N: number;
@@ -947,6 +967,10 @@ async function main() {
     }
   }
 
+  // Community List — rows, flags, and selling status vs the raw dimension.
+  const communitiesOk = await auditCommunities();
+  if (!communitiesOk) anyFailed = true;
+
   if (anyFailed) {
     console.error(
       "\nAUDIT FAILED: dashboard totals diverge from independent Snowflake baselines " +
@@ -954,13 +978,16 @@ async function main() {
         "dimension, a filter bound to the wrong column, a GA grouping regression, " +
         "an online/onsite split keyed to the wrong channel column or with swapped " +
         "labels, a mis-wired funnel ratio, a stale ratio-goal name, ignored date " +
-        "parameters, changed filters, or stale cached data.",
+        "parameters, changed filters, stale cached data, or mislabeled/hidden " +
+        "communities in the Community List.",
     );
     process.exit(1);
   }
   console.log("\nAudit passed: all totals within tolerance across all scenarios.");
   process.exit(0);
 }
+
+const GOALS_FLAG_VALUES = new Set(["Has Goals", "No Goals"]);
 
 main().catch((err) => {
   console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
@@ -1177,4 +1204,289 @@ async function auditRatios(
   }
 
   return !failed;
+}
+
+const RENTAL_FLAG_VALUES = new Set(["Rental", "For Sale"]);
+
+/** Snowflake-style binary string compare (locale collation would diverge). */
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Audits GET /dashboards/communities against independent baselines:
+ *
+ *  0. Label-domain guard: flag columns must only hold the documented labels
+ *     ('Has Goals'/'No Goals', 'Rental'/'For Sale', NULL). Both the API and
+ *     this audit compare exact labels, so an upstream relabel would silently
+ *     turn every badge false on BOTH sides and still agree — this guard is
+ *     what makes the flag baselines trustworthy.
+ *  1. Row identity: exactly one API row per distinct Esperanza development in
+ *     the raw dimension — a missing development is a community hidden
+ *     entirely; a duplicate is join fan-out.
+ *  2. Counts: total / selling / hasGoals / isRental, compared EXACTLY (the
+ *     whole point is catching single-community mistakes, so no % tolerance).
+ *  3. Per-community flags: hasGoals (any raw row carries 'Has Goals'),
+ *     isRental (flag of the preferred row: goal-carrying rows first, then
+ *     COMPANY_NAME — recomputed in JS from raw rows, independent of the
+ *     API's QUALIFY dedup), and isSelling (hasGoals or any YTD activity from
+ *     plain GROUP BYs with no dimension join).
+ *  4. Self-consistency: isSelling === hasGoals || leads+tours+sales > 0 over
+ *     the API's OWN row values — catches a hide-rule regression even when
+ *     both sides of the cross-source comparison drift together.
+ *
+ * The endpoint caches per UTC day, so a community whose first-ever YTD
+ * activity lands between the cache fill and this audit could transiently
+ * flip isSelling; that is vanishingly rare and a rerun clears it.
+ */
+async function auditCommunities(): Promise<boolean> {
+  console.log(`\n=== Community List (/dashboards/communities) ===`);
+
+  // The endpoint defines YTD in UTC (Jan 1 of the current UTC year through
+  // the current UTC date); the baseline mirrors that window exactly.
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const ytdStart = `${todayUtc.slice(0, 4)}-01-01`;
+  console.log(`YTD window: ${ytdStart}..${todayUtc}`);
+
+  const url = `${API_BASE}/dashboards/communities`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.error(`FAIL GET ${url} -> HTTP ${res.status}: ${await res.text()}`);
+    return false;
+  }
+  const body = (await res.json()) as { communities: CommunityRow[] };
+  if (!Array.isArray(body.communities)) {
+    console.error("FAIL response has no communities array");
+    return false;
+  }
+  const apiRows = body.communities;
+
+  const [dimRows, leadRows, tourRows, saleRows] = await Promise.all([
+    querySnowflake<DimRawRow>(
+      `SELECT DEVELOPMENT_NAME, COMPANY_NAME,
+              DEVELOPMENT_HAS_GOALS_FLAG, RENTAL_COMMUNITY_FLAG
+       FROM DM_COMPANY_DEVELOPMENT
+       WHERE COMPANY_NAME ILIKE '%esperanza%'`,
+    ),
+    querySnowflake<{ DEV: string | null; N: number }>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+       FROM DM_CONTACTS
+       WHERE EHI_LEAD = 1 AND CONTACT_CREATE_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      [ytdStart, todayUtc],
+    ),
+    querySnowflake<{ DEV: string | null; N: number }>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+       FROM DM_CONTACTS
+       WHERE EHI_LEAD = 1 AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      [ytdStart, todayUtc],
+    ),
+    querySnowflake<{ DEV: string | null; N: number }>(
+      `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+       FROM DM_DEALS
+       WHERE PIPELINE_NAME = 'Esperanza Homes Sales Pipeline'
+         AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      [ytdStart, todayUtc],
+    ),
+  ]);
+
+  if (dimRows.length === 0) {
+    console.error(
+      "FAIL baseline dimension query returned no Esperanza rows — empty source data or broken dimension",
+    );
+    return false;
+  }
+
+  let failed = false;
+
+  // --- 0. Label-domain guard ---
+  const badGoals = new Set<string>();
+  const badRental = new Set<string>();
+  for (const r of dimRows) {
+    const g = r.DEVELOPMENT_HAS_GOALS_FLAG;
+    if (g != null && !GOALS_FLAG_VALUES.has(g)) badGoals.add(g);
+    const rf = r.RENTAL_COMMUNITY_FLAG;
+    if (rf != null && !RENTAL_FLAG_VALUES.has(rf)) badRental.add(rf);
+  }
+  if (badGoals.size || badRental.size) {
+    if (badGoals.size) {
+      console.error(
+        `FAIL unexpected DEVELOPMENT_HAS_GOALS_FLAG label(s): ${[...badGoals].map((v) => JSON.stringify(v)).join(", ")} — flag comparisons can no longer be trusted`,
+      );
+    }
+    if (badRental.size) {
+      console.error(
+        `FAIL unexpected RENTAL_COMMUNITY_FLAG label(s): ${[...badRental].map((v) => JSON.stringify(v)).join(", ")} — flag comparisons can no longer be trusted`,
+      );
+    }
+    failed = true;
+  } else {
+    console.log("OK   flag labels within documented value sets");
+  }
+
+  // --- Baseline per development, recomputed in JS from raw rows ---
+  const toCountMap = (rows: { DEV: string | null; N: number }[]) => {
+    const m = new Map<string, number>();
+    for (const r of rows) if (r.DEV) m.set(r.DEV, Number(r.N) || 0);
+    return m;
+  };
+  const leadsBy = toCountMap(leadRows);
+  const toursBy = toCountMap(tourRows);
+  const salesBy = toCountMap(saleRows);
+
+  const rowsByDev = new Map<string, DimRawRow[]>();
+  for (const r of dimRows) {
+    const list = rowsByDev.get(r.DEVELOPMENT_NAME);
+    if (list) list.push(r);
+    else rowsByDev.set(r.DEVELOPMENT_NAME, [r]);
+  }
+  const baseline = new Map<
+    string,
+    { hasGoals: boolean; isRental: boolean; isSelling: boolean }
+  >();
+  for (const [dev, rows] of rowsByDev) {
+    const hasGoals = rows.some((r) => r.DEVELOPMENT_HAS_GOALS_FLAG === "Has Goals");
+    const preferred = [...rows].sort(
+      (a, b) =>
+        Number(a.DEVELOPMENT_HAS_GOALS_FLAG !== "Has Goals") -
+          Number(b.DEVELOPMENT_HAS_GOALS_FLAG !== "Has Goals") ||
+        cmp(a.COMPANY_NAME, b.COMPANY_NAME),
+    )[0];
+    const hasActivity =
+      (leadsBy.get(dev) ?? 0) > 0 ||
+      (toursBy.get(dev) ?? 0) > 0 ||
+      (salesBy.get(dev) ?? 0) > 0;
+    baseline.set(dev, {
+      hasGoals,
+      isRental: preferred.RENTAL_COMMUNITY_FLAG === "Rental",
+      isSelling: hasGoals || hasActivity,
+    });
+  }
+
+  // --- 1. Row identity (both directions + duplicates) ---
+  const apiByDev = new Map<string, CommunityRow>();
+  for (const r of apiRows) {
+    if (apiByDev.has(r.development)) {
+      console.error(
+        `FAIL duplicate API row for development "${r.development}" — join fan-out?`,
+      );
+      failed = true;
+    }
+    apiByDev.set(r.development, r);
+  }
+  let identityIssues = 0;
+  for (const dev of [...baseline.keys()].sort(cmp)) {
+    if (!apiByDev.has(dev)) {
+      console.error(
+        `FAIL community missing from API response: "${dev}" — hidden from the list entirely`,
+      );
+      failed = true;
+      identityIssues++;
+    }
+  }
+  for (const dev of [...apiByDev.keys()].sort(cmp)) {
+    if (!baseline.has(dev)) {
+      console.error(`FAIL unexpected API row with no dimension baseline: "${dev}"`);
+      failed = true;
+      identityIssues++;
+    }
+  }
+  if (!identityIssues) {
+    console.log(
+      `OK   row identity: API returns exactly the ${baseline.size} baseline developments`,
+    );
+  }
+
+  // --- 2. Counts (exact — no tolerance) ---
+  const countOf = <T>(rows: Iterable<T>, pred: (r: T) => boolean) => {
+    let c = 0;
+    for (const r of rows) if (pred(r)) c++;
+    return c;
+  };
+  const countChecks = [
+    { name: "total", api: apiRows.length, baseline: baseline.size },
+    {
+      name: "selling",
+      api: countOf(apiRows, (r) => r.isSelling === true),
+      baseline: countOf(baseline.values(), (b) => b.isSelling),
+    },
+    {
+      name: "hasGoals",
+      api: countOf(apiRows, (r) => r.hasGoals === true),
+      baseline: countOf(baseline.values(), (b) => b.hasGoals),
+    },
+    {
+      name: "isRental",
+      api: countOf(apiRows, (r) => r.isRental === true),
+      baseline: countOf(baseline.values(), (b) => b.isRental),
+    },
+  ];
+  for (const c of countChecks) {
+    const ok = c.api === c.baseline;
+    console.log(
+      `${ok ? "OK  " : "FAIL"} count ${c.name.padEnd(9)} api=${c.api} baseline=${c.baseline}`,
+    );
+    if (!ok) failed = true;
+  }
+
+  // --- 3. Per-community flag comparison ---
+  let flagMismatches = 0;
+  let sharedRows = 0;
+  for (const [dev, base] of [...baseline].sort((a, b) => cmp(a[0], b[0]))) {
+    const api = apiByDev.get(dev);
+    if (!api) continue; // already reported as missing
+    sharedRows++;
+    for (const flag of ["hasGoals", "isRental", "isSelling"] as const) {
+      if (api[flag] !== base[flag]) {
+        const note =
+          flag === "isSelling" && !api[flag]
+            ? " — selling community would be hidden by default"
+            : "";
+        console.error(
+          `FAIL flag ${flag} for "${dev}": api=${api[flag]} baseline=${base[flag]}${note}`,
+        );
+        flagMismatches++;
+        failed = true;
+      }
+    }
+  }
+  if (!flagMismatches) {
+    console.log(
+      `OK   flags hasGoals/isRental/isSelling match baseline on all ${sharedRows} shared rows`,
+    );
+  }
+
+  // --- 4. isSelling invariant over the API's own values ---
+  let invariantViolations = 0;
+  for (const r of apiRows) {
+    const expected =
+      r.hasGoals === true ||
+      (Number(r.leadsYtd) || 0) > 0 ||
+      (Number(r.toursYtd) || 0) > 0 ||
+      (Number(r.salesYtd) || 0) > 0;
+    if (r.isSelling !== expected) {
+      console.error(
+        `FAIL isSelling invariant for "${r.development}": isSelling=${r.isSelling} but ` +
+          `hasGoals=${r.hasGoals} leadsYtd=${r.leadsYtd} toursYtd=${r.toursYtd} salesYtd=${r.salesYtd}`,
+      );
+      invariantViolations++;
+      failed = true;
+    }
+  }
+  if (!invariantViolations) {
+    console.log(
+      `OK   isSelling === hasGoals || leads+tours+sales > 0 holds for all ${apiRows.length} rows`,
+    );
+  }
+
+  return !failed;
+}
+
+interface DimRawRow {
+  DEVELOPMENT_NAME: string;
+  COMPANY_NAME: string;
+  DEVELOPMENT_HAS_GOALS_FLAG: string | null;
+  RENTAL_COMMUNITY_FLAG: string | null;
 }
