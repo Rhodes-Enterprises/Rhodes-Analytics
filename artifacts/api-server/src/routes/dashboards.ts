@@ -220,16 +220,15 @@ router.get("/dashboards/funnel", async (req, res) => {
   }
 });
 
+/** EHI Goals always looks at the full fiscal year of the requested range. */
+function ehiGoalsYearFilters(filters: DashboardFilters): DashboardFilters {
+  const year = filters.startDate.slice(0, 4);
+  return { ...filters, startDate: `${year}-01-01`, endDate: `${year}-12-31` };
+}
+
 router.get("/dashboards/ehi-goals", async (req, res) => {
   try {
-    // EHI Goals always looks at the full fiscal year of the requested range.
-    const filters = buildFilters(req.query as Record<string, unknown>);
-    const year = filters.startDate.slice(0, 4);
-    const yearFilters: DashboardFilters = {
-      ...filters,
-      startDate: `${year}-01-01`,
-      endDate: `${year}-12-31`,
-    };
+    const yearFilters = ehiGoalsYearFilters(buildFilters(req.query as Record<string, unknown>));
     const data = await getEhiGoals(yearFilters);
     res.json({ appliedRange: appliedRange(yearFilters), ...data });
   } catch (err) {
@@ -252,6 +251,57 @@ function appliedRange(filters: DashboardFilters) {
     toDate: filters.toDate,
     target: filters.target,
   };
+}
+
+/**
+ * Pre-populates the in-memory query cache for the default (current-quarter)
+ * view of each marketing dashboard so the first visitor after a restart gets
+ * warm responses. Fire-and-forget; failures only mean a cold first load.
+ * Disable with WARM_DASHBOARD_CACHE=0 (or "false").
+ */
+export function warmDefaultDashboardCaches(logger: { info: Function; warn: Function }): void {
+  const flag = process.env.WARM_DASHBOARD_CACHE;
+  if (flag === "0" || flag === "false") return;
+  const filters = buildFilters({});
+  const started = Date.now();
+  // One endpoint at a time: each endpoint already fans out its own queries
+  // in parallel, and warming all endpoints at once bursts past the connector
+  // proxy's ~10 req/s rate limit. A user request arriving mid-warm-up shares
+  // in-flight queries via the cache's single-flight dedupe.
+  const jobs: [string, () => Promise<unknown>][] = [
+    ["website-traffic", () => getWebsiteTraffic(filters)],
+    ...FUNNEL_METRICS.map(
+      (m): [string, () => Promise<unknown>] => [`funnel:${m}`, () => getFunnelMetric(m, filters)],
+    ),
+    ["ehi-goals", () => getEhiGoals(ehiGoalsYearFilters(filters))],
+    ["communities", () => getCommunityList()],
+  ];
+  void (async () => {
+    const failed: string[] = [];
+    for (const [name, run] of jobs) {
+      try {
+        await run();
+      } catch {
+        // One-off proxy/network hiccups happen; retry each endpoint once
+        // after a short pause before giving up on warming it.
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          await run();
+        } catch {
+          failed.push(name);
+        }
+      }
+    }
+    const elapsedMs = Date.now() - started;
+    if (failed.length > 0) {
+      logger.warn(
+        { elapsedMs, failed },
+        "Dashboard cache warm-up finished with failures (endpoints will fall back to cold queries)",
+      );
+    } else {
+      logger.info({ elapsedMs, warmed: jobs.length }, "Dashboard cache warm-up complete");
+    }
+  })();
 }
 
 export default router;

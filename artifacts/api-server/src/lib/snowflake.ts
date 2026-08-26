@@ -102,27 +102,17 @@ function convertCell(raw: string | null, type: string): unknown {
   }
 }
 
-// The Snowflake proxy enforces a shared per-repl rate limit (10 RPS). Bursty
-// dashboards + the audit script can exceed it; retry 429s with backoff
-// instead of failing the request.
+// The connector proxy rate-limits to ~10 requests/second per repl and
+// answers HTTP 429 with a Retry-After. Parallel dashboard loads and the
+// audit script can burst past that, so 429s are retried (bounded, honoring
+// Retry-After, capped backoff) instead of surfacing as user-visible 502s.
+// All other failures still throw loudly.
 const RATE_LIMIT_MAX_RETRIES = 5;
 
 async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
-  const connectors = getConnectors();
-  let response = await connectors.proxy("snowflake", path, {
-    method: init.method,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...init.headers,
-    },
-    body: init.body,
-  });
-  for (let attempt = 1; response.status === 429 && attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
-    await response.text().catch(() => undefined); // drain before retrying
-    const backoffMs = Math.min(1000 * attempt, 5000) + Math.floor(Math.random() * 250);
-    await new Promise((r) => setTimeout(r, backoffMs));
-    response = await connectors.proxy("snowflake", path, {
+  for (let attempt = 0; ; attempt++) {
+    const connectors = getConnectors();
+    const response = await connectors.proxy("snowflake", path, {
       method: init.method,
       headers: {
         "Content-Type": "application/json",
@@ -131,22 +121,32 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
       },
       body: init.body,
     });
+    const text = await response.text();
+    if (response.status === 429 && attempt < RATE_LIMIT_MAX_RETRIES) {
+      const retryAfterSec = Number(response.headers.get("retry-after"));
+      const baseMs =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 1000;
+      // Cap growth and add jitter so a burst of throttled queries doesn't
+      // retry in lockstep or wait unboundedly long.
+      const delayMs = Math.min(baseMs * (attempt + 1), 5000) + Math.floor(Math.random() * 250);
+      await new Promise((r) => setTimeout(r, delayMs));
+      continue;
+    }
+    let json: ResultSet;
+    try {
+      json = JSON.parse(text) as ResultSet;
+    } catch {
+      throw new Error(
+        `Snowflake API returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`,
+      );
+    }
+    if (!response.ok && response.status !== 202) {
+      throw new Error(
+        `Snowflake query failed (HTTP ${response.status}): ${json.message ?? text.slice(0, 200)}`,
+      );
+    }
+    return { status: response.status, json };
   }
-  const text = await response.text();
-  let json: ResultSet;
-  try {
-    json = JSON.parse(text) as ResultSet;
-  } catch {
-    throw new Error(
-      `Snowflake API returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`,
-    );
-  }
-  if (!response.ok && response.status !== 202) {
-    throw new Error(
-      `Snowflake query failed (HTTP ${response.status}): ${json.message ?? text.slice(0, 200)}`,
-    );
-  }
-  return { status: response.status, json };
 }
 
 const POLL_INTERVAL_MS = 1000;

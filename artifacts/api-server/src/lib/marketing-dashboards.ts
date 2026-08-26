@@ -100,8 +100,6 @@ export async function getWebsiteTraffic(f: DashboardFilters) {
       AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ? ${scope}`;
   const rangeBinds = [f.startDate, f.toDate, ...gaBinds];
 
-  const goalType = await goalTypeFor(fiscalYear, f.target, "web_traffic", asOf);
-
   const [kpiRows, monthlyRows, channelRows, deviceRows, devRows, goals] =
     await Promise.all([
       cached(`wt:kpis:${JSON.stringify(rangeBinds)}`, () =>
@@ -169,7 +167,11 @@ export async function getWebsiteTraffic(f: DashboardFilters) {
           rangeBinds,
         ),
       ),
-      fetchGoalAgg(goalType, fiscalYear, f.startDate, f.endDate, f.toDate, f.company, f.development),
+      // Goal-type resolution chains into the goal aggregate so neither
+      // serializes ahead of the GA queries above.
+      goalTypeFor(fiscalYear, f.target, "web_traffic", asOf).then((goalType) =>
+        fetchGoalAgg(goalType, fiscalYear, f.startDate, f.endDate, f.toDate, f.company, f.development),
+      ),
     ]);
 
   const k = kpiRows[0];
@@ -294,17 +296,26 @@ export async function getFunnelMetric(metric: FunnelMetric, f: DashboardFilters)
   const asOf = new Date(f.toDate + "T00:00:00");
   const cfg = FUNNEL_CONFIG[metric];
 
-  const [totalType, onlineType, onsiteType] = await Promise.all([
-    goalTypeFor(fiscalYear, f.target, cfg.totalMetric, asOf),
-    goalTypeFor(fiscalYear, f.target, cfg.onlineMetric, asOf),
-    goalTypeFor(fiscalYear, f.target, cfg.onsiteMetric, asOf),
-  ]);
+  // Resolve goal types (one shared goal-type listing) and fetch their
+  // aggregates without serializing ahead of the actuals query.
+  const goalsChain = (async () => {
+    const available = await listGoalTypes(fiscalYear);
+    const agg = (m: MetricKey) =>
+      fetchGoalAgg(
+        resolveGoalType(available, f.target, m, asOf),
+        fiscalYear,
+        f.startDate,
+        f.endDate,
+        f.toDate,
+        f.company,
+        f.development,
+      );
+    return Promise.all([agg(cfg.totalMetric), agg(cfg.onlineMetric), agg(cfg.onsiteMetric)]);
+  })();
 
-  const [rows, totalGoals, onlineGoals, onsiteGoals] = await Promise.all([
+  const [rows, [totalGoals, onlineGoals, onsiteGoals]] = await Promise.all([
     fetchFunnelActuals(metric, f),
-    fetchGoalAgg(totalType, fiscalYear, f.startDate, f.endDate, f.toDate, f.company, f.development),
-    fetchGoalAgg(onlineType, fiscalYear, f.startDate, f.endDate, f.toDate, f.company, f.development),
-    fetchGoalAgg(onsiteType, fiscalYear, f.startDate, f.endDate, f.toDate, f.company, f.development),
+    goalsChain,
   ]);
 
   const sum = (filter?: (r: FunnelRow) => boolean) =>
@@ -454,38 +465,44 @@ const GOAL_METRICS: MetricKey[] = Object.keys(GOAL_METRIC_LABELS) as MetricKey[]
 export async function getEhiGoals(f: DashboardFilters) {
   const fiscalYear = new Date(f.startDate + "T00:00:00").getFullYear();
   const asOf = new Date(f.toDate + "T00:00:00");
-  const available = await listGoalTypes(fiscalYear);
+  // Goal-type resolution chains into the goal aggregate; the whole chain
+  // runs concurrently with the three actuals queries below.
+  const goalsChain = (async () => {
+    const available = await listGoalTypes(fiscalYear);
 
-  const typeByMetric = new Map<MetricKey, string>();
-  for (const m of GOAL_METRICS) {
-    const gt = resolveGoalType(available, f.target, m, asOf);
-    if (gt) typeByMetric.set(m, gt);
-  }
-  const types = [...new Set(typeByMetric.values())];
+    const typeByMetric = new Map<MetricKey, string>();
+    for (const m of GOAL_METRICS) {
+      const gt = resolveGoalType(available, f.target, m, asOf);
+      if (gt) typeByMetric.set(m, gt);
+    }
+    const types = [...new Set(typeByMetric.values())];
 
-  const goalRows =
-    types.length === 0
-      ? []
-      : await cached(`ehiGoals:${fiscalYear}:${JSON.stringify([types, f])}`, () =>
-          querySnowflake<{
-            GOAL_TYPE: string;
-            COMPANY_NAME: string | null;
-            FULL_SPAN: number;
-            TO_DATE: number;
-          }>(
-            `SELECT GOAL_TYPE, COMPANY_NAME,
-                    SUM(GOAL) AS FULL_SPAN,
-                    SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-             FROM DM_GOALS
-             WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(",")})
-               AND BUDGET_DATE BETWEEN ? AND ?
-             GROUP BY 1, 2`,
-            [f.toDate, fiscalYear, ...types, f.startDate, f.endDate],
-          ),
-        );
+    const goalRows =
+      types.length === 0
+        ? []
+        : await cached(`ehiGoals:${fiscalYear}:${JSON.stringify([types, f])}`, () =>
+            querySnowflake<{
+              GOAL_TYPE: string;
+              COMPANY_NAME: string | null;
+              FULL_SPAN: number;
+              TO_DATE: number;
+            }>(
+              `SELECT GOAL_TYPE, COMPANY_NAME,
+                      SUM(GOAL) AS FULL_SPAN,
+                      SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+               FROM DM_GOALS
+               WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(",")})
+                 AND BUDGET_DATE BETWEEN ? AND ?
+               GROUP BY 1, 2`,
+              [f.toDate, fiscalYear, ...types, f.startDate, f.endDate],
+            ),
+          );
+    return { typeByMetric, goalRows };
+  })();
 
   // Actuals for the same window (start → toDate)
-  const [contactRows, dealRows, gaRows] = await Promise.all([
+  const [{ typeByMetric, goalRows }, contactRows, dealRows, gaRows] = await Promise.all([
+    goalsChain,
     cached(`ehiActs:contacts:${f.startDate}:${f.toDate}`, () =>
       querySnowflake<{ KIND: string; CHANNEL: string | null; COMPANY_NAME: string | null; N: number }>(
         `SELECT 'leads' AS KIND, C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,

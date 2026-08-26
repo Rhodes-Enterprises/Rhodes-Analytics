@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { warmDefaultDashboardCaches } from "./routes/dashboards";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,7 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  // Fire-and-forget: pre-populate dashboard caches for the default view so
+  // the first page load doesn't pay for cold Snowflake queries.
+  warmDefaultDashboardCaches(logger);
 });
