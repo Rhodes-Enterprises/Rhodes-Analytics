@@ -30,6 +30,7 @@
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
+import { DEV_DIM } from "../src/lib/dev-dim";
 
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
@@ -87,17 +88,12 @@ function todayChicago(): string {
 
 // ---------- Baseline filter fragments (no fan-out-capable joins) ----------
 
-// Deduplicated Esperanza company→development mapping, mirroring the API's
-// DEV_DIM. Used ONLY inside IN (...) semi-joins so it cannot fan out rows.
-const DEV_DIM = `(
-  SELECT COMPANY_NAME, DEVELOPMENT_NAME
-  FROM DM_COMPANY_DEVELOPMENT
-  WHERE COMPANY_NAME ILIKE '%esperanza%'
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY DEVELOPMENT_NAME
-    ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
-  ) = 1
-)`;
+// The deduplicated Esperanza company→development mapping (DEV_DIM) is
+// imported from the API's own definition (src/lib/dev-dim.ts) so the audit
+// can never silently drift from what the dashboard actually runs. The
+// audit's independence lives in HOW the mapping is used here: ONLY inside
+// IN (...) semi-joins, which cannot fan out rows the way the API's
+// LEFT JOINs could.
 
 interface ScenarioFilters {
   company?: string;

@@ -1,4 +1,5 @@
 import { querySnowflake } from "./snowflake";
+import { DEV_DIM } from "./dev-dim";
 
 /**
  * Data layer for the "Overview with Targets" dashboard (migrated from Qlik).
@@ -133,26 +134,6 @@ interface Frag {
   sql: string;
   binds: (string | number)[];
 }
-
-/**
- * Deduplicated company/development dimension for attribution joins.
- * DM_COMPANY_DEVELOPMENT holds one row per (company, development) across ALL
- * brands, and the same development name can exist under many companies (e.g.
- * "VDL Lots" under 7 divisions, "Las Brisas" under 3 brands). Joining the raw
- * table on DEVELOPMENT_NAME fans out actual counts (~1.5x inflation observed).
- * Restrict to Esperanza companies and force one row per development name,
- * preferring the goal-carrying row: the flag holds the labels 'Has Goals' /
- * 'No Goals', so a plain string DESC would invert the preference ('N' > 'H').
- */
-export const DEV_DIM = `(
-  SELECT COMPANY_NAME, DEVELOPMENT_NAME
-  FROM DM_COMPANY_DEVELOPMENT
-  WHERE COMPANY_NAME ILIKE '%esperanza%'
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY DEVELOPMENT_NAME
-    ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
-  ) = 1
-)`;
 
 function contactFilters(f: DashboardFilters, alias = "C", dev = "D"): Frag {
   const parts: string[] = [];

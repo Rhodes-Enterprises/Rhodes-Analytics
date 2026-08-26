@@ -86,6 +86,7 @@
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
+import { DEV_DIM } from "../src/lib/dev-dim";
 
 // Default to the API server's own local port (same PORT contract the server
 // uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
@@ -183,21 +184,6 @@ function expectedToDate(startDate: string, endDate: string): string {
   const today = todayChicago();
   return today < startDate ? startDate : today > endDate ? endDate : today;
 }
-
-// ---------- Baseline filter fragments ----------
-
-// Deduplicated Esperanza company→development mapping, mirroring the API's
-// DEV_DIM. Used ONLY inside IN (...) semi-joins so it cannot fan out rows.
-const DEV_DIM = `(
-  SELECT COMPANY_NAME, DEVELOPMENT_NAME
-  FROM DM_COMPANY_DEVELOPMENT
-  WHERE COMPANY_NAME ILIKE '%esperanza%'
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY DEVELOPMENT_NAME
-    ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
-  ) = 1
-)`;
-
 /**
  * Filters a scenario applies, expressed once and translated into both the
  * API query string and equivalent baseline WHERE fragments per source.

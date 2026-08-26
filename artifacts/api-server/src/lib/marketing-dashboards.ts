@@ -1,7 +1,7 @@
 import { querySnowflake } from "./snowflake";
+import { DEV_DIM, devDimSql } from "./dev-dim";
 import {
   cached,
-  DEV_DIM,
   listGoalTypes,
   resolveGoalType,
   type DashboardFilters,
@@ -641,16 +641,13 @@ export async function getCommunityList() {
       TOURS_YTD: number;
       SALES_YTD: number;
     }>(
-      `WITH DIM AS (
-         SELECT COMPANY_NAME, DEVELOPMENT_NAME, CITY, STATE, POSTAL_CODE,
-                RENTAL_COMMUNITY_FLAG, DEVELOPMENT_HAS_GOALS_FLAG
-         FROM DM_COMPANY_DEVELOPMENT
-         WHERE COMPANY_NAME ILIKE '%esperanza%'
-         QUALIFY ROW_NUMBER() OVER (
-           PARTITION BY DEVELOPMENT_NAME
-           ORDER BY IFF(DEVELOPMENT_HAS_GOALS_FLAG = 'Has Goals', 0, 1), COMPANY_NAME
-         ) = 1
-       ),
+      `WITH DIM AS ${devDimSql([
+        "CITY",
+        "STATE",
+        "POSTAL_CODE",
+        "RENTAL_COMMUNITY_FLAG",
+        "DEVELOPMENT_HAS_GOALS_FLAG",
+      ])},
        L AS (
          SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS LEADS
          FROM DM_CONTACTS
