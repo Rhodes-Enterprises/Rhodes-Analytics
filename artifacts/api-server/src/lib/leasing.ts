@@ -1,4 +1,5 @@
 import { querySnowflake } from "./snowflake";
+import { createQueryCache } from "./query-cache";
 
 /**
  * Data layer for the "Rhodes Living Leasing" dashboard.
@@ -14,47 +15,15 @@ import { querySnowflake } from "./snowflake";
  *   ratified goal.
  */
 
-// ---------- Small in-memory cache (per-process, TTL) ----------
-
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const CACHE_MAX_ENTRIES = 200;
-const cache = new Map<string, { at: number; value: unknown }>();
-
-// Single-flight: concurrent callers of the same key (e.g. a visitor landing
-// on the Leasing page while boot warm-up is still running) share one query
-// instead of issuing a duplicate cold set. Mirrors the Overview cache.
-const inflight = new Map<string, Promise<unknown>>();
-async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
-  const pending = inflight.get(key);
-  if (pending) return pending as Promise<T>;
-  const p = (async () => {
-    try {
-      const value = await fn();
-      // Evict expired entries, then oldest-first if still over the bound
-      // (Map preserves insertion order).
-      const now = Date.now();
-      for (const [k, v] of cache) {
-        if (now - v.at >= CACHE_TTL_MS) cache.delete(k);
-      }
-      while (cache.size >= CACHE_MAX_ENTRIES) {
-        const oldest = cache.keys().next().value;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
-      }
-      cache.set(key, { at: now, value });
-      return value;
-    } finally {
-      inflight.delete(key);
-    }
-  })();
-  inflight.set(key, p);
-  return p;
-}
-
-// ---------- Types ----------
-
+// ---------- Small in-memory cache (per-process) ----------
+// Same stale-while-revalidate semantics as the other dashboards (see
+// lib/query-cache.ts): expired entries are served instantly and refreshed in
+// the background, triggered only by real traffic; concurrent callers of the
+// same key (e.g. a visitor landing on the Leasing page while boot warm-up is
+// still running) share one in-flight query. Separate instance so leasing
+// keeps its own entry budget, but the background-refresh rate-limit gate is
+// shared process-wide.
+const cached = createQueryCache({ maxEntries: 200 });
 export interface LeasingFilters {
   community?: string;
   channel?: string;

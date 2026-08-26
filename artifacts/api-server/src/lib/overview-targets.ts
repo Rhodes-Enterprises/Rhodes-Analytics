@@ -1,5 +1,6 @@
 import { querySnowflake } from "./snowflake";
 import { DEV_DIM } from "./dev-dim";
+import { createQueryCache } from "./query-cache";
 
 /**
  * Data layer for the "Overview with Targets" dashboard (migrated from Qlik).
@@ -8,43 +9,12 @@ import { DEV_DIM } from "./dev-dim";
  * DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS.
  */
 
-// ---------- Small in-memory cache (per-process, TTL) ----------
-
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const CACHE_MAX_ENTRIES = 500;
-const cache = new Map<string, { at: number; value: unknown }>();
-
-const inflight = new Map<string, Promise<unknown>>();
-export async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
-  const pending = inflight.get(key);
-  if (pending) return pending as Promise<T>;
-  const p = (async () => {
-    try {
-      const value = await fn();
-      // Evict expired entries, then oldest-first if still over the bound
-      // (Map preserves insertion order).
-      const now = Date.now();
-      for (const [k, v] of cache) {
-        if (now - v.at >= CACHE_TTL_MS) cache.delete(k);
-      }
-      while (cache.size >= CACHE_MAX_ENTRIES) {
-        const oldest = cache.keys().next().value;
-        if (oldest === undefined) break;
-        cache.delete(oldest);
-      }
-      cache.set(key, { at: now, value });
-      return value;
-    } finally {
-      inflight.delete(key);
-    }
-  })();
-  inflight.set(key, p);
-  return p;
-}
-
-// ---------- Types ----------
+// ---------- Small in-memory cache (per-process) ----------
+// Stale-while-revalidate: after the 5-minute fresh window, entries are served
+// instantly while a traffic-triggered background refresh runs, so dashboard
+// loads stay warm all day — without any timer that would keep the Snowflake
+// warehouse awake. Semantics and rate-limit notes live in lib/query-cache.ts.
+// (Also shared by marketing-dashboards.ts via this export.)
 
 export type TargetKind = "proforma" | "business_plan" | "goal" | "waterfall";
 
@@ -787,3 +757,5 @@ export async function getYearOverYear(f: DashboardFilters) {
 
   return { year, priorYear: prior, measures };
 }
+
+export const cached = createQueryCache({ maxEntries: 500 });
