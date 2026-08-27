@@ -10,7 +10,10 @@ Many agents work this repo concurrently, and two branches often fix the SAME gap
 
 **Duplicate-fix stacking.** When both sides fixed the same thing in *different
 spots* of a file, git auto-merges them WITHOUT a conflict and the result contains
-both: duplicated type fields, double row registrations, two equivalent guards.
+both: duplicated type fields, double row registrations, two equivalent guards —
+even two `main().catch(...)` entrypoint calls (both sides restored a dropped
+entrypoint in different places), which makes the whole audit run twice
+concurrently. `grep -c 'main().catch'` after every rebase touching a script.
 After any rebase round, grep the touched files for the fix's key identifiers
 (row labels, type field names) and count occurrences. A conditional
 registration and an unconditional one are NOT equivalent — audit harnesses with

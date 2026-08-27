@@ -60,6 +60,13 @@ export type LeasingDashboardMatrix = {
 };
 
 /**
+ * Leads/first tours with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the leads and firstTours stage totals.
+ */
+export type LeasingFunnelUnknown = {
+  leads: number;
+  firstTours: number;
+};
+/**
  * Upstream Rhodes Living funnel stages vs their RL_* goals
  */
 export interface LeasingFunnel {
@@ -71,6 +78,8 @@ export interface LeasingFunnel {
   onlineFirstTours: OwtGoalCell;
   onsiteFirstTours: OwtGoalCell;
   moveIns: OwtGoalCell;
+  /** Leads/first tours with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the leads and firstTours stage totals. */
+  unknown: LeasingFunnelUnknown;
 }
 
 export interface LeasingCommunityRow {

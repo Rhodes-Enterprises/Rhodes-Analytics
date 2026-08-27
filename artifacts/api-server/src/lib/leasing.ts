@@ -229,6 +229,15 @@ function sumRows<T extends { N: number }>(
   return total;
 }
 
+/**
+ * Membership test for the unknown-channel bucket: rows carrying NEITHER
+ * 'Online' nor 'Onsite' on the channel column (the CRM's literal 'Unknown',
+ * a NULL, or any other label) — the same predicate the Overview's unknown
+ * bucket uses (src/lib/overview-targets.ts, unlabeledCount).
+ */
+const isUnlabeled = (r: LeaseRow) =>
+  r.CHANNEL !== CHANNEL_ONLINE && r.CHANNEL !== CHANNEL_ONSITE;
+
 // ---------- Filter options ----------
 
 export async function getLeasingFilterOptions() {
@@ -435,6 +444,17 @@ export async function getLeasingDashboard(f: LeasingFilters) {
       sumRows(tourRows, (r) => r.CHANNEL === CHANNEL_ONSITE),
     ),
     moveIns: funnelCell("moveIns", "total", sumRows(moveInRows)),
+    // Leads/first tours with no Online/Onsite channel label — the CRM's
+    // literal 'Unknown', a NULL, or any other value. No goals exist for
+    // this bucket (actuals only), but surfacing it makes the split
+    // reconcile visibly: online + onsite + unknown equals the stage
+    // totals. Counted from the grouped rows directly, NOT derived as
+    // total − online − onsite, so each bucket stays independently
+    // auditable — same convention as the Overview's unknown bucket.
+    unknown: {
+      leads: sumRows(leadRows, isUnlabeled),
+      firstTours: sumRows(tourRows, isUnlabeled),
+    },
   };
 
   // Goal matrix (ratified vs targets by channel; net vs the ratified goal)

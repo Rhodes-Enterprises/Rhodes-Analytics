@@ -5,6 +5,7 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+import type { LeasingFunnelUnknown } from './leasingFunnelUnknown';
 import type { OwtGoalCell } from './owtGoalCell';
 
 /**
@@ -19,4 +20,6 @@ export interface LeasingFunnel {
   onlineFirstTours: OwtGoalCell;
   onsiteFirstTours: OwtGoalCell;
   moveIns: OwtGoalCell;
+  /** Leads/first tours with no Online/Onsite channel label ('Unknown' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the leads and firstTours stage totals. */
+  unknown: LeasingFunnelUnknown;
 }

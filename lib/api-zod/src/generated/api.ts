@@ -542,7 +542,11 @@ export const GetLeasingDashboardResponse = zod.object({
   "toDateGoal": zod.number(),
   "actual": zod.number(),
   "ptgPercent": zod.number().nullable()
-})
+}),
+  "unknown": zod.object({
+  "leads": zod.number(),
+  "firstTours": zod.number()
+}).describe('Leads\/first tours with no Online\/Onsite channel label (\'Unknown\' or missing in the CRM). Actuals only — no goals exist for this bucket. online + onsite + unknown reconciles with the leads and firstTours stage totals.')
 }).describe('Upstream Rhodes Living funnel stages vs their RL_\* goals'),
   "matrix": zod.object({
   "total": zod.object({

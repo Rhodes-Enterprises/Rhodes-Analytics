@@ -384,6 +384,47 @@ function MatrixRow({
   );
 }
 
+/**
+ * Actual-only funnel row for the unknown-channel bucket (leads/first tours
+ * with no Online/Onsite label in the CRM). No goals exist for that bucket,
+ * so the goal and PTG columns show a dash; the share of the stage total
+ * makes the size of the attribution gap obvious and lets Online + Onsite +
+ * Unknown visibly add up to the stage total. Rendered only while the
+ * bucket is non-empty — same presentation as the Overview's unknown rows.
+ */
+function UnknownFunnelRow({
+  label,
+  actual,
+  total,
+  totalName,
+}: {
+  label: string;
+  actual: number;
+  total: number;
+  totalName: string;
+}) {
+  const pct = total > 0 && actual > 0 ? (actual / total) * 100 : null;
+  const share = pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
+  return (
+    <tr
+      className="border-b last:border-0"
+      data-testid={`row-${label.toLowerCase().replace(/\s+/g, "-")}`}
+    >
+      <td className="py-2 pr-4 font-medium whitespace-nowrap">
+        {label}
+        {share != null && (
+          <div className="text-xs text-muted-foreground">
+            {share}% of {totalName}
+          </div>
+        )}
+      </td>
+      <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">–</td>
+      <td className="py-2 px-3 text-right tabular-nums text-muted-foreground">–</td>
+      <td className="py-2 px-3 text-right tabular-nums font-semibold">{fmt(actual)}</td>
+      <td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">–</td>
+    </tr>
+  );
+}
 function GoalMatrix({ data }: { data: LeasingDashboard }) {
   const m = data.matrix;
   const downloadLeaseGoals = (format: DownloadFormat) =>
@@ -435,6 +476,7 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
 
 function FunnelMatrix({ data }: { data: LeasingDashboard }) {
   const fu = data.funnel;
+  const u = fu.unknown;
   const downloadFunnel = (format: DownloadFormat) =>
     downloadData(
       format,
@@ -445,9 +487,17 @@ function FunnelMatrix({ data }: { data: LeasingDashboard }) {
         matrixCsvRow("Leads", fu.leads),
         matrixCsvRow("Online Leads", fu.onlineLeads),
         matrixCsvRow("Onsite Leads", fu.onsiteLeads),
+        // Mirror the on-screen unknown-channel rows: actual only — no
+        // goals exist for the bucket, so goal/PTG cells stay blank.
+        ...(u.leads > 0
+          ? [["Unknown Leads", null, null, u.leads, null] as CsvValue[]]
+          : []),
         matrixCsvRow("First Tours", fu.firstTours),
         matrixCsvRow("Online First Tours", fu.onlineFirstTours),
         matrixCsvRow("Onsite First Tours", fu.onsiteFirstTours),
+        ...(u.firstTours > 0
+          ? [["Unknown First Tours", null, null, u.firstTours, null] as CsvValue[]]
+          : []),
         matrixCsvRow("Move-Ins", fu.moveIns),
       ],
     );
@@ -479,9 +529,25 @@ function FunnelMatrix({ data }: { data: LeasingDashboard }) {
             <MatrixRow label="Leads" cell={fu.leads} />
             <MatrixRow label="Online Leads" cell={fu.onlineLeads} />
             <MatrixRow label="Onsite Leads" cell={fu.onsiteLeads} />
+            {u.leads > 0 && (
+              <UnknownFunnelRow
+                label="Unknown Leads"
+                actual={u.leads}
+                total={fu.leads.actual}
+                totalName="leads"
+              />
+            )}
             <MatrixRow label="First Tours" cell={fu.firstTours} />
             <MatrixRow label="Online First Tours" cell={fu.onlineFirstTours} />
             <MatrixRow label="Onsite First Tours" cell={fu.onsiteFirstTours} />
+            {u.firstTours > 0 && (
+              <UnknownFunnelRow
+                label="Unknown First Tours"
+                actual={u.firstTours}
+                total={fu.firstTours.actual}
+                totalName="first tours"
+              />
+            )}
             <MatrixRow
               label="Move-Ins"
               cell={fu.moveIns}
@@ -489,6 +555,17 @@ function FunnelMatrix({ data }: { data: LeasingDashboard }) {
             />
           </tbody>
         </table>
+        {(u.leads > 0 || u.firstTours > 0) && (
+          <p
+            className="mt-3 text-xs text-muted-foreground"
+            data-testid="note-unknown-channel-funnel"
+          >
+            Unknown = no Online/Onsite channel label in the CRM — an
+            attribution gap worth fixing at the source. Online + Onsite +
+            Unknown adds up to the Leads and First Tours totals. Goals are
+            not set for the Unknown bucket.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

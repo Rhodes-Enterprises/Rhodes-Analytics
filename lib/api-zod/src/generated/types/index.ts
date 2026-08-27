@@ -39,6 +39,7 @@ export * from './leasingDashboardKpis';
 export * from './leasingDashboardMatrix';
 export * from './leasingFilterOptions';
 export * from './leasingFunnel';
+export * from './leasingFunnelUnknown';
 export * from './leasingMonthlyPoint';
 export * from './owtCohortQuarterParameter';
 export * from './owtCompanyParameter';

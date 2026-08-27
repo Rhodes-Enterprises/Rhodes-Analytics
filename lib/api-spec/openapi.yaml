@@ -512,8 +512,21 @@ components:
           $ref: "#/components/schemas/OwtGoalCell"
         moveIns:
           $ref: "#/components/schemas/OwtGoalCell"
+        unknown:
+          type: object
+          description: >-
+            Leads/first tours with no Online/Onsite channel label ('Unknown'
+            or missing in the CRM). Actuals only — no goals exist for this
+            bucket. online + onsite + unknown reconciles with the leads and
+            firstTours stage totals.
+          properties:
+            leads:
+              type: number
+            firstTours:
+              type: number
+          required: [leads, firstTours]
       required:
-        [webTraffic, leads, onlineLeads, onsiteLeads, firstTours, onlineFirstTours, onsiteFirstTours, moveIns]
+        [webTraffic, leads, onlineLeads, onsiteLeads, firstTours, onlineFirstTours, onsiteFirstTours, moveIns, unknown]
     LeasingCommunityRow:
       type: object
       properties:

@@ -201,6 +201,13 @@ interface LeasingResponse {
     onlineFirstTours: FunnelCell;
     onsiteFirstTours: FunnelCell;
     moveIns: FunnelCell;
+    /**
+     * Leads/first tours with no Online/Onsite channel label ('Unknown',
+     * NULL, or any other value) — actuals only, no goals exist for the
+     * bucket. Shown so online + onsite + unknown visibly reconciles with
+     * the stage totals.
+     */
+    unknown: { leads: number; firstTours: number };
   };
   matrix: {
     total: MatrixCell;
@@ -815,7 +822,8 @@ async function judgeChannelLabels(g: {
   );
 }
 
-type FunnelCellName = keyof LeasingResponse["funnel"];
+/** Goal-cell keys of the funnel table (the actual-only `unknown` bucket is checked separately). */
+type FunnelCellName = Exclude<keyof LeasingResponse["funnel"], "unknown">;
 /**
  * Deals-side guard: the ratified-lease channel split
  * (DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL). Reuses the online/onsite
@@ -1494,7 +1502,6 @@ async function main() {
   process.exit(0);
 }
 
-
 /**
  * Contact-stage actual baseline from DM_CONTACTS, split by channel:
  * - leads: contacts CREATED in range that have an RL community of interest
@@ -1503,14 +1510,17 @@ async function main() {
  * - moveIns: first RL move-in date in range (timestamp column, so TO_DATE
  *   brings the comparison to day precision like the dashboard)
  * total sums ALL channel groups (including contacts with no channel label);
- * online/onsite are the 'Online'/'Onsite' groups only.
+ * online/onsite are the 'Online'/'Onsite' groups only; unlabeled sums the
+ * remaining groups ('Unknown', NULL, or any other value) — accumulated
+ * directly from the grouped rows, NOT derived as total − online − onsite,
+ * so it independently checks the API's unknown bucket.
  */
 async function baselineContactStage(
   stage: "leads" | "firstTours" | "moveIns",
   startDate: string,
   toDate: string,
   f: ScenarioFilters,
-): Promise<{ total: number; online: number; onsite: number }> {
+): Promise<{ total: number; online: number; onsite: number; unlabeled: number }> {
   const dateExpr = {
     leads: "CONTACT_CREATE_DATE",
     firstTours: "RL_MIN_FIRST_TOUR_DATE",
@@ -1542,13 +1552,15 @@ async function baselineContactStage(
   let total = 0;
   let online = 0;
   let onsite = 0;
+  let unlabeled = 0;
   for (const r of rows) {
     const n = Number(r.N) || 0;
     total += n;
     if (r.CH === CHANNEL_ONLINE) online += n;
     else if (r.CH === CHANNEL_ONSITE) onsite += n;
+    else unlabeled += n;
   }
-  return { total, online, onsite };
+  return { total, online, onsite, unlabeled };
 }
 
 /** Single-scalar COUNT baseline (for sources no grouped scan shares). */
@@ -1687,12 +1699,22 @@ async function auditFunnel(
       console.error(`  FAIL funnel.${c.name} missing from the response`);
       continue;
     }
-    const gtName = typeByCell.get(c.name);
-    const goal = goalSums(gtName);
+    const goal = goalSums(typeByCell.get(c.name));
     check(`funnel.${c.name}.actual`, cell.actual, actualByCell[c.name]);
     check(`funnel.${c.name}.fullSpanGoal`, cell.fullSpanGoal, goal.fullSpan);
     check(`funnel.${c.name}.toDateGoal`, cell.toDateGoal, goal.toDate);
   }
+
+  // The unknown-channel bucket (rows carrying NEITHER 'Online' nor 'Onsite'
+  // — the CRM's literal 'Unknown', NULL, or any other label) the funnel
+  // table shows so online + onsite + unknown visibly adds up to the leads
+  // and first-tours totals. Actuals only; no goals exist for the bucket.
+  // The baseline recounts it from the same grouped scan that feeds the
+  // stage totals, accumulated independently of the API's arithmetic. A
+  // missing/renamed response field makes Number(undefined) NaN, which
+  // never passes close() — so the field silently vanishing fails loudly.
+  check("funnel.unknown.leads", Number(resp.funnel.unknown?.leads), leads.unlabeled);
+  check("funnel.unknown.firstTours", Number(resp.funnel.unknown?.firstTours), tours.unlabeled);
 
   // The prior-year scenario exists to pin the FY2025 goal-type fallback,
   // which for the funnel means RL_Leads and RL_Tours must resolve and sum

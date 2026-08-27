@@ -33,6 +33,11 @@ surfaced all three in seconds.
   catches renamed/deleted helpers in scripts — run it before trusting a
   merged tree (supersedes the old "grep grafted call sites" advice, though a
   smoke run still catches value-level drift types can't see).
+- Quick ONE-file scan when project refs aren't built (mid-rebase, dirty
+  tree): `npx tsc --noEmit --skipLibCheck --module preserve
+  --moduleResolution bundler --target es2022 scripts/audit-X.ts 2>&1 | grep
+  "Cannot find name"` — finds every undefined identifier in ~30s with no
+  Snowflake run.
 - The net CANNOT see a dropped entry-point call: an uninvoked `main()` is
   legal TS, and the audit then passes vacuously (observed: a leasing audit
   "passing" in 0.5s with zero output). Trust a PASS only if the audit printed

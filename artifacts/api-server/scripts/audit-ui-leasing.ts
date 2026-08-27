@@ -22,7 +22,10 @@
  *   - Leasing Funnel table: all 8 stages (webTraffic, leads, online/onsite
  *     leads, firstTours, online/onsite first tours, moveIns) × Full Span
  *     Goal / To Date Goal / Actual / PTG %, rows located by stage label,
- *     values by column header
+ *     values by column header — plus the actual-only "Unknown Leads" /
+ *     "Unknown First Tours" rows (funnel.unknown), each of which must
+ *     render exactly while its API count is non-zero, with dashes in the
+ *     goal/PTG columns
  *   - Lease Goals matrix: total / online / onsite / net rows, same columns
  *   - Community Summary: every row (community name + Lease Goal / TD Goal /
  *     Ratified / Online / Onsite / Cancelled / Net / PTG %), the row count
@@ -98,6 +101,12 @@ interface LeasingPayload {
     onlineFirstTours: GoalCell;
     onsiteFirstTours: GoalCell;
     moveIns: GoalCell;
+    /**
+     * Leads/first tours with no Online/Onsite channel label — actuals
+     * only (no goals exist for the bucket). Each drives an actual-only
+     * "Unknown ..." row that renders exactly while its count is > 0.
+     */
+    unknown: { leads: number; firstTours: number };
   };
   matrix: {
     total: GoalCell;
@@ -227,6 +236,13 @@ function checkKpis(dom: DomSnapshot, p: LeasingPayload): void {
  * Lease Goals): rows located by their label in `bindings`, values by column
  * header. An unknown rendered label, a missing expected row, or a header
  * mismatch fails.
+ *
+ * `actualOnly` rows (the funnel's unknown-channel bucket) bind ONLY their
+ * Actual cell to an API number; goals are never issued for those buckets,
+ * so their goal and PTG cells must render the null dash. Callers include
+ * an actual-only label exactly when the page should render it, so a row
+ * rendered against a zero API count — or missing despite a non-zero one —
+ * fails either way (same contract as audit:ui's traffic-matrix unknowns).
  */
 function checkGoalTable(
   tableLabel: string,
@@ -234,6 +250,7 @@ function checkGoalTable(
   snap: MatrixSnapshot | null,
   labelHeader: string,
   bindings: Record<string, GoalCell>,
+  actualOnly: Record<string, number> = {},
 ): void {
   if (!snap) {
     fail(tableLabel, `table [data-testid="${testid}"] not found on page`);
@@ -259,6 +276,18 @@ function checkGoalTable(
 
   const seen = new Set<string>();
   for (const row of snap.rows) {
+    if (row.label in actualOnly) {
+      seen.add(row.label);
+      if (cFull >= 0)
+        checkCell(`${tableLabel} "${row.label}" · Full Span Goal`, row.cells[cFull], null, { percent: false });
+      if (cToDate >= 0)
+        checkCell(`${tableLabel} "${row.label}" · To Date Goal`, row.cells[cToDate], null, { percent: false });
+      if (cActual >= 0)
+        checkCell(`${tableLabel} "${row.label}" · Actual`, row.cells[cActual], actualOnly[row.label], { percent: false });
+      if (cPtg >= 0)
+        checkCell(`${tableLabel} "${row.label}" · PTG %`, row.cells[cPtg], null, { percent: true });
+      continue;
+    }
     const cell = bindings[row.label];
     if (!cell) {
       fail(`${tableLabel} · "${row.label}"`, "row label does not match any audited API metric");
@@ -274,7 +303,7 @@ function checkGoalTable(
     if (cPtg >= 0)
       checkCell(`${tableLabel} "${row.label}" · PTG %`, row.cells[cPtg], cell.ptgPercent, { percent: true });
   }
-  for (const label of Object.keys(bindings)) {
+  for (const label of [...Object.keys(bindings), ...Object.keys(actualOnly)]) {
     if (!seen.has(label)) {
       fail(`${tableLabel} · "${label}"`, "expected row is missing from the rendered table");
     }
@@ -386,8 +415,8 @@ runUiAudit<LeasingPayload>({
   apiPathname: "/api/dashboards/leasing",
   readyTestId: "kpi-lease-goal",
   validatePayload: (p) =>
-    !p?.kpis || !p?.funnel || !p?.matrix || !Array.isArray(p?.communities)
-      ? "missing expected sections (kpis/funnel/matrix/communities)"
+    !p?.kpis || !p?.funnel || !p?.funnel?.unknown || !p?.matrix || !Array.isArray(p?.communities)
+      ? "missing expected sections (kpis/funnel/funnel.unknown/matrix/communities)"
       : null,
   payloadSummary: (p) =>
     `payload range ${p.appliedRange.startDate} → ${p.appliedRange.endDate}` +
@@ -399,16 +428,34 @@ runUiAudit<LeasingPayload>({
     checkKpis(dom, payload);
     checkHeaderTexts(dom, payload);
 
-    checkGoalTable("funnel", "table-funnel-matrix", dom.funnel, "Stage", {
-      "Web Traffic": payload.funnel.webTraffic,
-      Leads: payload.funnel.leads,
-      "Online Leads": payload.funnel.onlineLeads,
-      "Onsite Leads": payload.funnel.onsiteLeads,
-      "First Tours": payload.funnel.firstTours,
-      "Online First Tours": payload.funnel.onlineFirstTours,
-      "Onsite First Tours": payload.funnel.onsiteFirstTours,
-      "Move-Ins": payload.funnel.moveIns,
-    });
+    checkGoalTable(
+      "funnel",
+      "table-funnel-matrix",
+      dom.funnel,
+      "Stage",
+      {
+        "Web Traffic": payload.funnel.webTraffic,
+        Leads: payload.funnel.leads,
+        "Online Leads": payload.funnel.onlineLeads,
+        "Onsite Leads": payload.funnel.onsiteLeads,
+        "First Tours": payload.funnel.firstTours,
+        "Online First Tours": payload.funnel.onlineFirstTours,
+        "Onsite First Tours": payload.funnel.onsiteFirstTours,
+        "Move-Ins": payload.funnel.moveIns,
+      },
+      // Unknown-channel rows are per-stage: each renders exactly while its
+      // own count is non-zero, so bind each label only then. A rendered
+      // "Unknown ..." row with a zero API count fails as an unknown label;
+      // a missing row with a non-zero count fails as a missing row.
+      {
+        ...(payload.funnel.unknown.leads > 0
+          ? { "Unknown Leads": payload.funnel.unknown.leads }
+          : {}),
+        ...(payload.funnel.unknown.firstTours > 0
+          ? { "Unknown First Tours": payload.funnel.unknown.firstTours }
+          : {}),
+      },
+    );
 
     checkGoalTable("lease matrix", "table-lease-matrix", dom.matrix, "Measure", {
       "Leases Ratified": payload.matrix.total,
