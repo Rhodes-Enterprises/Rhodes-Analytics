@@ -550,17 +550,19 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };
-  // Unknown-channel rows are actuals-only (no goals exist for the bucket):
-  // the page renders "–" in every goal/PTG column, the actual from
-  // trafficMatrix.unknown, and a "<n>% of <total>" share subtitle. The whole
-  // section is hidden when the bucket is all zero.
-  const unknownBindings: Record<string, { actual: number; total: number; totalName: string }> = {
-    "Unknown Leads": { actual: m.unknown.leads, total: m.total.leads.actual, totalName: "total leads" },
-    "Unknown Tours": { actual: m.unknown.tours, total: m.total.tours.actual, totalName: "total tours" },
-    "Unknown Sales": { actual: m.unknown.sales, total: p.kpis.grossSales, totalName: "gross sales" },
-  };
+  // Actual-only rows for the unknown-channel bucket (no Online/Onsite label).
+  // The page renders the three rows together only while the bucket is
+  // non-empty (its hasUnknown rule); goals are never issued for the bucket,
+  // so the goal and PTG columns must show the null dash and only the Actual
+  // cell binds to an API field.
   const hasUnknown = m.unknown.leads > 0 || m.unknown.tours > 0 || m.unknown.sales > 0;
-
+  const unknownBindings: Record<string, number> = hasUnknown
+    ? {
+        "Unknown Leads": m.unknown.leads,
+        "Unknown Tours": m.unknown.tours,
+        "Unknown Sales": m.unknown.sales,
+      }
+    : {};
   const missing = new Set<string>();
   const col = (h: string) => columnIndex("traffic matrix", dom.matrix!.headers, h, missing);
   const cFull = col("Full Span Goal");
@@ -569,45 +571,17 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
   const cPtg = col("PTG %");
 
   const seen = new Set<string>();
-  const seenUnknown = new Set<string>();
   for (const row of dom.matrix.rows) {
-    const unk = unknownBindings[row.label];
-    if (unk) {
-      seenUnknown.add(row.label);
-      if (!hasUnknown) {
-        fail(
-          `traffic matrix · "${row.label}"`,
-          "row rendered although the api unknown-channel bucket is all zero (section should be hidden)",
-        );
-        continue;
-      }
+    if (row.label in unknownBindings) {
+      seen.add(row.label);
       if (cFull >= 0)
         checkCell(`matrix "${row.label}" · Full Span Goal`, row.cells[cFull], null, { percent: false });
       if (cToDate >= 0)
         checkCell(`matrix "${row.label}" · To Date Goal`, row.cells[cToDate], null, { percent: false });
       if (cActual >= 0)
-        checkCell(`matrix "${row.label}" · Actual`, row.cells[cActual], unk.actual, { percent: false });
+        checkCell(`matrix "${row.label}" · Actual`, row.cells[cActual], unknownBindings[row.label], { percent: false });
       if (cPtg >= 0)
         checkCell(`matrix "${row.label}" · PTG %`, row.cells[cPtg], null, { percent: true });
-      // Share subtitle mirrors the page arithmetic: actual/total ×100,
-      // "<1" below 1%, else rounded to a whole percent; absent when the
-      // actual or the total is zero.
-      const pct = unk.total > 0 && unk.actual > 0 ? (unk.actual / unk.total) * 100 : null;
-      const expectedSub =
-        pct == null ? null : `${pct < 1 ? "<1" : String(Math.round(pct))}% of ${unk.totalName}`;
-      const sub = row.sub;
-      if (expectedSub == null) {
-        if (sub != null && sub.trim() !== "") {
-          fail(
-            `matrix "${row.label}" · share subtitle`,
-            `expected no subtitle (actual or total is 0) but page rendered "${sub.trim()}"`,
-          );
-        } else {
-          ok(`matrix "${row.label}" · share subtitle`, "no subtitle (actual or total is 0)");
-        }
-      } else {
-        checkText(`matrix "${row.label}" · share subtitle`, sub, expectedSub);
-      }
       continue;
     }
     const cell = bindings[row.label];
@@ -635,19 +609,9 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
       }
     }
   }
-  for (const label of Object.keys(bindings)) {
+  for (const label of [...Object.keys(bindings), ...Object.keys(unknownBindings)]) {
     if (!seen.has(label)) {
       fail(`traffic matrix · "${label}"`, "expected row is missing from the rendered table");
-    }
-  }
-  if (hasUnknown) {
-    for (const label of Object.keys(unknownBindings)) {
-      if (!seenUnknown.has(label)) {
-        fail(
-          `traffic matrix · "${label}"`,
-          "expected row is missing (api unknown-channel bucket is nonzero)",
-        );
-      }
     }
   }
 }

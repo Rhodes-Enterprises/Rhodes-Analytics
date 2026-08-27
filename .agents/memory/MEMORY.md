@@ -20,3 +20,6 @@
 - [In-process warm-up audit](in-process-audit-pattern.md) — warm-vs-request key drift needs real warm fn + real router + cache observer in one process; --packages=external breaks on workspace TS-source pkgs.
 - [Auto-merge verification](automerge-verification.md) — assisted rounds can corrupt regions outside markers; mid-rebase the tree lacks still-queued commits — check before re-implementing "lost" work.
 - [Parallel-task merges](parallel-task-merges.md) — two branches often fix the SAME gap; auto-merge stacks both (doubled registrations/type fields/functions) without conflicts — grep both-touched files, re-verify renamed helpers.
+- [Frontend unit tests](frontend-unit-tests.md) — vitest must never load the env-guarded vite.config (separate vitest.config); tsc excludes tests; extend the single "test" validation command.
+- [Validation registration quirk](validation-registration.md) — setValidationCommand may inject a "Project" wrapper workflow that hijacks the Run button; delete the wrapper, keep the isValidation workflow.
+- [Post-rebase env drift](post-rebase-env-drift.md) — completion rebases don't reinstall deps; instant ERR_MODULE_NOT_FOUND in validation means run pnpm install, not debug the script.

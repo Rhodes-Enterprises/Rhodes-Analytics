@@ -22,6 +22,17 @@ args = "pnpm --filter @workspace/api-server run audit:all"
 [workflows.workflow.metadata]
 isValidation = true
 
+[[workflows.workflow]]
+name = "test"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/rhodes-analytics run test"
+
+[workflows.workflow.metadata]
+isValidation = true
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
