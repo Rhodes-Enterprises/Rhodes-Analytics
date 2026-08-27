@@ -260,6 +260,12 @@ export interface OwtDivisionRow {
   onsiteToursPtg: number | null;
   /** @nullable */
   onsiteSalesPtg: number | null;
+  /** Leads in this row with no Online/Onsite channel label ('Unknown' or missing in the CRM). Counted directly from source rows — never derived as total − online − onsite — so within the row online + onsite + unknown equals the leads count. */
+  unknownLeads: number;
+  /** Tours in this row with no Online/Onsite channel label; same direct-count semantics as unknownLeads. */
+  unknownTours: number;
+  /** Sales in this row with no Online/Onsite channel label; same direct-count semantics as unknownLeads. */
+  unknownSales: number;
 }
 
 export type OwtDevelopmentRow = OwtDivisionRow & {

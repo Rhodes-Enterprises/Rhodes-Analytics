@@ -718,6 +718,23 @@ components:
           type: ["number", "null"]
         onsiteSalesPtg:
           type: ["number", "null"]
+        unknownLeads:
+          type: number
+          description: >-
+            Leads in this row with no Online/Onsite channel label ('Unknown'
+            or missing in the CRM). Counted directly from source rows — never
+            derived as total − online − onsite — so within the row
+            online + onsite + unknown equals the leads count.
+        unknownTours:
+          type: number
+          description: >-
+            Tours in this row with no Online/Onsite channel label; same
+            direct-count semantics as unknownLeads.
+        unknownSales:
+          type: number
+          description: >-
+            Sales in this row with no Online/Onsite channel label; same
+            direct-count semantics as unknownLeads.
       required:
         [
           division,
@@ -739,6 +756,9 @@ components:
           onsiteLeadsPtg,
           onsiteToursPtg,
           onsiteSalesPtg,
+          unknownLeads,
+          unknownTours,
+          unknownSales,
         ]
     OwtRatioRow:
       type: object

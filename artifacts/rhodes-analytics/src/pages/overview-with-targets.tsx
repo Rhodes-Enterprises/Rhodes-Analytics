@@ -759,6 +759,42 @@ function DevelopmentTable({ data }: { data: OwtDashboard }) {
 
 type SummaryRow = OwtDashboard["divisions"][number] & { label: string; key: string };
 
+/**
+ * Leads/Tours/Sales cell for the summary tables: the count, its share of
+ * the grand total, and — only when non-zero — a compact amber note for the
+ * portion of the count that carries no Online/Onsite channel label (the
+ * same Unknown bucket the traffic matrix shows). With the note, each row
+ * reconciles the same way: online + onsite + unknown equals the count.
+ */
+function CountCell({
+  count,
+  pctOfTotal,
+  unknown,
+  metric,
+  rowKey,
+}: {
+  count: number;
+  pctOfTotal: number;
+  unknown: number;
+  metric: "leads" | "tours" | "sales";
+  rowKey: string;
+}) {
+  return (
+    <td className="py-1.5 px-2 text-right tabular-nums">
+      {fmt(count)}{" "}
+      <span className="text-muted-foreground">({pctOfTotal.toFixed(0)}%)</span>
+      {unknown > 0 && (
+        <div
+          className="text-[10px] leading-tight text-amber-600 dark:text-amber-400 whitespace-nowrap"
+          title={`${fmt(unknown)} of ${fmt(count)} ${metric} have no Online/Onsite channel label`}
+          data-testid={`unknown-${metric}-${rowKey}`}
+        >
+          {fmt(unknown)} unknown
+        </div>
+      )}
+    </td>
+  );
+}
 function SummaryTable({
   title,
   labelHeader,
@@ -789,6 +825,10 @@ function SummaryTable({
     };
   }, [rows, userTotals]);
 
+  const hasUnknown = rows.some(
+    (r) => r.unknownLeads > 0 || r.unknownTours > 0 || r.unknownSales > 0,
+  );
+
   const displayLabel = (label: string) =>
     label.replace("Esperanza Homes ", "").replace(", LLC", "");
 
@@ -801,10 +841,13 @@ function SummaryTable({
         "Total Users",
         "Leads",
         "Leads % of Total",
+        "Unknown-Channel Leads",
         "Tours",
         "Tours % of Total",
+        "Unknown-Channel Tours",
         "Sales",
         "Sales % of Total",
+        "Unknown-Channel Sales",
         "Sales PTG %",
         "Tours PTG %",
         "Leads PTG %",
@@ -823,10 +866,13 @@ function SummaryTable({
           r.totalWebsiteUsers,
           r.leads,
           r.leadsPctOfTotal,
+          r.unknownLeads,
           r.tours,
           r.toursPctOfTotal,
+          r.unknownTours,
           r.sales,
           r.salesPctOfTotal,
+          r.unknownSales,
           r.salesPtg,
           r.toursPtg,
           r.leadsPtg,
@@ -844,9 +890,12 @@ function SummaryTable({
           totals.totalUsers,
           totals.leads,
           null,
+          null,
           totals.tours,
           null,
+          null,
           totals.sales,
+          null,
           null,
           null, null, null, null, null, null, null, null, null, null,
         ],
@@ -895,18 +944,27 @@ function SummaryTable({
                 </td>
                 <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.newWebsiteUsers)}</td>
                 <td className="py-1.5 px-2 text-right tabular-nums">{fmt(r.totalWebsiteUsers)}</td>
-                <td className="py-1.5 px-2 text-right tabular-nums">
-                  {fmt(r.leads)}{" "}
-                  <span className="text-muted-foreground">({r.leadsPctOfTotal.toFixed(0)}%)</span>
-                </td>
-                <td className="py-1.5 px-2 text-right tabular-nums">
-                  {fmt(r.tours)}{" "}
-                  <span className="text-muted-foreground">({r.toursPctOfTotal.toFixed(0)}%)</span>
-                </td>
-                <td className="py-1.5 px-2 text-right tabular-nums">
-                  {fmt(r.sales)}{" "}
-                  <span className="text-muted-foreground">({r.salesPctOfTotal.toFixed(0)}%)</span>
-                </td>
+                <CountCell
+                  count={r.leads}
+                  pctOfTotal={r.leadsPctOfTotal}
+                  unknown={r.unknownLeads}
+                  metric="leads"
+                  rowKey={r.key}
+                />
+                <CountCell
+                  count={r.tours}
+                  pctOfTotal={r.toursPctOfTotal}
+                  unknown={r.unknownTours}
+                  metric="tours"
+                  rowKey={r.key}
+                />
+                <CountCell
+                  count={r.sales}
+                  pctOfTotal={r.salesPctOfTotal}
+                  unknown={r.unknownSales}
+                  metric="sales"
+                  rowKey={r.key}
+                />
                 <PtgCell v={r.salesPtg} />
                 <PtgCell v={r.toursPtg} />
                 <PtgCell v={r.leadsPtg} />
@@ -932,6 +990,16 @@ function SummaryTable({
             </tr>
           </tfoot>
         </table>
+        {hasUnknown && (
+          <p
+            className="mt-3 text-xs text-muted-foreground"
+            data-testid={`note-unknown-${testId}`}
+          >
+            Amber “n unknown” = that row’s leads, tours, or sales with no
+            Online/Onsite channel label in the CRM. Within each row, online +
+            onsite + unknown adds up to the counts shown.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

@@ -15,6 +15,17 @@ Dashboard pages here intentionally query the same numbers twice (a totals query 
 - Consistency-only variants are NOT enough for filter values that change semantics (per-channel goal types, opposite-channel-has-no-target): both API-derived series share a wrong goal-type resolution, so they agree while wrong. Such variants need real Snowflake baselines — scoped to the affected section (e.g. funnel-only) to keep query load down.
 - Don't rely on a "busiest value" picker to visit semantic-bearing literal values: the busiest channel can be a third label (e.g. 'Unknown'), leaving Online AND Onsite unvisited. Pin literal-value variants explicitly.
 
+
+## Audit query pacing: rate, not concurrency, is the constraint
+
+The connector proxy limits query STARTS per second (~10 RPS repl-wide, shared with the API server), so concurrency caps and serialization do NOT protect an audit once Snowflake's result cache warms mid-run — COUNTs return in ~100ms and even a fully serialized loop exceeds 10 starts/sec.
+
+**Why:** observed 15/10 RPS aborts with only 1–2 queries in flight; also the API server alone saturates the budget for ~a minute at a time (boot warm-up refills 11 views in ~54s; SWR background refreshes burst 14-wide), which outlasts the transport's ~15s of inner 429 retries.
+
+**How to apply (both layers needed, in the audit script, wrapping/shadowing the shared query fn):**
+- Enforce a minimum gap between query starts (150ms ≈ 6.7 RPS) regardless of batch shape.
+- Add a few OUTER retries with long waits (10/20/30s — sized to outlast a warm-up window) for the transient signatures ONLY: HTTP 429 on direct queries, 502/503/429 on API fetches. Log every retry; let every other failure throw immediately so wrong numbers stay loud.
+
 ## Label-domain drift guards (hardcoded-literal blind spot)
 
 When an audit's baselines hardcode the SAME label literals the API keys on (channel 'Online'/'Onsite', GA property names, flag labels), an upstream rename zeroes BOTH sides and every per-cell check passes 0=0. Guard: a materially non-zero headline baseline whose expected-label baselines are ALL zero fails, naming the column, the expected labels, and the labels actually present (COALESCE(col,'(null)') GROUP BY, ordered by count). Quiet windows below the guard's min-total knob (default 10; channel guards share AUDIT_CHANNEL_GUARD_MIN_TOTAL, the GA property guard has AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL) are exempt.

@@ -115,6 +115,10 @@ interface BreakdownRow {
   leads: number;
   tours: number;
   sales: number;
+  /** Per-row counts carrying no Online/Onsite channel label (0 ⇒ note hidden). */
+  unknownLeads: number;
+  unknownTours: number;
+  unknownSales: number;
   leadsPctOfTotal: number;
   toursPctOfTotal: number;
   salesPctOfTotal: number;
@@ -518,7 +522,6 @@ function checkKpis(dom: DomSnapshot, p: OverviewPayload): void {
   }
 }
 
-// hint: Logic changed on both sides. Requires understanding intent of each change.
 function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
   if (!dom.matrix) {
     fail("traffic matrix", 'table [data-testid="table-traffic-matrix"] not found on page');
@@ -763,19 +766,41 @@ function checkSummaryTable(
       checkCell(`${tableLabel} "${name}" · New Users`, rendered[cNew], api.newWebsiteUsers, { percent: false });
     if (cTotal >= 0)
       checkCell(`${tableLabel} "${name}" · Total Users`, rendered[cTotal], api.totalWebsiteUsers, { percent: false });
-    const countCols: { idx: number; header: string; count: number; share: number }[] = [
-      { idx: cLeads, header: "Leads", count: api.leads, share: api.leadsPctOfTotal },
-      { idx: cTours, header: "Tours", count: api.tours, share: api.toursPctOfTotal },
-      { idx: cSales, header: "Sales", count: api.sales, share: api.salesPctOfTotal },
+    const countCols: { idx: number; header: string; count: number; share: number; unknown: number }[] = [
+      { idx: cLeads, header: "Leads", count: api.leads, share: api.leadsPctOfTotal, unknown: api.unknownLeads },
+      { idx: cTours, header: "Tours", count: api.tours, share: api.toursPctOfTotal, unknown: api.unknownTours },
+      { idx: cSales, header: "Sales", count: api.sales, share: api.salesPctOfTotal, unknown: api.unknownSales },
     ];
     for (const c of countCols) {
       if (c.idx < 0) continue;
-      const { main, pct } = splitCountWithShare(rendered[c.idx] ?? "");
+      // The cell renders "count (share%)" plus, when some of the row's rows
+      // carry no Online/Onsite label, a second "n unknown" line. Parse the
+      // lines apart and bind BOTH directions: count/share from line 1, and
+      // the note must appear exactly when the API's unknown* field is
+      // non-zero and echo it verbatim.
+      const lines = (rendered[c.idx] ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
+      const { main, pct } = splitCountWithShare(lines[0] ?? "");
       checkCell(`${tableLabel} "${name}" · ${c.header}`, main, c.count, { percent: false });
       if (pct == null) {
-        fail(`${tableLabel} "${name}" · ${c.header} share`, `no "(..%)" share found in "${rendered[c.idx]}"`);
+        fail(`${tableLabel} "${name}" · ${c.header} share`, `no "(..%)" share found in "${lines[0] ?? ""}"`);
       } else {
         checkCell(`${tableLabel} "${name}" · ${c.header} share`, pct, c.share, { percent: true });
+      }
+      const noteLabel = `${tableLabel} "${name}" · ${c.header} unknown note`;
+      const noteLine = lines.slice(1).find((l) => /unknown$/.test(l)) ?? null;
+      if (c.unknown > 0) {
+        const parsed = noteLine == null ? null : /^([\d,]+)\s+unknown$/.exec(noteLine);
+        if (noteLine == null) {
+          fail(noteLabel, `api reports ${c.unknown} unlabeled but no "n unknown" note rendered`);
+        } else if (!parsed) {
+          fail(noteLabel, `unparseable note "${noteLine}"`);
+        } else {
+          checkCell(noteLabel, parsed[1], c.unknown, { percent: false });
+        }
+      } else if (noteLine != null) {
+        fail(noteLabel, `"${noteLine}" rendered but api reports 0 unlabeled rows`);
+      } else {
+        ok(noteLabel, "hidden (api 0)");
       }
     }
     for (const pc of ptgCols) {

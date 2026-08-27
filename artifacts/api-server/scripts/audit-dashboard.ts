@@ -132,7 +132,9 @@
  * regression class.
  *
  * The breakdown tables (divisions / developments) are audited per row: leads,
- * tours, and sales against CRM-side baselines, and the website-user columns
+ * tours, and sales — and each row's unlabeled-channel counts (unknownLeads/
+ * unknownTours/unknownSales, rows with no Online/Onsite label) — against
+ * CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
  * MATCHED_COMPANY_NAME / MATCHED_DEVELOPMENT_NAME — catching regressions in
  * the API's single GROUPING SETS query that the headline checks would miss.
@@ -234,6 +236,10 @@ interface DivisionRow {
   leads: number;
   tours: number;
   sales: number;
+  /** Per-row counts with no Online/Onsite channel label */
+  unknownLeads: number;
+  unknownTours: number;
+  unknownSales: number;
 }
 
 interface DevelopmentRow {
@@ -244,6 +250,10 @@ interface DevelopmentRow {
   leads: number;
   tours: number;
   sales: number;
+  /** Per-row counts with no Online/Onsite channel label */
+  unknownLeads: number;
+  unknownTours: number;
+  unknownSales: number;
 }
 
 /** One traffic-matrix cell: goals for the full span / elapsed cutoff + PTG. */
@@ -333,14 +343,6 @@ async function fetchOverview(params: Record<string, string>): Promise<OverviewRe
   // own Snowflake burst warms up) are retried; real 4xx failures are not.
   return fetchJsonWithRetry<OverviewResponse>(url);
 }
-
-async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
-  const rows = await sfQuery<{ N: number }>(sql, binds);
-  return Number(rows[0]?.N) || 0;
-}
-
-// ---------- Expected range computation (independent of the API) ----------
-
 /** Same business-day convention the API uses. */
 function todayChicago(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(
@@ -922,7 +924,11 @@ function divergedPct(api: number, baseline: number): number {
  * fan out). The scenario's filters are bound into every baseline query, so
  * the audit also covers filtered views.
  *
- * Checks, per metric (leads / tours / sales):
+ * Checks, per metric (leads / tours / sales, and their unlabeled-channel
+ * counterparts unknownLeads / unknownTours / unknownSales — each row's
+ * count of rows carrying no Online/Onsite label, recounted independently
+ * via its own COUNT_IF over the channel column, NEVER derived as
+ * row total − online − onsite):
  *  1. Every API division row matches a per-company baseline, and every
  *     non-zero baseline company appears in the API rows. Under a company
  *     filter this doubles as leak detection: another division's non-zero
@@ -934,7 +940,9 @@ function divergedPct(api: number, baseline: number): number {
  *     so the audit accounts for them explicitly instead of fudging
  *     tolerance). Under a company filter the remainder is structurally zero
  *     — the filter itself excludes unattributable rows — and the query
- *     verifies that rather than assuming it.
+ *     verifies that rather than assuming it. For the unknown* metrics the
+ *     headline is the matrix's unknown bucket (itself audited per cell
+ *     against its own independent recount), not a derived difference.
  */
 async function auditBreakdowns(
   scenario: Scenario,
@@ -949,6 +957,14 @@ async function auditBreakdowns(
   const cf = contactFrag(scenario.filters);
   const df = dealFrag(scenario.filters);
 
+  // "No Online/Onsite label" predicates for the unknown* metrics, applied to
+  // the channel column each grouped scan already exposes. Independent
+  // recounts: the audit never derives unlabeled as total − online − onsite.
+  const UNLAB_CONTACT = "(C.CH IS NULL OR C.CH NOT IN ('Online', 'Onsite'))";
+  const UNLAB_DEAL =
+    "(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL IS NULL " +
+    "OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))";
+
   // BATCHED baselines (the Snowflake proxy rate-limits at ~10 RPS, so round
   // trips dominate audit wall time):
   //  - leads and tours group the same contact rows through the same
@@ -959,6 +975,9 @@ async function auditBreakdowns(
   //    by the outer WHERE and contributed to no group anyway (BETWEEN over
   //    a NULL date is NULL, TRUE OR NULL is TRUE — no in-window row lost).
   //    Ditto for the two unattributed remainders.
+  //  - the unknown* baselines are extra COUNT_IF columns on the SAME scans
+  //    (window predicate AND unlabeled-channel predicate), so per-row
+  //    unlabeled counts cost no additional queries.
   //  - per-company baselines are exact JS rollups of the per-development
   //    groups: every joined row matches EXACTLY ONE dimension row (the
   //    dedup DEV_DIM subquery is one row per DEVELOPMENT_NAME), so summing
@@ -971,21 +990,27 @@ async function auditBreakdowns(
     DEVELOPMENT_NAME: string;
     N_LEADS: number;
     N_TOURS: number;
+    N_UNK_LEADS: number;
+    N_UNK_TOURS: number;
   }
   interface DealDevRow {
     COMPANY_NAME: string;
     DEVELOPMENT_NAME: string;
     N: number;
+    N_UNK: number;
   }
   // Bind order follows text order: subquery SELECT-list window binds come
   // before the WHERE fragment binds.
-  const [contactByDev, dealByDev, contactUnattrRows, salesUnattributed] = await Promise.all([
+  const [contactByDev, dealByDev, contactUnattrRows, dealUnattrRows] = await Promise.all([
     sfQuery<ContactDevRow>(
       `SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME,
               COUNT_IF(C.IN_LEAD_WINDOW) AS N_LEADS,
-              COUNT_IF(C.IN_TOUR_WINDOW) AS N_TOURS
+              COUNT_IF(C.IN_TOUR_WINDOW) AS N_TOURS,
+              COUNT_IF(C.IN_LEAD_WINDOW AND ${UNLAB_CONTACT}) AS N_UNK_LEADS,
+              COUNT_IF(C.IN_TOUR_WINDOW AND ${UNLAB_CONTACT}) AS N_UNK_TOURS
        FROM (
          SELECT C.CONTACT_EHI_COMMUNITY_OF_INTEREST AS COI,
+                C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH,
                 C.CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
                 C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ? AS IN_TOUR_WINDOW
          FROM DM_CONTACTS C
@@ -997,7 +1022,8 @@ async function auditBreakdowns(
       [expStart, expTo, expStart, expTo, ...cf.binds],
     ),
     sfQuery<DealDevRow>(
-      `SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
+      `SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N,
+              COUNT_IF(${UNLAB_DEAL}) AS N_UNK
        FROM DM_DEALS X
        JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
        WHERE ${isSaleSql("X")}
@@ -1005,18 +1031,24 @@ async function auditBreakdowns(
        GROUP BY 1, 2`,
       [expStart, expTo, ...df.binds],
     ),
-    sfQuery<{ N_LEADS: number; N_TOURS: number }>(
+    sfQuery<{ N_LEADS: number; N_TOURS: number; N_UNK_LEADS: number; N_UNK_TOURS: number }>(
       `SELECT COUNT_IF(C.CONTACT_CREATE_DATE BETWEEN ? AND ?) AS N_LEADS,
-              COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?) AS N_TOURS
+              COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?) AS N_TOURS,
+              COUNT_IF(C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+                       AND (C.ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
+                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))) AS N_UNK_LEADS,
+              COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+                       AND (C.ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
+                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))) AS N_UNK_TOURS
        FROM DM_CONTACTS C
        WHERE ${isLeadSql("C")}
          AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
               OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
-      [expStart, expTo, expStart, expTo, ...cf.binds],
+      [expStart, expTo, expStart, expTo, expStart, expTo, expStart, expTo, ...cf.binds],
     ),
-    countScalar(
-      `SELECT COUNT(*) AS N
+    sfQuery<{ N: number; N_UNK: number }>(
+      `SELECT COUNT(*) AS N, COUNT_IF(${UNLAB_DEAL}) AS N_UNK
        FROM DM_DEALS X
        WHERE ${isSaleSql("X")}
          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
@@ -1063,8 +1095,36 @@ async function auditBreakdowns(
       headline: overview.kpis.grossSales,
       baseByCompany: rollupCompany(dealByDev, (r) => Number(r.N) || 0),
       baseByDev: toDevMap(dealByDev, (r) => Number(r.N) || 0),
-      unattributed: salesUnattributed,
+      unattributed: Number(dealUnattrRows[0]?.N) || 0,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.sales) || 0,
+    },
+    // Per-row unlabeled-channel counts (task: each breakdown row shows how
+    // many of its leads/tours/sales carry no Online/Onsite label). Same
+    // per-cell comparison discipline as the base metrics; baselines come
+    // from the extra COUNT_IF columns of the same grouped scans.
+    {
+      name: "unknownLeads",
+      headline: overview.trafficMatrix.unknown.leads,
+      baseByCompany: rollupCompany(contactByDev, (r) => Number(r.N_UNK_LEADS) || 0),
+      baseByDev: toDevMap(contactByDev, (r) => Number(r.N_UNK_LEADS) || 0),
+      unattributed: Number(contactUnattrRows[0]?.N_UNK_LEADS) || 0,
+      pick: (r: DivisionRow | DevelopmentRow) => Number(r.unknownLeads) || 0,
+    },
+    {
+      name: "unknownTours",
+      headline: overview.trafficMatrix.unknown.tours,
+      baseByCompany: rollupCompany(contactByDev, (r) => Number(r.N_UNK_TOURS) || 0),
+      baseByDev: toDevMap(contactByDev, (r) => Number(r.N_UNK_TOURS) || 0),
+      unattributed: Number(contactUnattrRows[0]?.N_UNK_TOURS) || 0,
+      pick: (r: DivisionRow | DevelopmentRow) => Number(r.unknownTours) || 0,
+    },
+    {
+      name: "unknownSales",
+      headline: overview.trafficMatrix.unknown.sales,
+      baseByCompany: rollupCompany(dealByDev, (r) => Number(r.N_UNK) || 0),
+      baseByDev: toDevMap(dealByDev, (r) => Number(r.N_UNK) || 0),
+      unattributed: Number(dealUnattrRows[0]?.N_UNK) || 0,
+      pick: (r: DivisionRow | DevelopmentRow) => Number(r.unknownSales) || 0,
     },
   ];
 
@@ -1083,7 +1143,7 @@ async function auditBreakdowns(
       const d = divergedPct(api, baseline);
       const ok = d <= TOLERANCE_PCT;
       console.log(
-        `${ok ? "OK  " : "FAIL"} division ${m.name.padEnd(6)} ${company.padEnd(30)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+        `${ok ? "OK  " : "FAIL"} division ${m.name.padEnd(12)} ${company.padEnd(30)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
       );
       if (!ok) failed = true;
     }
@@ -1101,7 +1161,7 @@ async function auditBreakdowns(
       const d = divergedPct(api, baseline);
       const ok = d <= TOLERANCE_PCT;
       console.log(
-        `${ok ? "OK  " : "FAIL"} devrow   ${m.name.padEnd(6)} ${`${development} (${company})`.padEnd(45)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+        `${ok ? "OK  " : "FAIL"} devrow   ${m.name.padEnd(12)} ${`${development} (${company})`.padEnd(45)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
       );
       if (!ok) failed = true;
     }
@@ -1117,7 +1177,7 @@ async function auditBreakdowns(
       const d = divergedPct(reconstructed, m.headline);
       const ok = d <= TOLERANCE_PCT;
       console.log(
-        `${ok ? "OK  " : "FAIL"} sum      ${m.name.padEnd(6)} ${label.padEnd(30)} rows=${sum} +unattributed=${unattributed} => ${reconstructed} headline=${m.headline} divergence=${d.toFixed(3)}%`,
+        `${ok ? "OK  " : "FAIL"} sum      ${m.name.padEnd(12)} ${label.padEnd(30)} rows=${sum} +unattributed=${unattributed} => ${reconstructed} headline=${m.headline} divergence=${d.toFixed(3)}%`,
       );
       if (!ok) failed = true;
     }

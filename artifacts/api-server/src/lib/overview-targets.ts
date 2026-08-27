@@ -248,13 +248,19 @@ interface ActualRow {
  * rows, deliberately NOT derived as total − online − onsite, so each bucket
  * stays independently auditable per cell. Must stay in lockstep with
  * unlabeledChannelSql() below, which applies the same predicate in SQL for
- * the record-level drill-down list.
+ * the record-level drill-down list. Takes the same optional
+ * company/development scoping as chan() so the division and development
+ * breakdown rows can expose their own unlabeled share.
  */
-const unlabeledCount = (rows: ActualRow[]) =>
+const unlabeledCount = (rows: ActualRow[], company?: string, development?: string) =>
   sumBy(
     rows,
     (r) => Number(r.N) || 0,
-    (r) => r.CHANNEL !== "Online" && r.CHANNEL !== "Onsite",
+    (r) =>
+      r.CHANNEL !== "Online" &&
+      r.CHANNEL !== "Onsite" &&
+      (!company || r.COMPANY_NAME === company) &&
+      (!development || r.DEVELOPMENT_NAME === development),
   );
 
 /**
@@ -563,6 +569,12 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
       onsiteLeadsPtg: p("onsite_leads", chan(leads, "Onsite", company)),
       onsiteToursPtg: p("onsite_first_tours", chan(tours, "Onsite", company)),
       onsiteSalesPtg: p("onsite_gross_sales", chan(sales, "Onsite", company)),
+      // This division's leads/tours/sales with no Online/Onsite channel
+      // label — same direct recount as the matrix's Unknown section, so
+      // within the row online + onsite + unknown equals the counts above.
+      unknownLeads: unlabeledCount(leads, company),
+      unknownTours: unlabeledCount(tours, company),
+      unknownSales: unlabeledCount(sales, company),
     };
   });
 
@@ -620,6 +632,11 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
         onsiteLeadsPtg: p("onsite_leads", chan(leads, "Onsite", company, development)),
         onsiteToursPtg: p("onsite_first_tours", chan(tours, "Onsite", company, development)),
         onsiteSalesPtg: p("onsite_gross_sales", chan(sales, "Onsite", company, development)),
+        // Same unlabeled-channel recount as the division rows, scoped to
+        // this (company, development) pair.
+        unknownLeads: unlabeledCount(leads, company, development),
+        unknownTours: unlabeledCount(tours, company, development),
+        unknownSales: unlabeledCount(sales, company, development),
       };
     });
 

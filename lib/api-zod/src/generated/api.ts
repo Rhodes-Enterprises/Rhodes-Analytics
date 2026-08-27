@@ -141,7 +141,10 @@ export const GetOwtDashboardResponse = zod.object({
   "onlineSalesPtg": zod.number().nullable(),
   "onsiteLeadsPtg": zod.number().nullable(),
   "onsiteToursPtg": zod.number().nullable(),
-  "onsiteSalesPtg": zod.number().nullable()
+  "onsiteSalesPtg": zod.number().nullable(),
+  "unknownLeads": zod.number().describe('Leads in this row with no Online\/Onsite channel label (\'Unknown\' or missing in the CRM). Counted directly from source rows — never derived as total − online − onsite — so within the row online + onsite + unknown equals the leads count.'),
+  "unknownTours": zod.number().describe('Tours in this row with no Online\/Onsite channel label; same direct-count semantics as unknownLeads.'),
+  "unknownSales": zod.number().describe('Sales in this row with no Online\/Onsite channel label; same direct-count semantics as unknownLeads.')
 })),
   "developments": zod.array(zod.object({
   "division": zod.string(),
@@ -162,7 +165,10 @@ export const GetOwtDashboardResponse = zod.object({
   "onlineSalesPtg": zod.number().nullable(),
   "onsiteLeadsPtg": zod.number().nullable(),
   "onsiteToursPtg": zod.number().nullable(),
-  "onsiteSalesPtg": zod.number().nullable()
+  "onsiteSalesPtg": zod.number().nullable(),
+  "unknownLeads": zod.number().describe('Leads in this row with no Online\/Onsite channel label (\'Unknown\' or missing in the CRM). Counted directly from source rows — never derived as total − online − onsite — so within the row online + onsite + unknown equals the leads count.'),
+  "unknownTours": zod.number().describe('Tours in this row with no Online\/Onsite channel label; same direct-count semantics as unknownLeads.'),
+  "unknownSales": zod.number().describe('Sales in this row with no Online\/Onsite channel label; same direct-count semantics as unknownLeads.')
 }).and(zod.object({
   "development": zod.string()
 }))),
