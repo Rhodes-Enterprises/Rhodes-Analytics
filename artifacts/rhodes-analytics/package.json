@@ -10,7 +10,7 @@
     "test": "vitest run && node --test src/lib/*.test.ts",
     "test:csv": "esbuild scripts/test-csv.ts --bundle --platform=node --format=esm --outfile=dist-test/test-csv.mjs --log-level=warning && node dist-test/test-csv.mjs",
     "test:xlsx": "esbuild scripts/test-xlsx.ts --bundle --platform=node --format=cjs --outfile=dist-test/test-xlsx.cjs --log-level=warning && node dist-test/test-xlsx.cjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -b ../../tsconfig.json && tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",

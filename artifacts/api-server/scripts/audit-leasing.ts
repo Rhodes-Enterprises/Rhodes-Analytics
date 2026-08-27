@@ -315,9 +315,6 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
   if (f.endDate) params.endDate = f.endDate;
   return params;
 }
-
-// ---------- Independent baselines ----------
-
 interface LeaseCounts {
   ratified: number;
   onlineRatified: number;
@@ -468,6 +465,51 @@ const EMPTY_GOAL_SUMS: GoalSums = {
   byMonth: new Map(),
   byCommunity: new Map(),
 };
+
+/**
+ * Full-span + to-date goal sums for several goal types in ONE query (the
+ * funnel needs up to 6 types per scenario; grouping keeps the audit under
+ * the Snowflake proxy rate limit). Used by the funnel-table section, which
+ * only needs scalar sums — the scenario body uses baselineGoalsByType,
+ * whose per-(type, dev, month) partition also feeds monthly/community
+ * rollups.
+ */
+async function baselineFunnelGoalSums(
+  goalTypes: string[],
+  fiscalYear: number,
+  startDate: string,
+  endDate: string,
+  toDate: string,
+  community?: string,
+): Promise<Map<string, { fullSpan: number; toDate: number }>> {
+  if (goalTypes.length === 0) return new Map();
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
+  let extra = "";
+  if (community) {
+    extra = " AND DEVELOPMENT_NAME = ?";
+    binds.push(community);
+  }
+  const rows = await querySnowflake<{
+    GOAL_TYPE: string;
+    FULL_SPAN: number;
+    TO_DATE: number;
+  }>(
+    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
+            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
+       AND BUDGET_DATE BETWEEN ? AND ?${extra}
+     GROUP BY 1`,
+    binds,
+  );
+  return new Map(
+    rows.map((r) => [
+      r.GOAL_TYPE,
+      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
+    ]),
+  );
+}
 
 /**
  * Rich goal lookup: full-span/to-date sums PLUS per-month and per-community
@@ -1737,7 +1779,7 @@ async function auditFunnel(
   );
 
   const [goalSums, traffic, leads, tours, moveIns] = await Promise.all([
-    baselineGoalsByType(uniqueTypes, fiscalYear, startDate, endDate, toDate, f.community),
+    baselineFunnelGoalSums(uniqueTypes, fiscalYear, startDate, endDate, toDate, f.community),
     baselineTraffic(startDate, toDate, f.community),
     baselineContactStage("leads", startDate, toDate, f),
     baselineContactStage("firstTours", startDate, toDate, f),

@@ -25,6 +25,32 @@ If your guard's failure message or comments name helper functions, re-grep main'
 merged tree for the current names before resolving — the conflict's "ours" side
 usually shows the new ones.
 
+**Same-named helpers with different contracts.** Two siblings can each
+independently CREATE a helper with the same name (e.g. a batched
+goal-baseline query) but different return types — one returns a lookup
+function, the other a Map. The merge keeps ONE definition plus BOTH styles
+of call site; since scripts/ bypass tsc, it only surfaces at runtime as
+"X is not a function" mid-audit. Repair: `git log -S '<call-site text>'`
+to find which commit authored each style, restore the dropped definition
+verbatim from that commit (`git show <sha>:<file>`), and rename one of the
+two helpers so both contracts coexist.
+
+**Route/handler body grafts — main itself can be broken.** When two siblings
+each rewrite every handler in a routes file (e.g. one adds a response envelope,
+the other wraps every data call), their merge can pair handler BODIES with the
+wrong route paths, duplicate some routes, and drop others entirely — producing
+404s on dropped routes and instant 502s (ReferenceError) on mismatched ones.
+Your completion validation then fails on damage you didn't cause. Triage fast:
+(1) the audit's private-server boot log (/tmp/audit-all-server.log) shows the
+real exception; (2) root `pnpm run typecheck` catches undefined-identifier
+grafts in `src/` statically; (3) reconstruct from the pre-merge parent
+(`git show <parent>:<file>`) plus one surviving-correct handler as the pattern
+for the second sibling's transformation — never hand-guess bodies.
+AND: as long as main still carries the damage, EVERY later rebase can re-mangle
+your repaired file. Keep the verified-good copy reachable
+(`git show <pre-rebase-head>:<file>` from the reflog), re-diff after each
+rebase, and re-splice the good section instead of re-deriving it.
+
 **Why:** both bit during one task's merge: stacked Unknown-row registrations +
 a duplicated type field survived a "clean" auto-merge, and stale helper names
 survived in a failure message.

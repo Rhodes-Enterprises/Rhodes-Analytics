@@ -5,7 +5,7 @@
 - [Breakdown row seeding](goal-data-model.md) — breakdown tables must seed rows from actuals too, not just goals/GA rows, or developments with sales but no goals vanish silently (audit sum-check catches this).
 - [DM_COMPANY_DEVELOPMENT flags](dm-company-development-flags.md) — flags are labels ('Has Goals'/'Rental'), not Yes/No; IFF dedup single-sourced in shared dev-dim module — never re-copy it.
 - [Ratio goals & ratio audits](goal-data-model.md) — goal-ratio input table has junk NULL rows (filter year, skip nulls); resolve names both directions; audit derived ratios with compounded (1+t)/(1−t) tolerance.
-- [Stale local build state](stale-project-references.md) — "no exported member" = stale lib dist/ (tsc -b, --force if no-op); instant ERR_MODULE_NOT_FOUND after a rebase = stale node_modules (pnpm install).
+- [Stale local build state](stale-project-references.md) — leaf typechecks self-build libs via tsc -b + dist-colocated tsbuildinfo (don't regress); ERR_MODULE_NOT_FOUND after a rebase = stale node_modules (pnpm install).
 - [Managed rebase hazards](managed-rebase-hazards.md) — conflict-free auto-rebases can drop imports or misplace hunks; re-typecheck, diff touched files vs main, restart workflows before re-completing.
 - [Audit scripts typecheck](audit-scripts-not-typechecked.md) — scripts/ now typechecked (scripts tsconfig + DOM lib for evaluate blocks, chained into package typecheck); esbuild alone checks nothing.
 - [Chart-vs-table & label-drift nets](audit-consistency-nets.md) — Σ monthly==totals same-response checks, float-only tolerance, vacuity+label guards; drill-downs ship in the same statement+response as their counts; combined-filter scenarios need NESTED picks (busiest value inside the other pick).

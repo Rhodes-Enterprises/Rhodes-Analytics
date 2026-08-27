@@ -7,7 +7,7 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "typecheck": "tsc -b ../../tsconfig.json && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
     "audit:all": "node scripts/audit-all.mjs",
     "audit:cache-swr": "esbuild scripts/audit-cache-swr.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-cache-swr.mjs --log-level=warning && node dist/audit-cache-swr.mjs",
     "audit:dashboard": "esbuild scripts/audit-dashboard.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-dashboard.mjs --log-level=warning && node dist/audit-dashboard.mjs",
