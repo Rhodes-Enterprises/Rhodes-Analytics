@@ -1,5 +1,5 @@
 import { Link } from "wouter";
-import { ChevronRight, Database } from "lucide-react";
+import { ChevronRight, Database, Download } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -178,6 +178,40 @@ export function FilterSelect({
   );
 }
 
+/**
+ * Small icon button that sits in a card header's top-right corner and
+ * downloads the card's underlying data as CSV. Every instance gets a stable
+ * test id (`button-download-<slug>`) so audits/e2e can find it.
+ */
+export function DownloadDataButton({
+  slug,
+  onDownload,
+  label = "Download CSV",
+  className,
+}: {
+  /** Stable kebab-case identifier; becomes data-testid `button-download-<slug>`. */
+  slug: string;
+  onDownload: () => void;
+  /** Tooltip / accessible label. */
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onDownload}
+      title={label}
+      aria-label={label}
+      data-testid={`button-download-${slug}`}
+      className={cn(
+        "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+        className,
+      )}
+    >
+      <Download className="h-3.5 w-3.5" />
+    </button>
+  );
+}
 /**
  * Gentle inline hint shown under the date inputs while the typed end date is
  * before the start date. The dashboards keep the last valid range applied

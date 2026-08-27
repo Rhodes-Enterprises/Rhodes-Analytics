@@ -23,6 +23,7 @@ import { Layout } from "@/components/layout";
 import { useCommittedDateRange } from "@/hooks/use-committed-date";
 import {
   CrossYearRangeHint,
+  DownloadDataButton,
   InvertedRangeHint,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,7 +37,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -70,8 +71,13 @@ function ptgBg(ptg: number | null | undefined): string {
 const ALL = "__all__";
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-// ---------- page ----------
-
+/** One CSV row for a goal/funnel matrix line, matching the on-screen columns. */
+function matrixCsvRow(
+  label: string,
+  cell: { fullSpanGoal: number; toDateGoal: number; actual: number; ptgPercent: number | null },
+): CsvValue[] {
+  return [label, cell.fullSpanGoal, cell.toDateGoal, cell.actual, cell.ptgPercent];
+}
 export default function LeasingPage() {
   const [community, setCommunity] = useState<string>(ALL);
   const [channel, setChannel] = useState<string>(ALL);
@@ -411,12 +417,24 @@ function MatrixRow({
 
 function GoalMatrix({ data }: { data: LeasingDashboard }) {
   const m = data.matrix;
+  const downloadLeaseGoals = () =>
+    downloadCsv(
+      "leasing-lease-goals",
+      ["Measure", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
+      [
+        matrixCsvRow("Leases Ratified", m.total),
+        matrixCsvRow("Online Leases Ratified", m.online),
+        matrixCsvRow("Onsite Leases Ratified", m.onsite),
+        matrixCsvRow("Net Leases", m.net),
+      ],
+    );
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           Lease Goals — Actual vs Target
         </CardTitle>
+        <DownloadDataButton slug="lease-goals" onDownload={downloadLeaseGoals} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-sm" data-testid="table-lease-matrix">
@@ -447,12 +465,28 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
 
 function FunnelMatrix({ data }: { data: LeasingDashboard }) {
   const fu = data.funnel;
+  const downloadFunnel = () =>
+    downloadCsv(
+      "leasing-funnel",
+      ["Stage", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
+      [
+        matrixCsvRow("Web Traffic", fu.webTraffic),
+        matrixCsvRow("Leads", fu.leads),
+        matrixCsvRow("Online Leads", fu.onlineLeads),
+        matrixCsvRow("Onsite Leads", fu.onsiteLeads),
+        matrixCsvRow("First Tours", fu.firstTours),
+        matrixCsvRow("Online First Tours", fu.onlineFirstTours),
+        matrixCsvRow("Onsite First Tours", fu.onsiteFirstTours),
+        matrixCsvRow("Move-Ins", fu.moveIns),
+      ],
+    );
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">
           Leasing Funnel — Actual vs Target
         </CardTitle>
+        <DownloadDataButton slug="leasing-funnel" onDownload={downloadFunnel} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-sm" data-testid="table-funnel-matrix">
@@ -505,10 +539,41 @@ function CommunityTable({ data }: { data: LeasingDashboard }) {
     };
   }, [rows]);
 
+  const downloadCommunitySummary = () =>
+    downloadCsv(
+      "leasing-community-summary",
+      ["Community", "Lease Goal", "TD Goal", "Ratified", "Online", "Onsite", "Cancelled", "Net", "PTG %"],
+      [
+        ...rows.map((r): CsvValue[] => [
+          r.community,
+          r.fullSpanGoal,
+          r.toDateGoal,
+          r.ratified,
+          r.onlineRatified,
+          r.onsiteRatified,
+          r.cancelled,
+          r.net,
+          r.ptgPercent,
+        ]),
+        [
+          "Total",
+          totals.fullSpanGoal,
+          totals.toDateGoal,
+          totals.ratified,
+          totals.onlineRatified,
+          totals.onsiteRatified,
+          totals.cancelled,
+          totals.net,
+          null,
+        ],
+      ],
+    );
+
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">Community Summary</CardTitle>
+        <DownloadDataButton slug="community-summary" onDownload={downloadCommunitySummary} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-xs sm:text-sm" data-testid="table-communities">
@@ -610,6 +675,27 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
   // back as all-zero goals — drop the line rather than plot a flat zero.
   const hasStageGoal = stageData.some((p) => p.Goal !== 0);
 
+  const downloadTrends = () => {
+    const stageSlug = stageLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    if (stage === "leases") {
+      downloadCsv(
+        `leasing-monthly-trends-${stageSlug}`,
+        ["Month", "Ratified", "Cancelled", "Net", "Goal"],
+        leaseData.map((p): CsvValue[] => [p.month, p.Ratified, p.Cancelled, p.Net, p.Goal]),
+      );
+    } else {
+      // Match the on-screen chart: the goal series is dropped when no goal
+      // exists for this stage/year/filter combination.
+      downloadCsv(
+        `leasing-monthly-trends-${stageSlug}`,
+        hasStageGoal ? ["Month", "Actual", "Goal"] : ["Month", "Actual"],
+        stageData.map((p): CsvValue[] =>
+          hasStageGoal ? [p.month, p.Actual, p.Goal] : [p.month, p.Actual],
+        ),
+      );
+    }
+  };
+
   return (
     <Card data-testid="card-monthly-trends">
       <CardHeader className="pb-2">
@@ -617,7 +703,7 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
           <CardTitle className="text-base">
             Monthly Trends — {data.fiscalYear}
           </CardTitle>
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap items-center gap-1">
             {TREND_STAGES.map((s) => (
               <Button
                 key={s.key}
@@ -629,6 +715,11 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
                 {s.label}
               </Button>
             ))}
+            <DownloadDataButton
+              slug="monthly-trends"
+              onDownload={downloadTrends}
+              className="ml-1"
+            />
           </div>
         </div>
       </CardHeader>

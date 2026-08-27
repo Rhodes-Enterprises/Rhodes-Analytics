@@ -39,3 +39,7 @@ packages = ["chromium"]
 [userenv.shared]
 SNOWFLAKE_DATABASE = "PC_DBT_DB"
 SNOWFLAKE_SCHEMA = "dbt_ecoronado"
+
+[userenv.development]
+SNOWFLAKE_MAX_IN_FLIGHT = "2"
+SNOWFLAKE_MIN_START_SPACING_MS = "350"

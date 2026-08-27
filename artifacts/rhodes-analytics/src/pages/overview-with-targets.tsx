@@ -29,6 +29,7 @@ import { Layout } from "@/components/layout";
 import { useCommittedDateRange } from "@/hooks/use-committed-date";
 import {
   CrossYearRangeHint,
+  DownloadDataButton,
   InvertedRangeHint,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,7 +43,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -550,10 +551,42 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
       </td>
     </tr>
   );
+  const matrixCsvRow = (
+    sectionName: string,
+    measure: string,
+    cell: { fullSpanGoal: number; toDateGoal: number; actual: number; ptgPercent: number | null },
+  ): CsvValue[] => [sectionName, measure, cell.fullSpanGoal, cell.toDateGoal, cell.actual, cell.ptgPercent];
+  const downloadTrafficGoals = () =>
+    downloadCsv(
+      "overview-with-targets-traffic-goals",
+      ["Section", "Measure", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
+      [
+        matrixCsvRow("Online", "Website Users", m.online.websiteUsers),
+        ["Online", "New Website Users", null, null, m.newWebsiteUsers, null],
+        matrixCsvRow("Online", "Online Leads", m.online.leads),
+        matrixCsvRow("Online", "Online Tours", m.online.tours),
+        matrixCsvRow("Online", "Online Sales", m.online.sales),
+        matrixCsvRow("Onsite", "Onsite Leads", m.onsite.leads),
+        matrixCsvRow("Onsite", "Onsite Tours", m.onsite.tours),
+        matrixCsvRow("Onsite", "Onsite Sales", m.onsite.sales),
+        // Mirror the on-screen unknown-channel section: actual-only rows, no
+        // goals exist for the bucket (goal/PTG cells stay blank).
+        ...(hasUnknown
+          ? ([
+              ["Unknown — no online/onsite label", "Unknown Leads", null, null, u.leads, null],
+              ["Unknown — no online/onsite label", "Unknown Tours", null, null, u.tours, null],
+              ["Unknown — no online/onsite label", "Unknown Sales", null, null, u.sales, null],
+            ] as CsvValue[][])
+          : []),
+        matrixCsvRow("Total", "Total Leads", m.total.leads),
+        matrixCsvRow("Total", "Total Tours", m.total.tours),
+      ],
+    );
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">Traffic Goals — Actual vs Target</CardTitle>
+        <DownloadDataButton slug="traffic-goals" onDownload={downloadTrafficGoals} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-sm" data-testid="table-traffic-matrix">
@@ -630,6 +663,8 @@ function DivisionTable({ data }: { data: OwtDashboard }) {
       title="Division Summary"
       labelHeader="Division"
       testId="table-divisions"
+      downloadSlug="division-summary"
+      downloadFilename="overview-with-targets-division-summary"
       rows={data.divisions.map((r) => ({ ...r, label: r.division, key: r.division }))}
       userTotals={{
         newUsers: data.trafficMatrix.newWebsiteUsers,
@@ -645,6 +680,8 @@ function DevelopmentTable({ data }: { data: OwtDashboard }) {
       title="Development Summary"
       labelHeader="Development"
       testId="table-developments"
+      downloadSlug="development-summary"
+      downloadFilename="overview-with-targets-development-summary"
       rows={data.developments.map((r) => ({
         ...r,
         label: r.development,
@@ -666,6 +703,8 @@ function SummaryTable({
   testId,
   rows,
   userTotals,
+  downloadSlug,
+  downloadFilename,
 }: {
   title: string;
   labelHeader: string;
@@ -673,6 +712,8 @@ function SummaryTable({
   rows: SummaryRow[];
   /** Distinct user counts for the footer — summing per-row distinct counts would double-count. */
   userTotals: { newUsers: number; totalUsers: number };
+  downloadSlug: string;
+  downloadFilename: string;
 }) {
   const totals = useMemo(() => {
     const sum = (pick: (r: (typeof rows)[number]) => number) =>
@@ -686,6 +727,70 @@ function SummaryTable({
     };
   }, [rows, userTotals]);
 
+  const displayLabel = (label: string) =>
+    label.replace("Esperanza Homes ", "").replace(", LLC", "");
+
+  const downloadTable = () =>
+    downloadCsv(
+      downloadFilename,
+      [
+        labelHeader,
+        "New Users",
+        "Total Users",
+        "Leads",
+        "Leads % of Total",
+        "Tours",
+        "Tours % of Total",
+        "Sales",
+        "Sales % of Total",
+        "Sales PTG %",
+        "Tours PTG %",
+        "Leads PTG %",
+        "Traffic PTG %",
+        "Online Leads PTG %",
+        "Online Tours PTG %",
+        "Online Sales PTG %",
+        "Onsite Leads PTG %",
+        "Onsite Tours PTG %",
+        "Onsite Sales PTG %",
+      ],
+      [
+        ...rows.map((r): CsvValue[] => [
+          displayLabel(r.label),
+          r.newWebsiteUsers,
+          r.totalWebsiteUsers,
+          r.leads,
+          r.leadsPctOfTotal,
+          r.tours,
+          r.toursPctOfTotal,
+          r.sales,
+          r.salesPctOfTotal,
+          r.salesPtg,
+          r.toursPtg,
+          r.leadsPtg,
+          r.onlineTrafficPtg,
+          r.onlineLeadsPtg,
+          r.onlineToursPtg,
+          r.onlineSalesPtg,
+          r.onsiteLeadsPtg,
+          r.onsiteToursPtg,
+          r.onsiteSalesPtg,
+        ]),
+        [
+          "Total",
+          totals.newUsers,
+          totals.totalUsers,
+          totals.leads,
+          null,
+          totals.tours,
+          null,
+          totals.sales,
+          null,
+          null, null, null, null, null, null, null, null, null, null,
+        ],
+      ],
+    );
+
   const PtgCell = ({ v }: { v: number | null }) => (
     <td className={cn("py-1.5 px-2 text-right tabular-nums", ptgColor(v))}>
       {fmtPct(v, 0)}
@@ -694,8 +799,9 @@ function SummaryTable({
 
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">{title}</CardTitle>
+        <DownloadDataButton slug={downloadSlug} onDownload={downloadTable} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-xs sm:text-sm" data-testid={testId}>
@@ -772,9 +878,11 @@ function SummaryTable({
 function RatioChart({
   title,
   rows,
+  slug,
 }: {
   title: string;
   rows: OwtRatioRow[];
+  slug: string;
 }) {
   const data = rows.map((r) => ({
     name: r.name
@@ -784,10 +892,17 @@ function RatioChart({
     Actual: +(r.actual * 100).toFixed(1),
     behind: r.ptgPercent != null && r.ptgPercent < 0,
   }));
+  const downloadRatioChart = () =>
+    downloadCsv(
+      `overview-with-targets-${slug}`,
+      ["Ratio", "Goal %", "Actual %"],
+      data.map((d): CsvValue[] => [d.name, d.Goal, d.Actual]),
+    );
   return (
     <Card>
-      <CardHeader className="pb-2">
+      <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-sm">{title}</CardTitle>
+        <DownloadDataButton slug={slug} onDownload={downloadRatioChart} />
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={rows.length * 64 + 40}>
@@ -823,11 +938,23 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
     online: ratios.filter((r) => r.group === "online"),
     onsite: ratios.filter((r) => r.group === "onsite"),
   };
+  const downloadRatioGoals = () =>
+    downloadCsv(
+      "overview-with-targets-ratio-goals",
+      ["Conversion Ratio", "Goal %", "Actual %", "PTG %"],
+      ratios.map((r): CsvValue[] => [
+        r.name,
+        r.goal != null ? +(r.goal * 100).toFixed(1) : null,
+        +(r.actual * 100).toFixed(1),
+        r.ptgPercent,
+      ]),
+    );
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
           <CardTitle className="text-base">Ratio Goals</CardTitle>
+          <DownloadDataButton slug="ratio-goals" onDownload={downloadRatioGoals} />
         </CardHeader>
         <CardContent className="overflow-x-auto">
           <table className="w-full text-sm" data-testid="table-ratios">
@@ -870,9 +997,9 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
         </CardContent>
       </Card>
       <div className="grid gap-4 lg:grid-cols-3">
-        <RatioChart title="Total Ratios" rows={groups.total} />
-        <RatioChart title="Online Ratios" rows={groups.online} />
-        <RatioChart title="Onsite Ratios" rows={groups.onsite} />
+        <RatioChart title="Total Ratios" rows={groups.total} slug="total-ratios" />
+        <RatioChart title="Online Ratios" rows={groups.online} slug="online-ratios" />
+        <RatioChart title="Onsite Ratios" rows={groups.onsite} slug="onsite-ratios" />
       </div>
     </div>
   );
@@ -905,26 +1032,47 @@ function YoySection({
       Goal: p.goal,
     })) ?? [];
 
+  const measureLabel =
+    YOY_MEASURES.find((m) => m.key === measure)?.label ?? measure;
+  const downloadYoy = () => {
+    if (!yoy || !series) return;
+    downloadCsv(
+      `overview-with-targets-yoy-${measureLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      ["Month", String(yoy.priorYear), String(yoy.year), "Goal"],
+      series.points.map((p): CsvValue[] => [
+        MONTHS[p.month - 1],
+        p.priorYear,
+        p.currentYear,
+        p.goal,
+      ]),
+    );
+  };
+
   return (
     <Card>
       <CardHeader className="pb-2 flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">Year over Year</CardTitle>
-        <div className="flex rounded-lg border p-0.5 bg-muted/40">
-          {YOY_MEASURES.map((m) => (
-            <button
-              key={m.key}
-              onClick={() => setMeasure(m.key)}
-              data-testid={`button-yoy-${m.key}`}
-              className={cn(
-                "px-2.5 py-1 text-xs rounded-md transition-colors",
-                measure === m.key
-                  ? "bg-background shadow font-semibold"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {m.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5">
+          <div className="flex rounded-lg border p-0.5 bg-muted/40">
+            {YOY_MEASURES.map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setMeasure(m.key)}
+                data-testid={`button-yoy-${m.key}`}
+                className={cn(
+                  "px-2.5 py-1 text-xs rounded-md transition-colors",
+                  measure === m.key
+                    ? "bg-background shadow font-semibold"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          {series && (
+            <DownloadDataButton slug="year-over-year" onDownload={downloadYoy} />
+          )}
         </div>
       </CardHeader>
       <CardContent>

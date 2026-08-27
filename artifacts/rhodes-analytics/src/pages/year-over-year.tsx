@@ -14,6 +14,7 @@ import {
   useGetOwtYoy,
   useGetOwtFilters,
   useGetSnowflakeStatus,
+  type OwtYoy,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,10 +24,12 @@ import {
   ALL,
   MONTH_NAMES,
   Breadcrumb,
+  DownloadDataButton,
   FilterSelect,
   LiveStatusBadge,
   fmt,
 } from "@/components/dashboard-shared";
+import { downloadCsv, type CsvValue } from "@/lib/utils";
 
 const MEASURE_LABELS: Record<string, string> = {
   websiteUsers: "Website Users",
@@ -51,6 +54,22 @@ export default function YearOverYearPage() {
     const scoped = company === ALL ? list : list.filter((d) => d.company === company);
     return [...new Set(scoped.map((d) => d.development))];
   }, [filters.data, company]);
+
+  const downloadMeasure = (m: OwtYoy["measures"][number]) => {
+    const d = yoy.data;
+    if (!d) return;
+    const label = MEASURE_LABELS[m.measure] ?? m.measure;
+    downloadCsv(
+      `year-over-year-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      ["Month", String(d.year), String(d.priorYear), "Business Plan Goal"],
+      m.points.map((p): CsvValue[] => [
+        MONTH_NAMES[p.month - 1],
+        p.currentYear,
+        p.priorYear,
+        p.goal,
+      ]),
+    );
+  };
 
   return (
     <Layout>
@@ -116,10 +135,14 @@ export default function YearOverYearPage() {
           <div className="grid gap-4 lg:grid-cols-2">
             {yoy.data.measures.map((m) => (
               <Card key={m.measure} data-testid={`chart-yoy-${m.measure}`}>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">
                     {MEASURE_LABELS[m.measure] ?? m.measure}
                   </CardTitle>
+                  <DownloadDataButton
+                    slug={`yoy-${m.measure}`}
+                    onDownload={() => downloadMeasure(m)}
+                  />
                 </CardHeader>
                 <CardContent className="h-72">
                   <ResponsiveContainer>

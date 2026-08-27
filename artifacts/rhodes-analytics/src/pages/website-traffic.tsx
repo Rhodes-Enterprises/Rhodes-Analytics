@@ -24,11 +24,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn } from "@/lib/utils";
+import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
   Breadcrumb,
+  DownloadDataButton,
   FilterSelect,
   CrossYearRangeHint,
   InvertedRangeHint,
@@ -80,6 +81,49 @@ export default function WebsiteTrafficPage() {
     const year = new Date().getFullYear();
     setStartDate(`${year}-01-01`);
     setEndDate(`${year}-12-31`);
+  };
+
+  const downloadMonthly = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      "website-traffic-monthly-users-sessions",
+      ["Month", "Users", "New Users", "Sessions"],
+      d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.users, m.newUsers, m.sessions]),
+    );
+  };
+  const downloadChannels = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      "website-traffic-users-by-channel",
+      ["Channel", "Users"],
+      d.channels.map((c): CsvValue[] => [c.name, c.users]),
+    );
+  };
+  const downloadDevices = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      "website-traffic-users-by-device",
+      ["Device", "Users"],
+      d.devices.map((c): CsvValue[] => [c.name, c.users]),
+    );
+  };
+  const downloadDevelopments = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      "website-traffic-by-development",
+      ["Development", "Division", "Users", "New Users", "Sessions"],
+      d.developments.map((r): CsvValue[] => [
+        r.development,
+        r.division,
+        r.users,
+        r.newUsers,
+        r.sessions,
+      ]),
+    );
   };
 
   return (
@@ -222,8 +266,9 @@ export default function WebsiteTrafficPage() {
 
             <div className="grid gap-4 lg:grid-cols-2">
               <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">Monthly Users & Sessions</CardTitle>
+                  <DownloadDataButton slug="monthly-users-sessions" onDownload={downloadMonthly} />
                 </CardHeader>
                 <CardContent className="h-72">
                   <ResponsiveContainer>
@@ -268,8 +313,9 @@ export default function WebsiteTrafficPage() {
               </Card>
 
               <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">Users by Channel</CardTitle>
+                  <DownloadDataButton slug="users-by-channel" onDownload={downloadChannels} />
                 </CardHeader>
                 <CardContent className="h-72">
                   <ResponsiveContainer>
@@ -287,8 +333,9 @@ export default function WebsiteTrafficPage() {
 
             <div className="grid gap-4 lg:grid-cols-3">
               <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">Users by Device</CardTitle>
+                  <DownloadDataButton slug="users-by-device" onDownload={downloadDevices} />
                 </CardHeader>
                 <CardContent className="h-64">
                   <ResponsiveContainer>
@@ -304,8 +351,9 @@ export default function WebsiteTrafficPage() {
               </Card>
 
               <Card className="lg:col-span-2">
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">Traffic by Development</CardTitle>
+                  <DownloadDataButton slug="traffic-by-development" onDownload={downloadDevelopments} />
                 </CardHeader>
                 <CardContent className="overflow-x-auto">
                   <table className="w-full text-sm" data-testid="table-developments">

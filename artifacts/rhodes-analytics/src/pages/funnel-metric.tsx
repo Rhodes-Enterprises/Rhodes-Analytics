@@ -25,11 +25,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn } from "@/lib/utils";
+import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
   Breadcrumb,
+  DownloadDataButton,
   FilterSelect,
   CrossYearRangeHint,
   InvertedRangeHint,
@@ -90,6 +91,26 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
     const year = new Date().getFullYear();
     setStartDate(`${year}-01-01`);
     setEndDate(`${year}-12-31`);
+  };
+
+  const metricSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const downloadMonthly = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      `${metricSlug}-monthly-vs-goal`,
+      ["Month", "Online", "Onsite", "Monthly Goal"],
+      d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.online, m.onsite, m.goal]),
+    );
+  };
+  const downloadSources = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      `${metricSlug}-by-lead-source`,
+      ["Lead Source", unit],
+      d.sources.map((s): CsvValue[] => [s.name, s.count]),
+    );
   };
 
   return (
@@ -235,8 +256,9 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
 
             <div className="grid gap-4 lg:grid-cols-2">
               <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">Monthly {unit} vs Goal</CardTitle>
+                  <DownloadDataButton slug="monthly-vs-goal" onDownload={downloadMonthly} />
                 </CardHeader>
                 <CardContent className="h-72">
                   <ResponsiveContainer>
@@ -267,8 +289,9 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               </Card>
 
               <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">{unit} by Lead Source</CardTitle>
+                  <DownloadDataButton slug="by-lead-source" onDownload={downloadSources} />
                 </CardHeader>
                 <CardContent className="h-72">
                   <ResponsiveContainer>
@@ -289,6 +312,8 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               rows={dash.data.divisions}
               unit={unit}
               testId="table-divisions"
+              downloadSlug="division-summary"
+              downloadFilename={`${metricSlug}-division-summary`}
             />
             <BreakdownTable
               title="Development Summary"
@@ -299,6 +324,8 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               unit={unit}
               firstColumn="Development"
               testId="table-developments"
+              downloadSlug="development-summary"
+              downloadFilename={`${metricSlug}-development-summary`}
             />
           </>
         )}
@@ -341,6 +368,8 @@ function BreakdownTable({
   unit,
   firstColumn = "Division",
   testId,
+  downloadSlug,
+  downloadFilename,
 }: {
   title: string;
   rows: {
@@ -354,11 +383,27 @@ function BreakdownTable({
   unit: string;
   firstColumn?: string;
   testId: string;
+  downloadSlug: string;
+  downloadFilename: string;
 }) {
+  const downloadTable = () =>
+    downloadCsv(
+      downloadFilename,
+      [firstColumn, `Total ${unit}`, "Online", "Onsite", "TD Goal", "PTG %"],
+      rows.map((r): CsvValue[] => [
+        r.division,
+        r.total,
+        r.online,
+        r.onsite,
+        r.toDateGoal,
+        r.ptgPercent,
+      ]),
+    );
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">{title}</CardTitle>
+        <DownloadDataButton slug={downloadSlug} onDownload={downloadTable} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-sm" data-testid={testId}>

@@ -118,6 +118,7 @@ interface OverviewPayload {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     total: { leads: MatrixCell; tours: MatrixCell };
+    unknown: { leads: number; tours: number; sales: number };
     newWebsiteUsers: number;
   };
   divisions: BreakdownRow[];
@@ -547,6 +548,16 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };
+  // The unknown-channel section renders only when the bucket is non-empty
+  // (mirrors the page's hasUnknown logic). Its rows are actual-only: the
+  // goal and PTG cells render the "–" placeholder, which checkCell requires
+  // to correspond to null API values.
+  const u = m.unknown;
+  if (u && (u.leads > 0 || u.tours > 0 || u.sales > 0)) {
+    bindings["Unknown Leads"] = { fullSpanGoal: null, toDateGoal: null, actual: u.leads, ptgPercent: null };
+    bindings["Unknown Tours"] = { fullSpanGoal: null, toDateGoal: null, actual: u.tours, ptgPercent: null };
+    bindings["Unknown Sales"] = { fullSpanGoal: null, toDateGoal: null, actual: u.sales, ptgPercent: null };
+  }
   const missing = new Set<string>();
   const col = (h: string) => columnIndex("traffic matrix", dom.matrix!.headers, h, missing);
   const cFull = col("Full Span Goal");

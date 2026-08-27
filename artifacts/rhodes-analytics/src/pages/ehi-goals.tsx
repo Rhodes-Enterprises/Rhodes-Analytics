@@ -8,9 +8,10 @@ import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn } from "@/lib/utils";
+import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 import {
   Breadcrumb,
+  DownloadDataButton,
   LiveStatusBadge,
   TargetToggle,
   fmt,
@@ -28,6 +29,24 @@ export default function EhiGoalsPage() {
   const params: GetEhiGoalsParams = { target };
   const dash = useGetEhiGoals(params);
   const status = useGetSnowflakeStatus();
+
+  const downloadGoalAttainment = () => {
+    const d = dash.data;
+    if (!d) return;
+    downloadCsv(
+      "ehi-goals-goal-attainment",
+      ["Metric", "Resolved Goal Type", "Full-Year Goal", "TD Goal", "Actual", "Attainment %", "PTG %"],
+      d.metrics.map((m): CsvValue[] => [
+        m.label,
+        m.goalType ?? "not issued",
+        m.fullYearGoal,
+        m.toDateGoal,
+        m.actual,
+        m.attainmentPct,
+        m.ptgPercent,
+      ]),
+    );
+  };
 
   return (
     <Layout>
@@ -65,8 +84,9 @@ export default function EhiGoalsPage() {
         {dash.data && (
           <>
             <Card>
-              <CardHeader>
+              <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                 <CardTitle className="text-base">Goal Attainment — Full Fiscal Year</CardTitle>
+                <DownloadDataButton slug="goal-attainment" onDownload={downloadGoalAttainment} />
               </CardHeader>
               <CardContent className="overflow-x-auto">
                 <table className="w-full text-sm" data-testid="table-goal-metrics">
@@ -159,10 +179,30 @@ function DivisionMatrix({
   }
   const labels = new Map(divisions.map((d) => [d.metric, d.label]));
 
+  const downloadDivisionAttainment = () =>
+    downloadCsv(
+      "ehi-goals-division-attainment",
+      [
+        "Division",
+        ...CORE_METRICS.flatMap((m) => {
+          const label = labels.get(m) ?? m;
+          return [`${label} Actual`, `${label} TD Goal`, `${label} PTG %`];
+        }),
+      ],
+      [...byDivision.entries()].map(([division, rows]): CsvValue[] => [
+        division,
+        ...CORE_METRICS.flatMap((m): CsvValue[] => {
+          const cell = rows.get(m);
+          return cell ? [cell.actual, cell.toDateGoal, cell.ptgPercent] : [null, null, null];
+        }),
+      ]),
+    );
+
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
         <CardTitle className="text-base">Division Attainment (to date)</CardTitle>
+        <DownloadDataButton slug="division-attainment" onDownload={downloadDivisionAttainment} />
       </CardHeader>
       <CardContent className="overflow-x-auto">
         <table className="w-full text-sm" data-testid="table-division-goals">

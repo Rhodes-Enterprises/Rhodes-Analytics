@@ -7,4 +7,4 @@ Artifact typechecks (`tsc -p tsconfig.json --noEmit`) do NOT rebuild referenced 
 
 **Why:** after regenerating or editing a lib, its `dist/` declarations can lag its source, so downstream typechecks report exports as missing even though they visibly exist.
 
-**How to apply:** when a typecheck claims a `@workspace/*` export doesn't exist but the lib's source clearly has it, rebuild that lib first (`tsc -b <lib path>` from the repo root) before chasing phantom codegen problems.
+**How to apply:** when a typecheck claims a `@workspace/*` export doesn't exist but the lib's source clearly has it, rebuild that lib first (`tsc -b <lib path>` from the repo root) before chasing phantom codegen problems. If `tsc -b` exits 0 without rebuilding — a stale `tsconfig.tsbuildinfo` can claim up-to-date while `dist/` is still old — use `tsc -b --force`.

@@ -2,11 +2,17 @@ import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Search } from "lucide-react";
 import { useGetCommunities, useGetSnowflakeStatus } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Breadcrumb, LiveStatusBadge, fmt } from "@/components/dashboard-shared";
+import {
+  Breadcrumb,
+  DownloadDataButton,
+  LiveStatusBadge,
+  fmt,
+} from "@/components/dashboard-shared";
+import { downloadCsv, type CsvValue } from "@/lib/utils";
 
 type SortKey = "development" | "division" | "leadsYtd" | "toursYtd" | "salesYtd";
 type SortDir = "asc" | "desc";
@@ -96,6 +102,29 @@ export default function CommunityListPage() {
     }
   };
 
+  // Exports exactly what the table shows: current search, show/hide toggles,
+  // and sort order all apply.
+  const downloadCommunities = () =>
+    downloadCsv(
+      "community-list",
+      ["Development", "Division", "Location", "Flags", "Leads YTD", "Tours YTD", "Sales YTD"],
+      rows.map((c): CsvValue[] => [
+        c.development,
+        c.division,
+        [c.city, c.state].filter(Boolean).join(", "),
+        [
+          c.hasGoals ? "Goals" : null,
+          c.isRental ? "Rental" : null,
+          !c.isSelling ? "No activity" : null,
+        ]
+          .filter(Boolean)
+          .join(", "),
+        c.leadsYtd,
+        c.toursYtd,
+        c.salesYtd,
+      ]),
+    );
+
   return (
     <Layout>
       <div className="space-y-6">
@@ -161,7 +190,11 @@ export default function CommunityListPage() {
 
         {dash.data && (
           <Card>
-            <CardContent className="pt-4 overflow-x-auto">
+            <CardHeader className="pb-2 flex flex-row items-center justify-between gap-2 space-y-0">
+              <CardTitle className="text-base">Communities</CardTitle>
+              <DownloadDataButton slug="communities" onDownload={downloadCommunities} />
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
               <table className="w-full text-sm" data-testid="table-communities">
                 <thead>
                   <tr className="border-b text-left text-xs text-muted-foreground">
