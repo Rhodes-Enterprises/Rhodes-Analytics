@@ -63,8 +63,22 @@ function parseDateOrDefault(
   throw new BadRequestError(`${field} must be a valid YYYY-MM-DD date`);
 }
 
-function buildFilters(query: Record<string, unknown>): DashboardFilters {
-  const today = todayChicago();
+/**
+ * Default (no-param) dashboard window: the CURRENT quarter on the
+ * America/Chicago calendar, with toDate clamped into the window.
+ *
+ * Exported — with the `now` clock-injection point — for
+ * scripts/audit-rollover.ts, which pins the boundary-evening behavior with
+ * fixed clocks (quarter math computed from the raw Date instead of the
+ * Chicago "today" would flip the default quarter hours early on Dec 31 /
+ * Mar 31 evenings). Production callers pass only the query and get the
+ * real clock.
+ */
+export function buildFilters(
+  query: Record<string, unknown>,
+  now: Date = new Date(),
+): DashboardFilters {
+  const today = todayChicago(now);
   const t = new Date(today + "T00:00:00");
   const q = Math.floor(t.getMonth() / 3);
   const qStart = `${t.getFullYear()}-${String(q * 3 + 1).padStart(2, "0")}-01`;
@@ -164,8 +178,16 @@ router.get("/dashboards/overview-with-targets/yoy", async (req, res) => {
   }
 });
 
-function buildLeasingFilters(query: Record<string, unknown>): LeasingFilters {
-  const today = todayChicago();
+/**
+ * Default (no-param) Leasing window: the CURRENT America/Chicago year to
+ * date. Same audit-facing `now` injection point as buildFilters — see
+ * scripts/audit-rollover.ts.
+ */
+export function buildLeasingFilters(
+  query: Record<string, unknown>,
+  now: Date = new Date(),
+): LeasingFilters {
+  const today = todayChicago(now);
   const year = today.slice(0, 4);
   // Leasing defaults to the current year to date (RL goals are annual).
   const startDate = parseDateOrDefault(str(query.startDate), `${year}-01-01`, "startDate");

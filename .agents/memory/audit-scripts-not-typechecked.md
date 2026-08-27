@@ -42,3 +42,14 @@ surfaced all three in seconds.
   legal TS, and the audit then passes vacuously (observed: a leasing audit
   "passing" in 0.5s with zero output). Trust a PASS only if the audit printed
   work; sub-second durations in the audit:all summary are the tell.
+
+**Generation-clash repairs (when tsc flags a helper both sides evolved):**
+two sibling branches can evolve the SAME shared audit helper (one enriching
+it, one narrowing/renaming it); auto-merge keeps one definition while both
+consumer styles survive — e.g. a Map-returning `baselineGoalsByType` under
+call sites written for a closure-returning one ("goalFor is not a function"),
+or a batching pass deleting `countScalar` while a newer section still calls
+it. Archaeology that works: `git log --all -S "<helper name>" -- <file>` to
+find both generations, restore the RICHER definition (superset of fields),
+and adapt the narrow consumers to it (their needs are a subset). Surviving
+`interface`/`EMPTY_*` remnants reveal which generation the consumers expect.

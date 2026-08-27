@@ -29,6 +29,16 @@
  *      formatter or UTC-day string; business days must keep flowing through
  *      lib/chicago-date.ts, or these unit checks would silently stop
  *      covering the code that actually serves requests.
+ *   4. Route defaults: the REAL buildFilters / buildLeasingFilters — the
+ *      functions every dashboard route derives its window through — with
+ *      the same fixed clocks. The default window must stay on the OLD
+ *      quarter / Leasing year at 11pm Dec 31 Chicago (UTC already Jan 1),
+ *      flip both just after Chicago midnight, flip the quarter but not the
+ *      year across Mar 31 -> Apr 1, and keep toDate on the Chicago "today"
+ *      clamped into explicit windows at the boundary — each with its own
+ *      catch table verified against simulated wrong derivations, so a
+ *      regression (e.g. quarter math computed from the raw Date) fails
+ *      here on any day, at any hour.
  *
  * Unlike the sibling audits this one deliberately IGNORES AUDIT_API_BASE:
  * clock injection is only possible in-process against current source.
@@ -55,6 +65,9 @@ const { communityListWindow, getCommunityList } = await import(
 );
 const { cached } = await import("../src/lib/overview-targets");
 const { setCacheObserver } = await import("../src/lib/cache-observer");
+// The REAL route-default builders: every dashboard route (Overview,
+// marketing, Leasing) derives its window through these two functions.
+const { buildFilters, buildLeasingFilters } = await import("../src/routes/dashboards");
 
 let passes = 0;
 let failures = 0;
@@ -358,6 +371,255 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// Part 4: route default windows — the REAL buildFilters / buildLeasingFilters
+// ---------------------------------------------------------------------------
+//
+// buildFilters({}) defaults Overview/marketing dashboards to the CURRENT
+// quarter; buildLeasingFilters({}) defaults Leasing to the CURRENT year.
+// "Current" must come from the Chicago today string: quarter/year math
+// computed from the raw Date would flip the default window hours early on
+// boundary evenings — exactly the 6pm-midnight window the Snowflake-backed
+// audits almost never run in.
+
+console.log("\nPart 4: route default windows (real buildFilters / buildLeasingFilters)");
+
+interface Win {
+  startDate: string;
+  endDate: string;
+  toDate: string;
+}
+
+function fmtWin(w: Win): string {
+  return `${w.startDate}..${w.endDate} toDate=${w.toDate}`;
+}
+
+function winOf(f: { startDate: string; endDate: string; toDate: string }): Win {
+  return { startDate: f.startDate, endDate: f.endDate, toDate: f.toDate };
+}
+
+/**
+ * An instant whose Chicago calendar day is exactly `day` (18:00Z = noon CST
+ * / 1pm CDT, same day in Chicago and UTC alike). Part 4b feeds a wrong
+ * implementation's "today" through the REAL downstream quarter/year math by
+ * evaluating the real builders at this instant — no reimplementation of the
+ * quarter derivation that could drift from production code.
+ */
+function atChicagoNoon(day: string): Date {
+  const instant = new Date(day + "T18:00:00Z");
+  if (todayChicago(instant) !== day) {
+    throw new Error(`atChicagoNoon premise broken for ${day} — got ${todayChicago(instant)}`);
+  }
+  return instant;
+}
+
+interface RouteDefaultsCase {
+  name: string;
+  /** The fixed instant fed to the clock (UTC ISO). */
+  instant: string;
+  /** The same instant on the Chicago wall clock (documentation). */
+  chicago: string;
+  /** Expected buildFilters({}) default window (current Chicago quarter). */
+  quarter: Win;
+  /** Expected buildLeasingFilters({}) default window (current Chicago year). */
+  leasing: Win;
+  /** Wrong today-derivations that change SOME default field (verified in 4b). */
+  catches: WrongImpl[];
+}
+
+const ROUTE_CASES: RouteDefaultsCase[] = [
+  {
+    name: "New Year's Eve 11pm Chicago — defaults stay on OLD year's Q4 / Leasing 2026",
+    instant: "2027-01-01T05:00:00Z",
+    chicago: "2026-12-31 23:00 CST",
+    quarter: { startDate: "2026-10-01", endDate: "2026-12-31", toDate: "2026-12-31" },
+    leasing: { startDate: "2026-01-01", endDate: "2026-12-31", toDate: "2026-12-31" },
+    catches: ["utc", "frozen-cdt"],
+  },
+  {
+    name: "just after Chicago midnight — defaults flip to Q1 / Leasing 2027",
+    instant: "2027-01-01T06:00:05Z",
+    chicago: "2027-01-01 00:00:05 CST",
+    quarter: { startDate: "2027-01-01", endDate: "2027-03-31", toDate: "2027-01-01" },
+    leasing: { startDate: "2027-01-01", endDate: "2027-12-31", toDate: "2027-01-01" },
+    catches: [],
+  },
+  {
+    name: "Mar 31 8pm Chicago (UTC already Apr 1) — quarter boundary that is NOT a year boundary",
+    instant: "2026-04-01T01:00:00Z",
+    chicago: "2026-03-31 20:00 CDT",
+    quarter: { startDate: "2026-01-01", endDate: "2026-03-31", toDate: "2026-03-31" },
+    leasing: { startDate: "2026-01-01", endDate: "2026-12-31", toDate: "2026-03-31" },
+    catches: ["utc"],
+  },
+  {
+    name: "just after Chicago midnight Apr 1 — quarter flips, Leasing year does not",
+    instant: "2026-04-01T05:00:05Z",
+    chicago: "2026-04-01 00:00:05 CDT",
+    quarter: { startDate: "2026-04-01", endDate: "2026-06-30", toDate: "2026-04-01" },
+    leasing: { startDate: "2026-01-01", endDate: "2026-12-31", toDate: "2026-04-01" },
+    catches: ["frozen-cst"],
+  },
+  {
+    name: "ordinary summer evening — windows unchanged but toDate stays on Chicago today",
+    instant: "2026-08-28T01:00:00Z",
+    chicago: "2026-08-27 20:00 CDT",
+    quarter: { startDate: "2026-07-01", endDate: "2026-09-30", toDate: "2026-08-27" },
+    leasing: { startDate: "2026-01-01", endDate: "2026-12-31", toDate: "2026-08-27" },
+    catches: ["utc"],
+  },
+];
+
+for (const c of ROUTE_CASES) {
+  const now = new Date(c.instant);
+  const q = winOf(buildFilters({}, now));
+  const l = winOf(buildLeasingFilters({}, now));
+  check(
+    `${c.name} [${c.instant} = ${c.chicago}]`,
+    fmtWin(q) === fmtWin(c.quarter) && fmtWin(l) === fmtWin(c.leasing),
+    `buildFilters {${fmtWin(q)}} expected {${fmtWin(c.quarter)}}; buildLeasingFilters {${fmtWin(l)}} expected {${fmtWin(c.leasing)}}`,
+  );
+}
+
+// ---- Part 4b: catch-table verification (route defaults must be able to
+// fail). The simulated wrong output is the real builders evaluated at
+// Chicago-noon of the wrong impl's "today" — exactly what a regressed today
+// derivation would produce, since Part 4 pins the defaults as a pure
+// function of the Chicago day. Both directions must match the declarations.
+console.log("\nPart 4b: route-default catch-table verification");
+for (const c of ROUTE_CASES) {
+  for (const impl of ALL_WRONG) {
+    const wrongToday = WRONG_IMPLS[impl](new Date(c.instant));
+    const sim = atChicagoNoon(wrongToday);
+    const simQ = winOf(buildFilters({}, sim));
+    const simL = winOf(buildLeasingFilters({}, sim));
+    const differs = fmtWin(simQ) !== fmtWin(c.quarter) || fmtWin(simL) !== fmtWin(c.leasing);
+    const declared = c.catches.includes(impl);
+    check(
+      `route catch table: "${c.name}" vs ${impl}`,
+      differs === declared,
+      declared
+        ? `declared to catch ${impl}, but its today (${wrongToday}) yields the same defaults — the case lost its teeth`
+        : `not declared to catch ${impl}, yet its today (${wrongToday}) yields {${fmtWin(simQ)}} / {${fmtWin(simL)}} — update the case's catches`,
+    );
+  }
+}
+for (const impl of ALL_WRONG) {
+  check(
+    `route defaults catch a ${impl} regression somewhere`,
+    ROUTE_CASES.some((c) => c.catches.includes(impl)),
+    "add a route-defaults case whose windows differ under this wrong implementation",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Part 5: explicit windows at the boundary — toDate clamps on Chicago time
+// ---------------------------------------------------------------------------
+//
+// With an explicit startDate/endDate, toDate must be the Chicago "today"
+// clamped INTO that window: at 11pm Dec 31 a request for the NEW year's Q1
+// paces against Jan 1 (today is still outside, below the window), and just
+// after midnight a request for the OLD Q4 paces against Dec 31 (today is
+// now past the window). Both builders share the clamp, so both are checked;
+// a dedicated wrong-impl table proves each case can fail.
+
+console.log("\nPart 5: explicit-window toDate clamp at the boundary");
+
+type WrongToDate = "unclamped" | "utc-today" | "always-end";
+
+interface ClampCase {
+  name: string;
+  instant: string;
+  chicago: string;
+  window: { startDate: string; endDate: string };
+  expectToDate: string;
+  /** Wrong toDate derivations that yield a different date here (see 5b). */
+  catches: WrongToDate[];
+}
+
+const CLAMP_CASES: ClampCase[] = [
+  {
+    name: "Dec 31 11pm Chicago + explicit NEW-year Q1 — toDate clamps UP to Jan 1",
+    instant: "2027-01-01T05:00:00Z",
+    chicago: "2026-12-31 23:00 CST",
+    window: { startDate: "2027-01-01", endDate: "2027-03-31" },
+    expectToDate: "2027-01-01",
+    catches: ["unclamped", "always-end"],
+  },
+  {
+    name: "just after Chicago midnight + explicit OLD Q4 — toDate clamps DOWN to Dec 31",
+    instant: "2027-01-01T06:00:05Z",
+    chicago: "2027-01-01 00:00:05 CST",
+    window: { startDate: "2026-10-01", endDate: "2026-12-31" },
+    expectToDate: "2026-12-31",
+    catches: ["unclamped"],
+  },
+  {
+    name: "summer evening + explicit window containing today — toDate stays Chicago today",
+    instant: "2026-08-28T01:00:00Z",
+    chicago: "2026-08-27 20:00 CDT",
+    window: { startDate: "2026-07-01", endDate: "2026-09-30" },
+    expectToDate: "2026-08-27",
+    catches: ["utc-today", "always-end"],
+  },
+];
+
+function clampDay(day: string, w: { startDate: string; endDate: string }): string {
+  return day < w.startDate ? w.startDate : day > w.endDate ? w.endDate : day;
+}
+
+const WRONG_TODATE: Record<
+  WrongToDate,
+  (now: Date, w: { startDate: string; endDate: string }) => string
+> = {
+  // Right Chicago day, forgot the clamp entirely.
+  unclamped: (now) => todayChicago(now),
+  // Correct clamp, but fed the UTC day.
+  "utc-today": (now, w) => clampDay(now.toISOString().slice(0, 10), w),
+  // Naive "pace against the period end" regression.
+  "always-end": (_now, w) => w.endDate,
+};
+const ALL_WRONG_TODATE: WrongToDate[] = ["unclamped", "utc-today", "always-end"];
+
+for (const c of CLAMP_CASES) {
+  const now = new Date(c.instant);
+  const q = buildFilters({ ...c.window }, now);
+  const l = buildLeasingFilters({ ...c.window }, now);
+  check(
+    `${c.name} [${c.instant} = ${c.chicago}]`,
+    q.startDate === c.window.startDate &&
+      q.endDate === c.window.endDate &&
+      q.toDate === c.expectToDate &&
+      l.startDate === c.window.startDate &&
+      l.endDate === c.window.endDate &&
+      l.toDate === c.expectToDate,
+    `buildFilters toDate=${q.toDate}, buildLeasingFilters toDate=${l.toDate}; expected ${c.expectToDate} within ${c.window.startDate}..${c.window.endDate}`,
+  );
+}
+
+console.log("\nPart 5b: clamp catch-table verification");
+for (const c of CLAMP_CASES) {
+  for (const impl of ALL_WRONG_TODATE) {
+    const wrong = WRONG_TODATE[impl](new Date(c.instant), c.window);
+    const differs = wrong !== c.expectToDate;
+    const declared = c.catches.includes(impl);
+    check(
+      `clamp catch table: "${c.name}" vs ${impl}`,
+      differs === declared,
+      declared
+        ? `declared to catch ${impl}, but that wrong impl also yields ${wrong} — the case lost its teeth`
+        : `not declared to catch ${impl}, yet that impl yields ${wrong} != ${c.expectToDate} — update the case's catches`,
+    );
+  }
+}
+for (const impl of ALL_WRONG_TODATE) {
+  check(
+    `clamp checks catch a ${impl} regression somewhere`,
+    CLAMP_CASES.some((c) => c.catches.includes(impl)),
+    "add a clamp case that fails under this wrong toDate implementation",
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 console.log("");
 if (failures > 0) {
@@ -365,5 +627,5 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log(
-  `audit:rollover — all ${passes} checks passed (New Year's rollover pinned to Chicago midnight).`,
+  `audit:rollover — all ${passes} checks passed (New Year's rollover and default quarter/Leasing-year windows pinned to Chicago midnight).`,
 );
