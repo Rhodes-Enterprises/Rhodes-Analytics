@@ -19,17 +19,15 @@ import {
   type FunnelMetric,
 } from "../lib/marketing-dashboards";
 import { withDataFreshness, withForcedRefresh } from "../lib/query-cache";
+// Business "today" comes from the shared America/Chicago calendar helper —
+// never from UTC (see lib/chicago-date.ts; scripts/audit-rollover.ts enforces
+// the single definition).
+import { todayChicago } from "../lib/chicago-date";
 
 const router: IRouter = Router();
 
 const TARGETS: TargetKind[] = ["proforma", "business_plan", "goal", "waterfall"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-function todayChicago(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Chicago",
-  }).format(new Date());
-}
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
@@ -117,27 +115,46 @@ function sendSnowflakeError(res: import("express").Response, err: unknown) {
 router.get("/dashboards/overview-with-targets/filters", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
-    res.json(await withForcedRefresh(wantsLiveData(query), () => getLeasingFilterOptions()));
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getFilterOptions()));
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/leasing", async (req, res) => {
+router.get("/dashboards/overview-with-targets", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getEhiGoals(yearFilters)),
+      () => withDataFreshness(() => getOverviewWithTargets(filters)),
     );
-    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
+    res.json({
+      appliedRange: {
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        toDate: filters.toDate,
+        target: filters.target,
+      },
+      dataAsOf,
+      refreshing,
+      kpis: data.kpis,
+      trafficMatrix: data.trafficMatrix,
+      // Record-level lists behind the unknown buckets ride in the same
+      // response as the counts they explain, from the same cached bundle —
+      // a background cache refresh can never make a drill-down dialog
+      // disagree with the matrix row the user clicked.
+      unknownRecords: data.unknownRecords,
+      divisions: data.divisions,
+      developments: data.developments,
+      ratios: data.ratios,
+    });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/communities", async (req, res) => {
+router.get("/dashboards/overview-with-targets/yoy", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
@@ -182,24 +199,38 @@ router.get("/dashboards/leasing/filters", async (req, res) => {
 router.get("/dashboards/leasing", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
-    const filters = buildFilters(query);
+    const filters = buildLeasingFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getEhiGoals(yearFilters)),
+      () => withDataFreshness(() => getLeasingDashboard(filters)),
     );
-    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
+    res.json({
+      appliedRange: {
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        toDate: filters.toDate,
+      },
+      dataAsOf,
+      refreshing,
+      fiscalYear: data.fiscalYear,
+      kpis: data.kpis,
+      funnel: data.funnel,
+      matrix: data.matrix,
+      communities: data.communities,
+      monthly: data.monthly,
+    });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/communities", async (req, res) => {
+router.get("/dashboards/website-traffic", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getEhiGoals(yearFilters)),
+      () => withDataFreshness(() => getWebsiteTraffic(filters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
@@ -220,7 +251,7 @@ router.get("/dashboards/funnel", async (req, res) => {
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getEhiGoals(yearFilters)),
+      () => withDataFreshness(() => getFunnelMetric(metric, filters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {

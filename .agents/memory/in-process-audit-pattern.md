@@ -1,6 +1,6 @@
 ---
-name: In-process warm-up audit pattern
-description: How to verify startup cache warm-up writes the exact keys real default requests read; script-bundle gotcha with workspace TS packages
+name: In-process audit patterns
+description: Verifying cache-key agreement in one process (warm-up vs requests; clock-injected timezone-rollover binding via sentinel-seeded cache) and the script-bundle gotcha with workspace TS packages
 ---
 
 # Warm-up vs request cache-key drift
@@ -17,6 +17,14 @@ description: How to verify startup cache warm-up writes the exact keys real defa
 - Date-derived keys (Chicago business day) legitimately diverge if the day rolls over mid-run: detect and retry the whole cycle once.
 - Stale-while-revalidate caches: a stale serve is still an instant answer — observe it as a hit (the audit cares about cold foreground waits, not freshness). Long warm spans then can't cause false failures; only true absence misses.
 - Transient upstream weather (the Snowflake proxy quota is shared across sibling task validations — 429 storms happen): if warm cycle 1 has failures, back off ~45s and run one full second warm cycle (warm keys answer instantly; only failures re-query). A phase-2 miss on an endpoint whose own warm job failed both cycles is a warm-QUERY failure — diagnose it as such, never as key drift.
+
+## Clock-injected timezone-rollover checks (test Dec 31 any day)
+
+**Rule:** Timezone-boundary behavior (day-scoped windows / cache keys rolling at business-timezone midnight) is testable offline any day: the single shared "today" helper takes an optional `now: Date`, and fixed-instant cases cover NYE ~11pm local (UTC already Jan 1; must stay OLD year), just past local midnight (must roll), an ordinary evening where UTC is already tomorrow, and both DST transitions. Each case declares which wrong impls it catches (pure UTC, frozen winter/summer offsets); verify the catch-table against simulated wrong impls in both directions so no case rots into vacuity.
+
+**Why:** The wrongness is only observable in the evening window where UTC has rolled but local hasn't; scheduled audits at arbitrary hours would ship a silent UTC regression.
+
+**How to apply:** Bind the REAL data function, not just a pure derivation, without the backing store: pre-seed the shared query cache with sentinels under the PREDICTED keys, observe cache accesses, call the real function with the fixed clock — pass = sentinel identity back + exactly one hit on the predicted key. Clear the backing store's config env before imports so key drift fails fast offline instead of querying; race with an unref'd timeout anyway. Add a src-wide single-definition guard (ban ad-hoc date/timezone formatting outside the helper module, with a vacuity check that the helper still owns it) so new code can't quietly fork "today".
 
 ## Script-bundle gotcha (esbuild --packages=external)
 

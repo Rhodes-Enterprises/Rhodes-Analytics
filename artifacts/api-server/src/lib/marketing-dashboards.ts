@@ -7,6 +7,10 @@ import {
   isLeadSql,
   isSaleSql,
 } from "./business-defs";
+// Business "today" comes from the shared America/Chicago calendar helper —
+// never from UTC (see lib/chicago-date.ts; scripts/audit-rollover.ts enforces
+// the single definition).
+import { todayChicago } from "./chicago-date";
 import {
   cached,
   listGoalTypes,
@@ -25,26 +29,12 @@ import {
  */
 
 // ---------- shared helpers ----------
-
 function ptg(actual: number, goal: number): number | null {
   if (!goal) return null;
   return (actual / goal - 1) * 100;
 }
 
 const n = (v: unknown) => Number(v) || 0;
-
-/**
- * Business "today" (YYYY-MM-DD) on the America/Chicago calendar — the same
- * day convention the API routes use for default ranges (see todayChicago in
- * routes/dashboards.ts). Dashboards must never derive day windows from UTC:
- * a UTC "today" flips at 6-7pm Chicago, which would roll YTD windows to the
- * new year hours early on New Year's Eve.
- */
-function todayChicago(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Chicago",
-  }).format(new Date());
-}
 async function goalTypeFor(
   fiscalYear: number,
   target: TargetKind,
@@ -659,15 +649,31 @@ export async function getEhiGoals(f: DashboardFilters) {
   return { metrics, divisions };
 }
 
-// ---------- Community List ----------
-
-export async function getCommunityList() {
-  // YTD window and cache key follow the America/Chicago business calendar,
-  // like every other dashboard — not UTC, which would reset the list's YTD
-  // numbers ~6 hours early on Dec 31 evening (Chicago).
-  const today = todayChicago();
-  const yearStart = `${today.slice(0, 4)}-01-01`;
-  return cached(`communities:v2:${today}`, async () => {
+/**
+ * The Community List's day window, derived from the shared America/Chicago
+ * business calendar (lib/chicago-date.ts): YTD spans Jan 1 through "today",
+ * and the cache key carries the same Chicago date so the list rolls over at
+ * Chicago midnight — not at UTC midnight (6-7pm Chicago), which would reset
+ * the YTD numbers hours early on Dec 31 evening.
+ *
+ * Exported (with the `now` injection point) so scripts/audit-rollover.ts can
+ * pin the New Year's rollover to Chicago midnight without waiting for Dec 31.
+ */
+export function communityListWindow(now: Date = new Date()): {
+  today: string;
+  yearStart: string;
+  cacheKey: string;
+} {
+  const today = todayChicago(now);
+  return {
+    today,
+    yearStart: `${today.slice(0, 4)}-01-01`,
+    cacheKey: `communities:v2:${today}`,
+  };
+}
+export async function getCommunityList(now: Date = new Date()) {
+  const { today, yearStart, cacheKey } = communityListWindow(now);
+  return cached(cacheKey, async () => {
     const rows = await querySnowflake<{
       DEVELOPMENT_NAME: string;
       COMPANY_NAME: string;

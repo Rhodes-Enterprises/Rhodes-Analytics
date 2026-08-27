@@ -17,7 +17,7 @@
 - [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter filter no-ops leads; tours carry signal); pick lead sources that also have deals in range.
 - [Batched audit baselines](batched-audit-baselines.md) — collapse scalar counts into COUNT_IF/GROUP BY scans (0==missing, bind order: subquery SELECT binds first); UNION ALL for different date axes.
 - [Env-var number parsing](env-var-parsing.md) — Number("") is 0, not NaN: unset env + ">= 0" guard silently disables budgets; treat empty as absent, and test the genuinely UNSET path.
-- [In-process warm-up audit](in-process-audit-pattern.md) — warm-vs-request key drift needs real warm fn + real router + cache observer in one process; --packages=external breaks on workspace TS-source pkgs.
+- [In-process audit patterns](in-process-audit-pattern.md) — warm-vs-request key drift via cache observer; clock-injected timezone-rollover binding via sentinel-seeded cache; --packages=external breaks on TS-source pkgs.
 - [Auto-merge verification](automerge-verification.md) — assisted rounds can corrupt regions outside markers; mid-rebase the tree lacks still-queued commits — check before re-implementing "lost" work.
 - [Parallel-task merges](parallel-task-merges.md) — two branches often fix the SAME gap; auto-merge stacks both (doubled registrations/type fields/functions) without conflicts — grep both-touched files, re-verify renamed helpers.
 - [Frontend unit tests](frontend-unit-tests.md) — vitest must never load the env-guarded vite.config (separate vitest.config); tsc excludes tests; extend the single "test" validation command.
