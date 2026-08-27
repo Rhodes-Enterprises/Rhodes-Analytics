@@ -106,6 +106,18 @@
  * GA users across all properties below AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL)
  * are exempt so they cannot false-positive.
  *
+ * That exemption leaves one hole: if the GA export DIES outright (zero rows
+ * loaded for days or weeks), the traffic numbers shrink toward zero and
+ * every check still passes — 0=0 comparisons, or the quiet-window
+ * exemptions themselves. GA data normally lags about a week behind today,
+ * so "rows exist today" can never be the test; the default view therefore
+ * also runs the shared GA freshness guard (auditGaFreshness in
+ * ga-property-guard.ts, once per audit pass): it fails when the newest
+ * GOOGLE_ANALYTICS_DATE loaded — overall, or for any expected property —
+ * falls more than AUDIT_GA_MAX_LAG_DAYS days behind today (default 14,
+ * comfortably above the normal ~7-8 day load lag), reporting the max date
+ * found per property.
+ *
  * Goal-derived numbers are checked in every scenario too (auditGoals): the
  * KPI row's salesGoal / salesTdGoal, each traffic-matrix cell's
  * fullSpanGoal / toDateGoal, and the PTG figures derived from them. The
@@ -164,6 +176,10 @@
  *                        minimum total GA users (across all properties) for
  *                        the GA property label-drift guard to judge the
  *                        window (default 10)
+ *   AUDIT_GA_MAX_LAG_DAYS
+ *                        maximum days MAX(GOOGLE_ANALYTICS_DATE) may trail
+ *                        today before the GA freshness guard fails the
+ *                        audit (default 14; normal load lag is ~7-8 days)
  *   AUDIT_SF_CONCURRENCY max in-flight baseline Snowflake queries (default 1:
  *                        serialized, respecting the proxy's ~10 RPS limit)
  *   AUDIT_SF_MAX_ATTEMPTS
@@ -404,7 +420,17 @@ interface Scenario {
    *   strict fiscal isolation — every target must be EXACTLY zero, so goals
    *   leaking in from another fiscal year or goal type fail immediately.
    */
+
   pinTargets?: boolean;
+
+  /**
+   * Run the shared GA freshness guard: fail when the newest loaded
+   * GOOGLE_ANALYTICS_DATE (overall or per expected property) trails today
+   * by more than AUDIT_GA_MAX_LAG_DAYS — the signature of a dead GA export,
+   * which the quiet-window exemptions above would otherwise wave through.
+   * Range-independent, so default view only: once per audit pass.
+   */
+  withGaFreshnessGuard?: boolean;
 }
 
 interface Frag {
@@ -805,6 +831,17 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   if (scenario.pinTargets) {
     const targetsOk = await auditTargets(overview, expStart, expEnd, expTo);
     if (!targetsOk) failed = true;
+  }
+
+  // ---- GA freshness guard ----
+  // The property guard above (and every user-count check) is blind to the
+  // export simply stopping: zero rows loaded means 0=0 comparisons and
+  // quiet-window exemptions all keep passing while the dashboards' traffic
+  // numbers drain toward zero. The shared freshness guard fails instead
+  // when the newest loaded GA row falls further behind today than the
+  // normal ~7-8 day load lag allows (AUDIT_GA_MAX_LAG_DAYS, default 14).
+  if (scenario.withGaFreshnessGuard) {
+    if (!(await auditGaFreshness())) failed = true;
   }
 
   return {
@@ -1416,6 +1453,7 @@ async function main() {
       withRatios: true,
       withChannelLabelGuard: true,
       withGaPropertyGuard: true,
+      withGaFreshnessGuard: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
