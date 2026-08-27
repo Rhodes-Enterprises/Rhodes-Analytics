@@ -26,15 +26,29 @@
  *   actually present for that year from Snowflake and FAILS LOUDLY when
  *   the prior year has no RL goal data at all — otherwise every goal
  *   check would compare 0 == 0 and pass while covering nothing.
+ * - Funnel table baselines: every cell of the funnel totals table
+ *   (webTraffic/leads/firstTours/moveIns plus the online/onsite lead and
+ *   tour splits) is recomputed with the audit's own SQL — GA session starts
+ *   from FCT_GOOGLE_ANALYTICS_EVENT_LEVEL, stage counts from DM_CONTACTS
+ *   (stage date columns + the RL community-of-interest lead definition),
+ *   and stage goals from DM_GOALS (RL_* stage goal types with the FY2025
+ *   RL_Leads/RL_Tours fallback). This is what catches the totals and
+ *   monthly queries drifting TOGETHER (wrong date column, dropped filter),
+ *   which the chart-vs-table consistency net below cannot see. BOTH
+ *   literal channels (Online, Onsite) always get these baselines: the
+ *   channel filter swaps in per-channel goal types and blanks the opposite
+ *   channel's targets, so funnel-only variants cover whichever literal
+ *   channel(s) the busiest-channel scenario does not visit — the busiest
+ *   channel can be a third label entirely (e.g. 'Unknown').
  * - Chart-vs-table consistency (funnel trend): the Monthly Trends chart's
  *   per-stage series (web traffic, leads, first tours, move-ins) and the
  *   funnel totals table in the SAME response are fed by different queries,
  *   so every scenario also asserts, per stage, Σ monthly actuals ==
  *   funnel.<stage>.actual and Σ monthly goals == funnel.<stage>.fullSpanGoal
  *   (float tolerance only — both sides aggregate the same data, so the
- *   audit-wide percentage tolerance would mask real drift). Consistency-only
- *   channel variants guarantee BOTH Online and Onsite are exercised even
- *   though the baseline scenarios only visit the busiest channel.
+ *   audit-wide percentage tolerance would mask real drift). The funnel-only
+ *   channel variants run this net too, so BOTH Online and Onsite are
+ *   exercised even though the full scenarios only visit the busiest channel.
  * - Channel label-drift guard (default view): the online/onsite lease
  *   baselines here hardcode the SAME 'Online'/'Onsite' literals the API
  *   keys its channel split on (DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL).
@@ -147,7 +161,11 @@ interface LeasingResponse {
   funnel: {
     webTraffic: FunnelCell;
     leads: FunnelCell;
+    onlineLeads: FunnelCell;
+    onsiteLeads: FunnelCell;
     firstTours: FunnelCell;
+    onlineFirstTours: FunnelCell;
+    onsiteFirstTours: FunnelCell;
     moveIns: FunnelCell;
   };
   matrix: {
@@ -210,11 +228,17 @@ interface Scenario {
    */
   requireGoalData?: boolean;
   /**
-   * Run ONLY the funnel trend-vs-totals consistency checks (no Snowflake
-   * baselines). Used to cover the channel not visited by the baseline
-   * scenarios without doubling the whole audit's query load.
+   * Run ONLY the funnel table Snowflake baselines and the funnel
+   * trend-vs-totals consistency checks, skipping the lease KPI / matrix /
+   * community / monthly baselines. Used to guarantee BOTH literal channels
+   * (Online, Onsite) get full funnel baseline coverage — the channel filter
+   * swaps per-channel goal types and blanks the opposite channel's targets,
+   * semantics a consistency check between two API-derived series cannot
+   * prove — without doubling the whole audit's query load. Needed because
+   * the representative "busiest channel" scenario may land on a third
+   * label (e.g. 'Unknown'), leaving both literal channels unvisited.
    */
-  consistencyOnly?: boolean;
+  funnelOnly?: boolean;
   /**
    * Fail the funnel trend consistency check when every stage sums to zero
    * on both the actuals side and the goals side. Set on scenarios whose
@@ -314,22 +338,25 @@ async function baselineLeaseCounts(
   };
 }
 
+/** RL goal types actually present in DM_GOALS for one fiscal year. */
+async function fetchRlGoalTypes(fiscalYear: number): Promise<Set<string>> {
+  const rows = await querySnowflake<{ GOAL_TYPE: string }>(
+    "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ? AND GOAL_TYPE ILIKE 'RL\\_%'",
+    [fiscalYear],
+  );
+  return new Set(rows.map((r) => r.GOAL_TYPE));
+}
 /**
  * Resolve RL lease goal types independently of the API, per the documented
  * data model: FY2026+ uses RL_Leases_Ratified (+ Online/Onsite splits);
  * FY2025 only had RL_Leases as the total.
  */
-async function resolveGoalTypes(fiscalYear: number): Promise<{
+function resolveGoalTypes(available: Set<string>): {
   total?: string;
   online?: string;
   onsite?: string;
-}> {
-  const rows = await querySnowflake<{ GOAL_TYPE: string }>(
-    "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ? AND GOAL_TYPE ILIKE 'RL\\_%'",
-    [fiscalYear],
-  );
-  const set = new Set(rows.map((r) => r.GOAL_TYPE));
-  const first = (...cands: string[]) => cands.find((c) => set.has(c));
+} {
+  const first = (...cands: string[]) => cands.find((c) => available.has(c));
   return {
     total: first("RL_Leases_Ratified", "RL_Leases"),
     online: first("RL_Online_Leases_Ratified"),
@@ -355,75 +382,48 @@ const EMPTY_GOAL_SUMS: GoalSums = {
 };
 
 /**
- * Goal baselines for every needed goal type in ONE grouped query, honoring
- * the community filter. Grouping DM_GOALS by (type, development, month)
- * lets the same round trip serve the KPI/matrix sums, the monthly-series
- * goal points, and the per-community goal columns — each is an exact
- * rollup of the (type, dev, month) partition, so the values equal what the
- * old one-query-per-consumer scalars computed (goals are fractional
- * daily-distributed values; rolling groups up in JS only reorders float
- * additions, dust far inside the audit tolerance). An undefined goal type
- * (e.g. the opposite channel under a channel filter, or a split that
- * doesn't exist for the fiscal year) never touches the query and reads as
- * zeros/empty, exactly like the old early-return.
+ * Full-span + to-date goal sums for several goal types in ONE query (the
+ * funnel needs up to 6 types per scenario; grouping keeps the audit under
+ * the Snowflake proxy rate limit).
  */
 async function baselineGoalsByType(
-  goalTypes: (string | undefined)[],
+  goalTypes: string[],
   fiscalYear: number,
   startDate: string,
   endDate: string,
   toDate: string,
   community?: string,
-): Promise<(goalType: string | undefined) => GoalSums> {
-  const types = [...new Set(goalTypes.filter((t): t is string => !!t))];
-  const byType = new Map<string, GoalSums>();
-  if (types.length) {
-    const binds: (string | number)[] = [toDate, fiscalYear, ...types, startDate, endDate];
-    let extra = "";
-    if (community) {
-      extra = " AND DEVELOPMENT_NAME = ?";
-      binds.push(community);
-    }
-    const rows = await querySnowflake<{
-      GT: string;
-      DEV: string | null;
-      M: number;
-      FULL_SPAN: number | null;
-      TO_DATE: number | null;
-    }>(
-      `SELECT GOAL_TYPE AS GT, DEVELOPMENT_NAME AS DEV, MONTH(BUDGET_DATE) AS M,
-              SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-       FROM DM_GOALS
-       WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(", ")})
-         AND BUDGET_DATE BETWEEN ? AND ?${extra}
-       GROUP BY 1, 2, 3`,
-      binds,
-    );
-    for (const row of rows) {
-      let g = byType.get(row.GT);
-      if (!g) {
-        g = { fullSpan: 0, toDate: 0, byMonth: new Map(), byCommunity: new Map() };
-        byType.set(row.GT, g);
-      }
-      const full = Number(row.FULL_SPAN) || 0;
-      const td = Number(row.TO_DATE) || 0;
-      const month = Number(row.M);
-      g.fullSpan += full;
-      g.toDate += td;
-      g.byMonth.set(month, (g.byMonth.get(month) ?? 0) + full);
-      if (row.DEV) {
-        const c = g.byCommunity.get(row.DEV) ?? { fullSpan: 0, toDate: 0 };
-        c.fullSpan += full;
-        c.toDate += td;
-        g.byCommunity.set(row.DEV, c);
-      }
-    }
+): Promise<Map<string, { fullSpan: number; toDate: number }>> {
+  if (goalTypes.length === 0) return new Map();
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
+  let extra = "";
+  if (community) {
+    extra = " AND DEVELOPMENT_NAME = ?";
+    binds.push(community);
   }
-  return (goalType) => (goalType && byType.get(goalType)) || EMPTY_GOAL_SUMS;
+  const rows = await querySnowflake<{
+    GOAL_TYPE: string;
+    FULL_SPAN: number;
+    TO_DATE: number;
+  }>(
+    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
+            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
+       AND BUDGET_DATE BETWEEN ? AND ?${extra}
+     GROUP BY 1`,
+    binds,
+  );
+  return new Map(
+    rows.map((r) => [
+      r.GOAL_TYPE,
+      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
+    ]),
+  );
 }
 
-// ---------- Comparison helpers ----------
-
+type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
 let failures = 0;
 
 function close(a: number, b: number): boolean {
@@ -491,19 +491,23 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     return; // baselines against a wrong range would be meaningless
   }
 
-  if (scenario.consistencyOnly) {
-    console.log("-- funnel trend vs totals (consistency-only variant)");
-    auditFunnelTrend(resp, scenario);
-    return;
-  }
-
   const fiscalYear = Number(expStart.slice(0, 4));
   if (resp.fiscalYear !== fiscalYear) {
     failures++;
     console.error(`  FAIL fiscalYear: api=${resp.fiscalYear} expected=${fiscalYear}`);
   }
 
-  const gt = await resolveGoalTypes(fiscalYear);
+  if (scenario.funnelOnly) {
+    const availableGoalTypes = await fetchRlGoalTypes(fiscalYear);
+    console.log("-- funnel table (funnel-only variant)");
+    await auditFunnel(resp, f, scenario, availableGoalTypes, fiscalYear, expStart, expEnd, expTo);
+    console.log("-- funnel trend vs totals");
+    auditFunnelTrend(resp, scenario);
+    return;
+  }
+
+  const availableGoalTypes = await fetchRlGoalTypes(fiscalYear);
+  const gt = resolveGoalTypes(availableGoalTypes);
   console.log(
     `Resolved goal types (FY${fiscalYear}): total=${gt.total ?? "(none)"}, ` +
       `online=${gt.online ?? "(none)"}, onsite=${gt.onsite ?? "(none)"}`,
@@ -591,11 +595,16 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   console.log("-- monthly");
   await auditMonthly(resp, f, expStart, expTo, gTotal.byMonth);
 
+  // ---- Funnel table vs Snowflake baselines ----
+  console.log("-- funnel table");
+  await auditFunnel(resp, f, scenario, availableGoalTypes, fiscalYear, expStart, expEnd, expTo);
+
   // ---- Funnel trend vs totals (chart-vs-table consistency) ----
   console.log("-- funnel trend vs totals");
   auditFunnelTrend(resp, scenario);
 }
 
+type FunnelCellName = keyof LeasingResponse["funnel"];
 /**
  * Channel label-drift guard (mirrors the chLabels guard in
  * audit-dashboard.ts).
@@ -1008,16 +1017,19 @@ async function main() {
     },
   ];
 
-  // The funnel trend-vs-totals net must cover BOTH channels: a channel
-  // filter swaps in per-channel stage goal types (RL_Online_Leads, ...), so
-  // a regression can hit one channel only. The baseline scenarios visit
-  // just the busiest channel — add consistency-only variants for the rest.
+  // The funnel checks must cover BOTH literal channels: a channel filter
+  // swaps in per-channel stage goal types (RL_Online_Leads, ...) and blanks
+  // the opposite channel's targets, so a regression can hit one channel
+  // only — and the "busiest channel" scenario may land on a third label
+  // (e.g. 'Unknown'), visiting neither. Add funnel-only variants (full
+  // funnel Snowflake baselines + trend consistency) for whichever literal
+  // channels the scenarios above miss.
   for (const ch of ["Online", "Onsite"]) {
     if (!scenarios.some((s) => s.filters.channel === ch)) {
       scenarios.push({
-        name: `channel filter (${ch}) — funnel trend consistency only`,
+        name: `channel filter (${ch}) — funnel baselines + trend consistency`,
         filters: { channel: ch },
-        consistencyOnly: true,
+        funnelOnly: true,
       });
     }
   }
@@ -1033,8 +1045,11 @@ async function main() {
         "baselines or internal consistency. Likely causes: a filter bound to " +
         "the wrong column, missing TRIM on community, wrong goal-type " +
         "resolution, ignored date parameters, stale cached data, relabeled " +
-        "channel values (see any chLabels failure above), or the monthly " +
-        "trend queries drifting from the funnel totals queries.",
+        "channel values (see any chLabels failure above), the monthly " +
+        "trend queries drifting from the funnel totals queries, or a funnel " +
+        "stage query drifting from its GA/DM_CONTACTS/DM_GOALS definition " +
+        "(wrong stage date column, dropped lead definition, or broken " +
+        "channel goal semantics).",
     );
     process.exit(1);
   }
@@ -1042,7 +1057,283 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+/**
+ * Full-span + to-date goal sums for several goal types in ONE query (the
+ * funnel needs up to 6 types per scenario; grouping keeps the audit under
+ * the Snowflake proxy rate limit).
+ */
+async function baselineGoalsByType(
+  goalTypes: string[],
+  fiscalYear: number,
+  startDate: string,
+  endDate: string,
+  toDate: string,
+  community?: string,
+): Promise<Map<string, { fullSpan: number; toDate: number }>> {
+  if (goalTypes.length === 0) return new Map();
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
+  let extra = "";
+  if (community) {
+    extra = " AND DEVELOPMENT_NAME = ?";
+    binds.push(community);
+  }
+  const rows = await querySnowflake<{
+    GOAL_TYPE: string;
+    FULL_SPAN: number;
+    TO_DATE: number;
+  }>(
+    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
+            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
+       AND BUDGET_DATE BETWEEN ? AND ?${extra}
+     GROUP BY 1`,
+    binds,
+  );
+  return new Map(
+    rows.map((r) => [
+      r.GOAL_TYPE,
+      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
+    ]),
+  );
+}
+
+/**
+ * Contact-stage actual baseline from DM_CONTACTS, split by channel:
+ * - leads: contacts CREATED in range that have an RL community of interest
+ *   (non-null, not '' or '(No Value)')
+ * - firstTours: first RL tour date in range (no lead-definition filter)
+ * - moveIns: first RL move-in date in range (timestamp column, so TO_DATE
+ *   brings the comparison to day precision like the dashboard)
+ * total sums ALL channel groups (including contacts with no channel label);
+ * online/onsite are the 'Online'/'Onsite' groups only.
+ */
+async function baselineContactStage(
+  stage: "leads" | "firstTours" | "moveIns",
+  startDate: string,
+  toDate: string,
+  f: ScenarioFilters,
+): Promise<{ total: number; online: number; onsite: number }> {
+  const dateExpr = {
+    leads: "CONTACT_CREATE_DATE",
+    firstTours: "RL_MIN_FIRST_TOUR_DATE",
+    moveIns: "TO_DATE(RL_MIN_MOVE_IN_DATE)",
+  }[stage];
+  const binds: (string | number)[] = [startDate, toDate];
+  const parts: string[] = [];
+  if (stage === "leads") {
+    parts.push(
+      "RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+    );
+  }
+  if (f.community) {
+    parts.push("TRIM(RL_COMMUNITY_OF_INTEREST) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const rows = await querySnowflake<{ CH: string | null; N: number }>(
+    `SELECT ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
+     FROM DM_CONTACTS
+     WHERE ${dateExpr} BETWEEN ? AND ?${extra}
+     GROUP BY 1`,
+    binds,
+  );
+  let total = 0;
+  let online = 0;
+  let onsite = 0;
+  for (const r of rows) {
+    const n = Number(r.N) || 0;
+    total += n;
+    if (r.CH === "Online") online += n;
+    else if (r.CH === "Onsite") onsite += n;
+  }
+  return { total, online, onsite };
+}
+
+/**
+ * Web-traffic actual baseline: GA session starts for the Rhodes Living web
+ * property. The GA source has no online/onsite channel column, so a channel
+ * filter must NOT change this number — only community and dates apply.
+ */
+async function baselineTraffic(
+  startDate: string,
+  toDate: string,
+  community?: string,
+): Promise<number> {
+  const binds: (string | number)[] = [startDate, toDate];
+  let extra = "";
+  if (community) {
+    extra = " AND MATCHED_DEVELOPMENT_NAME = ?";
+    binds.push(community);
+  }
+  return countScalar(
+    `SELECT COUNT(*) AS N
+     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+     WHERE PROPERTY = 'Rhodes Living'
+       AND IS_SESSION_START = 'Yes'
+       AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${extra}`,
+    binds,
+  );
+}
+
+/**
+ * RL funnel-stage goal types per the documented data model, newest naming
+ * first. FY2025 only had RL_Leads / RL_Tours (no traffic or move-in goals,
+ * no channel splits); FY2026 added RL_Web_Traffic, RL_First_Tours
+ * (+ RL_Online_/RL_Onsite_ splits for leads and tours) and RL_Move_Ins.
+ * Deliberately restated here rather than imported from the API's data layer
+ * so a silent change to the API's candidate lists diverges loudly.
+ */
+const FUNNEL_GOAL_CANDIDATES: Record<FunnelStage, Record<GoalMetric, string[]>> = {
+  webTraffic: { total: ["RL_Web_Traffic"], online: [], onsite: [] },
+  leads: {
+    total: ["RL_Leads"],
+    online: ["RL_Online_Leads"],
+    onsite: ["RL_Onsite_Leads"],
+  },
+  firstTours: {
+    total: ["RL_First_Tours", "RL_Tours"],
+    online: ["RL_Online_First_Tours"],
+    onsite: ["RL_Onsite_First_Tours"],
+  },
+  moveIns: { total: ["RL_Move_Ins"], online: [], onsite: [] },
+};
+
+/**
+ * Compare every funnel-table cell (actual, fullSpanGoal, toDateGoal) against
+ * independent Snowflake baselines. The chart-vs-table net (auditFunnelTrend)
+ * only proves the monthly series and the table AGREE; if their queries
+ * drifted together — a wrong date column or a dropped filter applied to
+ * both — the page would show wrong numbers and still pass. These baselines
+ * recompute the cells from the sources directly.
+ *
+ * Channel-filter goal semantics (documented dashboard behavior) are
+ * mirrored: a channel filter swaps each cell's goal to that channel's goal
+ * type, the OPPOSITE channel's cells get no target (goal 0 on both sides,
+ * actual 0 because the stage rows are filtered to the selected channel),
+ * and stages without channel-split goals (traffic, move-ins) lose their
+ * target too. Traffic ACTUALS ignore the channel filter entirely — the GA
+ * source has no channel column.
+ */
+async function auditFunnel(
+  resp: LeasingResponse,
+  f: ScenarioFilters,
+  scenario: Scenario,
+  availableGoalTypes: Set<string>,
+  fiscalYear: number,
+  startDate: string,
+  endDate: string,
+  toDate: string,
+): Promise<void> {
+  if (!resp.funnel) {
+    failures++;
+    console.error("  FAIL response is missing the funnel table — funnel baselines cannot run");
+    return;
+  }
+
+  // Mirror of the dashboard's channel-scoped goal rule: under a channel
+  // filter, "total" cells compare against that channel's goal and the
+  // opposite channel's cells have no goal at all.
+  const effMetric = (metric: GoalMetric): GoalMetric | null => {
+    if (f.channel === "Online") return metric === "onsite" ? null : "online";
+    if (f.channel === "Onsite") return metric === "online" ? null : "onsite";
+    return metric;
+  };
+  const cellGoalType = (stage: FunnelStage, metric: GoalMetric): string | undefined => {
+    const eff = effMetric(metric);
+    return eff ? resolveFunnelGoalType(availableGoalTypes, stage, eff) : undefined;
+  };
+
+  const typeByCell = new Map<FunnelCellName, string | undefined>(
+    FUNNEL_CELLS.map((c) => [c.name, cellGoalType(c.stage, c.metric)]),
+  );
+  const uniqueTypes = [
+    ...new Set([...typeByCell.values()].filter((t): t is string => Boolean(t))),
+  ];
+  console.log(
+    `Resolved funnel goal types (FY${fiscalYear}): ` +
+      (uniqueTypes.length ? uniqueTypes.join(", ") : "(none)"),
+  );
+
+  const [goalSums, traffic, leads, tours, moveIns] = await Promise.all([
+    baselineGoalsByType(uniqueTypes, fiscalYear, startDate, endDate, toDate, f.community),
+    baselineTraffic(startDate, toDate, f.community),
+    baselineContactStage("leads", startDate, toDate, f),
+    baselineContactStage("firstTours", startDate, toDate, f),
+    baselineContactStage("moveIns", startDate, toDate, f),
+  ]);
+
+  const actualByCell: Record<FunnelCellName, number> = {
+    webTraffic: traffic,
+    leads: leads.total,
+    onlineLeads: leads.online,
+    onsiteLeads: leads.onsite,
+    firstTours: tours.total,
+    onlineFirstTours: tours.online,
+    onsiteFirstTours: tours.onsite,
+    moveIns: moveIns.total,
+  };
+
+  for (const c of FUNNEL_CELLS) {
+    const cell = resp.funnel[c.name];
+    if (!cell) {
+      failures++;
+      console.error(`  FAIL funnel.${c.name} missing from the response`);
+      continue;
+    }
+    const gtName = typeByCell.get(c.name);
+    const goal = (gtName && goalSums.get(gtName)) || { fullSpan: 0, toDate: 0 };
+    check(`funnel.${c.name}.actual`, cell.actual, actualByCell[c.name]);
+    check(`funnel.${c.name}.fullSpanGoal`, cell.fullSpanGoal, goal.fullSpan);
+    check(`funnel.${c.name}.toDateGoal`, cell.toDateGoal, goal.toDate);
+  }
+
+  // The prior-year scenario exists to pin the FY2025 goal-type fallback,
+  // which for the funnel means RL_Leads and RL_Tours must resolve and sum
+  // to something. Without that guard, losing the fallback would make both
+  // the API and the baseline show 0 goals and every check would "pass"
+  // while testing nothing.
+  if (scenario.requireGoalData) {
+    for (const stage of ["leads", "firstTours"] as const) {
+      const gtName = cellGoalType(stage, "total");
+      const sum = (gtName && goalSums.get(gtName)?.fullSpan) || 0;
+      if (!gtName || sum === 0) {
+        failures++;
+        console.error(
+          `  FAIL no ${stage} goal data for FY${fiscalYear}: resolved goal type=` +
+            `${gtName ?? "(none)"}, full-span sum=${sum} — this scenario pins the ` +
+            "prior-year funnel goal fallback (RL_Leads/RL_Tours), so empty goal " +
+            "data means the fallback is NOT being tested (goals missing from " +
+            "DM_GOALS, or the audit's candidate lists need updating)",
+        );
+      }
+    }
+  }
+}
+
+function resolveFunnelGoalType(
+  available: Set<string>,
+  stage: FunnelStage,
+  metric: GoalMetric,
+): string | undefined {
+  return FUNNEL_GOAL_CANDIDATES[stage][metric].find((c) => available.has(c));
+}
+
+/** Every cell of the funnel totals table and which stage/metric goal it shows. */
+const FUNNEL_CELLS: { name: FunnelCellName; stage: FunnelStage; metric: GoalMetric }[] = [
+  { name: "webTraffic", stage: "webTraffic", metric: "total" },
+  { name: "leads", stage: "leads", metric: "total" },
+  { name: "onlineLeads", stage: "leads", metric: "online" },
+  { name: "onsiteLeads", stage: "leads", metric: "onsite" },
+  { name: "firstTours", stage: "firstTours", metric: "total" },
+  { name: "onlineFirstTours", stage: "firstTours", metric: "online" },
+  { name: "onsiteFirstTours", stage: "firstTours", metric: "onsite" },
+  { name: "moveIns", stage: "moveIns", metric: "total" },
+];
+
+type GoalMetric = "total" | "online" | "onsite";

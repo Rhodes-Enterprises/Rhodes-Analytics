@@ -85,7 +85,13 @@ if (!apiBase) {
   const logFd = openSync(SERVER_LOG, "w");
   server = spawn("node", ["--enable-source-maps", "dist/index.mjs"], {
     cwd: pkgDir,
-    env: { ...process.env, PORT: port, NODE_ENV: "development" },
+    // WARM_DASHBOARD_CACHE=0: the boot-time cache warm-up fires the same
+    // Snowflake queries the audits are about to fire, and together they
+    // burst past the connector proxy's ~10 req/s limit — the first audit
+    // then sees 429-exhausted 502s from a server that is healthy in normal
+    // use. A throwaway audit server gains nothing from warm caches (each
+    // audit's first fetch warms exactly what it checks), so keep boot quiet.
+    env: { ...process.env, PORT: port, NODE_ENV: "development", WARM_DASHBOARD_CACHE: "0" },
     stdio: ["ignore", logFd, logFd],
   });
 

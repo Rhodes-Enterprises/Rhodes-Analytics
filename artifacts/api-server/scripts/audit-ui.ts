@@ -107,6 +107,7 @@ interface BreakdownRow {
 }
 interface OverviewPayload {
   appliedRange: { startDate: string; endDate: string; toDate: string; target: string };
+
   kpis: {
     salesGoal: number;
     salesTdGoal: number;
@@ -114,16 +115,19 @@ interface OverviewPayload {
     ptgVariance: number;
     ptgPercent: number | null;
   };
+
   trafficMatrix: {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
-    /** Actual-only bucket for rows with no Online/Onsite label (no goals exist for it). */
     unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
     newWebsiteUsers: number;
   };
+
   divisions: BreakdownRow[];
+
   developments: BreakdownRow[];
+
   ratios: { name: string; group: string; goal: number | null; actual: number; ptgPercent: number | null }[];
 }
 
@@ -538,17 +542,7 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     return;
   }
   const m = p.trafficMatrix;
-  // Goal/PTG columns may be null for actual-only rows (rendered as a dash) —
-  // the unknown-channel rows below have no goals by design.
-  const bindings: Record<
-    string,
-    {
-      fullSpanGoal: number | null;
-      toDateGoal: number | null;
-      actual: number;
-      ptgPercent: number | null;
-    }
-  > = {
+  const bindings: Record<string, MatrixCell> = {
     "Website Users": m.online.websiteUsers,
     "Online Leads": m.online.leads,
     "Online Tours": m.online.tours,
@@ -559,17 +553,17 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };
-  // The page renders the unknown-channel section only when the bucket has
-  // activity (TrafficMatrix's hasUnknown) — mirror that exactly: bind the
-  // rows when they must render, omit them when they must not (an "Unknown …"
-  // row that renders for an empty bucket then fails as an unmatched label,
-  // and a missing row for a busy bucket fails the completeness pass).
-  const u = m.unknown;
-  if (u && (u.leads > 0 || u.tours > 0 || u.sales > 0)) {
-    bindings["Unknown Leads"] = { fullSpanGoal: null, toDateGoal: null, actual: u.leads, ptgPercent: null };
-    bindings["Unknown Tours"] = { fullSpanGoal: null, toDateGoal: null, actual: u.tours, ptgPercent: null };
-    bindings["Unknown Sales"] = { fullSpanGoal: null, toDateGoal: null, actual: u.sales, ptgPercent: null };
-  }
+  // Unknown-channel rows are actuals-only (no goals exist for the bucket):
+  // the page renders "–" in every goal/PTG column, the actual from
+  // trafficMatrix.unknown, and a "<n>% of <total>" share subtitle. The whole
+  // section is hidden when the bucket is all zero.
+  const unknownBindings: Record<string, { actual: number; total: number; totalName: string }> = {
+    "Unknown Leads": { actual: m.unknown.leads, total: m.total.leads.actual, totalName: "total leads" },
+    "Unknown Tours": { actual: m.unknown.tours, total: m.total.tours.actual, totalName: "total tours" },
+    "Unknown Sales": { actual: m.unknown.sales, total: p.kpis.grossSales, totalName: "gross sales" },
+  };
+  const hasUnknown = m.unknown.leads > 0 || m.unknown.tours > 0 || m.unknown.sales > 0;
+
   const missing = new Set<string>();
   const col = (h: string) => columnIndex("traffic matrix", dom.matrix!.headers, h, missing);
   const cFull = col("Full Span Goal");
@@ -578,7 +572,47 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
   const cPtg = col("PTG %");
 
   const seen = new Set<string>();
+  const seenUnknown = new Set<string>();
   for (const row of dom.matrix.rows) {
+    const unk = unknownBindings[row.label];
+    if (unk) {
+      seenUnknown.add(row.label);
+      if (!hasUnknown) {
+        fail(
+          `traffic matrix · "${row.label}"`,
+          "row rendered although the api unknown-channel bucket is all zero (section should be hidden)",
+        );
+        continue;
+      }
+      if (cFull >= 0)
+        checkCell(`matrix "${row.label}" · Full Span Goal`, row.cells[cFull], null, { percent: false });
+      if (cToDate >= 0)
+        checkCell(`matrix "${row.label}" · To Date Goal`, row.cells[cToDate], null, { percent: false });
+      if (cActual >= 0)
+        checkCell(`matrix "${row.label}" · Actual`, row.cells[cActual], unk.actual, { percent: false });
+      if (cPtg >= 0)
+        checkCell(`matrix "${row.label}" · PTG %`, row.cells[cPtg], null, { percent: true });
+      // Share subtitle mirrors the page arithmetic: actual/total ×100,
+      // "<1" below 1%, else rounded to a whole percent; absent when the
+      // actual or the total is zero.
+      const pct = unk.total > 0 && unk.actual > 0 ? (unk.actual / unk.total) * 100 : null;
+      const expectedSub =
+        pct == null ? null : `${pct < 1 ? "<1" : String(Math.round(pct))}% of ${unk.totalName}`;
+      const sub = row.sub;
+      if (expectedSub == null) {
+        if (sub != null && sub.trim() !== "") {
+          fail(
+            `matrix "${row.label}" · share subtitle`,
+            `expected no subtitle (actual or total is 0) but page rendered "${sub.trim()}"`,
+          );
+        } else {
+          ok(`matrix "${row.label}" · share subtitle`, "no subtitle (actual or total is 0)");
+        }
+      } else {
+        checkText(`matrix "${row.label}" · share subtitle`, sub, expectedSub);
+      }
+      continue;
+    }
     const cell = bindings[row.label];
     if (!cell) {
       fail(`traffic matrix · "${row.label}"`, "row label does not match any audited API metric");
@@ -607,6 +641,16 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
   for (const label of Object.keys(bindings)) {
     if (!seen.has(label)) {
       fail(`traffic matrix · "${label}"`, "expected row is missing from the rendered table");
+    }
+  }
+  if (hasUnknown) {
+    for (const label of Object.keys(unknownBindings)) {
+      if (!seenUnknown.has(label)) {
+        fail(
+          `traffic matrix · "${label}"`,
+          "expected row is missing (api unknown-channel bucket is nonzero)",
+        );
+      }
     }
   }
 }
