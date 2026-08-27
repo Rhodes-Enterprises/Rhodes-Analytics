@@ -25,5 +25,7 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
   // Fire-and-forget: pre-populate dashboard caches for the default view so
   // the first page load doesn't pay for cold Snowflake queries.
-  warmDefaultDashboardCaches(logger);
+  warmDefaultDashboardCaches(logger).catch((err) => {
+    logger.error({ err }, "Dashboard cache warm-up crashed");
+  });
 });

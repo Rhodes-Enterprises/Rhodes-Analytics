@@ -254,62 +254,137 @@ function appliedRange(filters: DashboardFilters) {
 }
 
 /**
+ * Every endpoint the startup warm-up pre-computes, paired with the exact HTTP
+ * request path a default (no-filter) visit issues. The warm job and the
+ * request path MUST stay in lockstep: warming only helps if the job populates
+ * the very cache keys the route handler later reads for that path.
+ * scripts/audit-warmup.ts exercises BOTH sides of this table and fails when
+ * they diverge — so add new warmed endpoints here, not ad-hoc inside
+ * warmDefaultDashboardCaches, and they are covered automatically.
+ */
+export interface WarmedEndpoint {
+  name: string;
+  /** Path (incl. query string) of the default request this job pre-warms. */
+  requestPath: string;
+  run: (filters: DashboardFilters) => Promise<unknown>;
+}
+
+export const WARMED_ENDPOINTS: WarmedEndpoint[] = [
+  // Overview is the landing page, so warm it first: the first visitor after
+  // a restart almost always hits these three endpoints.
+  {
+    name: "overview-filters",
+    requestPath: "/api/dashboards/overview-with-targets/filters",
+    run: () => getFilterOptions(),
+  },
+  {
+    name: "overview-with-targets",
+    requestPath: "/api/dashboards/overview-with-targets",
+    run: (filters) => getOverviewWithTargets(filters),
+  },
+  {
+    name: "overview-yoy",
+    requestPath: "/api/dashboards/overview-with-targets/yoy",
+    run: (filters) => getYearOverYear(filters),
+  },
+  {
+    name: "website-traffic",
+    requestPath: "/api/dashboards/website-traffic",
+    run: (filters) => getWebsiteTraffic(filters),
+  },
+  ...FUNNEL_METRICS.map(
+    (m): WarmedEndpoint => ({
+      name: `funnel:${m}`,
+      requestPath: `/api/dashboards/funnel?metric=${m}`,
+      run: (filters) => getFunnelMetric(m, filters),
+    }),
+  ),
+  {
+    name: "ehi-goals",
+    requestPath: "/api/dashboards/ehi-goals",
+    run: (filters) => getEhiGoals(ehiGoalsYearFilters(filters)),
+  },
+  {
+    name: "communities",
+    requestPath: "/api/dashboards/communities",
+    run: () => getCommunityList(),
+  },
+  // Leasing (current year to date) — warmed after Overview since Overview is
+  // the landing page. Leasing has its own filter defaults: the warm jobs use
+  // buildLeasingFilters({}) exactly like a no-param request to its routes.
+  {
+    name: "leasing-filters",
+    requestPath: "/api/dashboards/leasing/filters",
+    run: () => getLeasingFilterOptions(),
+  },
+  {
+    name: "leasing",
+    requestPath: "/api/dashboards/leasing",
+    run: () => getLeasingDashboard(buildLeasingFilters({})),
+  },
+];
+
+export interface WarmupResult {
+  warmed: string[];
+  failed: string[];
+  /** True when WARM_DASHBOARD_CACHE disabled warming entirely. */
+  skipped: boolean;
+  elapsedMs: number;
+}
+
+/**
  * Pre-populates the in-memory query cache for the default (current-quarter)
  * view of the Overview page, each marketing dashboard, and the Leasing page
  * (current year to date) so the first visitor after a restart gets warm
- * responses. Fire-and-forget; failures only mean a cold first load. Disable
- * with WARM_DASHBOARD_CACHE=0 (or "false").
+ * responses. Failures only mean a cold first load.
+ * Disable with WARM_DASHBOARD_CACHE=0 (or "false").
+ *
+ * The production caller (index.ts) intentionally does not await this; the
+ * returned summary exists so the warm-up audit can wait for completion and
+ * verify the warmed keys are the ones real default requests read.
  */
-export function warmDefaultDashboardCaches(logger: { info: Function; warn: Function }): void {
+export async function warmDefaultDashboardCaches(logger: {
+  info: Function;
+  warn: Function;
+}): Promise<WarmupResult> {
   const flag = process.env.WARM_DASHBOARD_CACHE;
-  if (flag === "0" || flag === "false") return;
+  if (flag === "0" || flag === "false") {
+    return { warmed: [], failed: [], skipped: true, elapsedMs: 0 };
+  }
   const filters = buildFilters({});
   const started = Date.now();
+  const warmed: string[] = [];
+  const failed: string[] = [];
   // One endpoint at a time: each endpoint already fans out its own queries
   // in parallel, and warming all endpoints at once bursts past the connector
   // proxy's ~10 req/s rate limit. A user request arriving mid-warm-up shares
   // in-flight queries via the cache's single-flight dedupe.
-  const jobs: [string, () => Promise<unknown>][] = [
-    // Overview is the landing page, so warm it first: the first visitor after
-    // a restart almost always hits these three endpoints.
-    ["overview-filters", () => getFilterOptions()],
-    ["overview-with-targets", () => getOverviewWithTargets(filters)],
-    ["overview-yoy", () => getYearOverYear(filters)],
-    ["website-traffic", () => getWebsiteTraffic(filters)],
-    ...FUNNEL_METRICS.map(
-      (m): [string, () => Promise<unknown>] => [`funnel:${m}`, () => getFunnelMetric(m, filters)],
-    ),
-    ["ehi-goals", () => getEhiGoals(ehiGoalsYearFilters(filters))],
-    ["communities", () => getCommunityList()],
-    ["leasing-filters", () => getLeasingFilterOptions()],
-    ["leasing", () => getLeasingDashboard(buildLeasingFilters({}))],
-  ];
-  void (async () => {
-    const failed: string[] = [];
-    for (const [name, run] of jobs) {
+  for (const { name, run } of WARMED_ENDPOINTS) {
+    try {
+      await run(filters);
+      warmed.push(name);
+    } catch {
+      // One-off proxy/network hiccups happen; retry each endpoint once
+      // after a short pause before giving up on warming it.
+      await new Promise((r) => setTimeout(r, 2000));
       try {
-        await run();
+        await run(filters);
+        warmed.push(name);
       } catch {
-        // One-off proxy/network hiccups happen; retry each endpoint once
-        // after a short pause before giving up on warming it.
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          await run();
-        } catch {
-          failed.push(name);
-        }
+        failed.push(name);
       }
     }
-    const elapsedMs = Date.now() - started;
-    if (failed.length > 0) {
-      logger.warn(
-        { elapsedMs, failed },
-        "Dashboard cache warm-up finished with failures (endpoints will fall back to cold queries)",
-      );
-    } else {
-      logger.info({ elapsedMs, warmed: jobs.length }, "Dashboard cache warm-up complete");
-    }
-  })();
+  }
+  const elapsedMs = Date.now() - started;
+  if (failed.length > 0) {
+    logger.warn(
+      { elapsedMs, failed },
+      "Dashboard cache warm-up finished with failures (endpoints will fall back to cold queries)",
+    );
+  } else {
+    logger.info({ elapsedMs, warmed: warmed.length }, "Dashboard cache warm-up complete");
+  }
+  return { warmed, failed, skipped: false, elapsedMs };
 }
 
 export default router;

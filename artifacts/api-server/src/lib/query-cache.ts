@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { emitCacheAccess } from "./cache-observer";
 
 /**
  * Shared per-process query cache with stale-while-revalidate.
@@ -152,12 +153,23 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
   return async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const hit = cache.get(key);
     const age = hit ? Date.now() - hit.at : Infinity;
-    if (hit && age < freshMs) return hit.value as T;
+    if (hit && age < freshMs) {
+      emitCacheAccess(key, "hit");
+      return hit.value as T;
+    }
     if (hit && age < keepMs) {
       // Stale-while-revalidate: answer from cache now, refresh behind it.
+      // Observed as a "hit": the caller got an instant response either way,
+      // and the observer's consumers (the warm-up audit) care about cold
+      // foreground waits, not freshness.
+      emitCacheAccess(key, "hit");
       scheduleRevalidate(key, fn);
       return hit.value as T;
     }
+    // Foreground load. Emit here rather than inside load() so that ONLY
+    // request-path accesses reach the observer — load() also serves
+    // background revalidation, which must stay invisible to it.
+    emitCacheAccess(key, inflight.has(key) ? "inflight-join" : "miss");
     return load(key, fn);
   };
 }
