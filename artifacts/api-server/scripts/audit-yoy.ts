@@ -9,9 +9,18 @@
  * that cannot fan out by construction.
  *
  * Scenarios: the default view (no params) plus filtered views (busiest
- * company, channel, lead source, and cohort quarter, picked dynamically so
- * they never go stale; failure to find a value FAILS the audit rather than
- * silently skipping the scenario).
+ * company, development/community, channel, lead source, and cohort quarter,
+ * picked dynamically so they never go stale; failure to find a value FAILS
+ * the audit rather than silently skipping the scenario).
+ *
+ * The development (community) filter binds EVERY series, each directly on a
+ * fact-table column with no dimension join: contacts
+ * (CONTACT_EHI_COMMUNITY_OF_INTEREST), deals
+ * (DEAL_EHI_COMMUNITY_OF_INTEREST), GA (MATCHED_DEVELOPMENT_NAME), and goals
+ * (DEVELOPMENT_NAME). The pick requires grid data on all four actual series
+ * plus business-plan lead goals — the busiest development by leads alone can
+ * be the "General" catch-all bucket, which has no GA match or goal rows and
+ * would leave those bindings compared only against 0 vs 0.
  *
  * Lead-source and cohort baselines bind with the same asymmetry the API
  * uses: leadSource filters contacts (LEAD_SOURCE_OVERVIEW) AND deals
@@ -117,6 +126,13 @@ function todayChicago(): string {
 
 interface ScenarioFilters {
   company?: string;
+  /**
+   * Filters every series, each directly on a fact-table column (no
+   * dimension join): contacts CONTACT_EHI_COMMUNITY_OF_INTEREST, deals
+   * DEAL_EHI_COMMUNITY_OF_INTEREST, GA MATCHED_DEVELOPMENT_NAME, goals
+   * DEVELOPMENT_NAME — mirroring the API's four filter fragments.
+   */
+  development?: string;
   /** Applied as contactChannel AND dealChannel, like the dashboard UI does */
   channel?: string;
   /**
@@ -144,6 +160,15 @@ interface Scenario {
    * pick-vs-check drift) while appearing covered.
    */
   mustHaveData?: string[];
+  /**
+   * When true, the goal-point baselines must include at least one non-zero
+   * cell, or the scenario FAILS as vacuous. Only meaningful for filters
+   * that bind DM_GOALS (development): a pick whose goal rows drift away
+   * from the checked (fiscal year, GOAL_TYPE, month) grid would leave
+   * every goal check comparing 0 vs 0 while the DEVELOPMENT_NAME binding
+   * goes unproven.
+   */
+  mustHaveGoalData?: boolean;
 }
 
 interface Frag {
@@ -160,6 +185,10 @@ function contactFrag(f: ScenarioFilters): Frag {
       `C.CONTACT_EHI_COMMUNITY_OF_INTEREST IN (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)`,
     );
     binds.push(f.company);
+  }
+  if (f.development) {
+    parts.push("C.CONTACT_EHI_COMMUNITY_OF_INTEREST = ?");
+    binds.push(f.development);
   }
   if (f.cohortQuarter) {
     parts.push("C.EHI_COHORT_QUARTER = ?");
@@ -186,6 +215,10 @@ function dealFrag(f: ScenarioFilters): Frag {
     );
     binds.push(f.company);
   }
+  if (f.development) {
+    parts.push("X.DEAL_EHI_COMMUNITY_OF_INTEREST = ?");
+    binds.push(f.development);
+  }
   if (f.leadSource) {
     parts.push("X.DEAL_LEAD_SOURCE_OVERVIEW = ?");
     binds.push(f.leadSource);
@@ -207,6 +240,10 @@ function gaFrag(f: ScenarioFilters): Frag {
     parts.push("MATCHED_COMPANY_NAME = ?");
     binds.push(f.company);
   }
+  if (f.development) {
+    parts.push("MATCHED_DEVELOPMENT_NAME = ?");
+    binds.push(f.development);
+  }
   // GA has no channel, lead-source, or cohort dimension in the dashboard;
   // those filters do not apply (mirrors the API's gaFilters).
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
@@ -220,6 +257,10 @@ function goalFrag(f: ScenarioFilters): Frag {
     parts.push("COMPANY_NAME = ?");
     binds.push(f.company);
   }
+  if (f.development) {
+    parts.push("DEVELOPMENT_NAME = ?");
+    binds.push(f.development);
+  }
   // Channel, lead source, and cohort do not filter goals in the API either,
   // so goal baselines stay unfiltered under those scenarios — which also
   // catches the API ever wrongly starting to filter goals by them.
@@ -229,6 +270,7 @@ function goalFrag(f: ScenarioFilters): Frag {
 function toQueryParams(f: ScenarioFilters): Record<string, string> {
   const params: Record<string, string> = {};
   if (f.company) params.company = f.company;
+  if (f.development) params.development = f.development;
   if (f.channel) {
     params.contactChannel = f.channel;
     params.dealChannel = f.channel;
@@ -482,15 +524,18 @@ async function auditScenario(
   const goalAt = new Map(
     goalRows.map((r) => [`${r.GT}\u0000${Number(r.M)}`, Number(r.N) || 0]),
   );
+  let goalBaselineNonZero = 0;
   for (const measure of measures) {
     const points = byMeasure.get(measure)!;
     const gt = GOAL_TYPE_FOR_MEASURE[measure];
     for (const month of months) {
       const pt = points.find((p) => p.month === month)!;
+      const goalBaseline = goalAt.get(`${gt}\u0000${month}`) ?? 0;
+      if (goalBaseline !== 0) goalBaselineNonZero++;
       checks.push({
         label: `${measure} goal ${yoy.year}-${String(month).padStart(2, "0")}`,
         api: pt.goal,
-        baseline: goalAt.get(`${gt}\u0000${month}`) ?? 0,
+        baseline: goalBaseline,
       });
     }
   }
@@ -546,6 +591,16 @@ async function auditScenario(
       failed = true;
     }
   }
+  // Goal-side vacuity guard: for filters that bind DM_GOALS, all-zero goal
+  // baselines mean the goal binding was only ever compared 0 vs 0.
+  if (scenario.mustHaveGoalData && goalBaselineNonZero === 0) {
+    console.error(
+      "FAIL every goal baseline cell is zero — the filtered goal series " +
+        "exercises no data, so this scenario cannot vouch for the DM_GOALS " +
+        "binding (pick drifted from the checked months/goal types?)",
+    );
+    failed = true;
+  }
   return !failed;
 }
 
@@ -556,23 +611,28 @@ async function auditScenario(
  * the filtered scenarios always exercise non-trivial data in both series.
  * Missing values FAIL the audit — a silently skipped scenario is not coverage.
  *
- * The lead source and cohort quarter are ranked over the exact (year, month)
- * grid the scenarios check — YEAR IN (prior, current) AND MONTH IN (checked
- * months) — and the picked value must have data there for EVERY series its
- * filter binds: leads, tours, AND ratified deals for the lead source
- * (DEAL_LEAD_SOURCE_OVERVIEW checked only against zero rows would prove
- * nothing — audit-dashboard.ts rationale, hardened from "prefer" to
- * "require"); leads AND tours for the cohort (tour-date cells are the
- * cross-quarter discriminator). That structurally guarantees at least one
- * non-zero baseline cell per filtered series, which mustHaveData then
- * enforces. When NO value qualifies, the audit FAILS as uncovered instead
- * of reporting success off 0=0 comparisons.
+ * The development, lead source, and cohort quarter are ranked over the exact
+ * (year, month) grid the scenarios check — YEAR IN (prior, current) AND
+ * MONTH IN (checked months) — and the picked value must have data there for
+ * EVERY series its filter binds: leads, tours, ratified deals, GA-matched
+ * traffic, AND business-plan lead goals for the development (it filters all
+ * four actual series plus DM_GOALS; the busiest-by-leads development can be
+ * the "General" catch-all with no GA match or goal rows, which would leave
+ * those bindings compared only 0 vs 0); leads, tours, AND ratified deals
+ * for the lead source (DEAL_LEAD_SOURCE_OVERVIEW checked only against zero
+ * rows would prove nothing — audit-dashboard.ts rationale, hardened from
+ * "prefer" to "require"); leads AND tours for the cohort (tour-date cells
+ * are the cross-quarter discriminator). That structurally guarantees at
+ * least one non-zero baseline cell per filtered series, which mustHaveData
+ * (and mustHaveGoalData) then enforces. When NO value qualifies, the audit
+ * FAILS as uncovered instead of reporting success off 0=0 comparisons.
  */
 async function pickRepresentativeFilters(
   year: number,
   months: number[],
 ): Promise<{
   company: string;
+  development: string;
   channel: string;
   leadSource: string;
   cohortQuarter: string;
@@ -581,6 +641,11 @@ async function pickRepresentativeFilters(
   const gridBinds = [year - 1, year, ...months];
   const [
     companyRows,
+    devLeadRows,
+    devTourRows,
+    devDealRows,
+    devGaRows,
+    devGoalRows,
     channelRows,
     leadSourceRows,
     tourSourceRows,
@@ -595,6 +660,59 @@ async function pickRepresentativeFilters(
          WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
          GROUP BY 1 ORDER BY N DESC LIMIT 1`,
         [year - 1, year],
+      ),
+      // All developments with leads in the checked grid, by volume (not
+      // LIMIT 1): the pick below requires one that also has tours, deals,
+      // GA-matched traffic, and lead goals there.
+      querySnowflake<{ DEV: string }>(
+        `SELECT C.CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+           AND MONTH(C.CONTACT_CREATE_DATE) IN (${monthPlaceholders})
+           AND C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC`,
+        gridBinds,
+      ),
+      querySnowflake<{ DEV: string }>(
+        `SELECT DISTINCT C.CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)
+           AND MONTH(C.EHI_MIN_FIRST_TOUR_DATE) IN (${monthPlaceholders})
+           AND C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NOT NULL`,
+        gridBinds,
+      ),
+      querySnowflake<{ DEV: string }>(
+        `SELECT DISTINCT X.DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV
+         FROM DM_DEALS X
+         WHERE ${isSaleSql("X")} AND YEAR(X.CONTRACT_RATIFIED_DATE) IN (?, ?)
+           AND MONTH(X.CONTRACT_RATIFIED_DATE) IN (${monthPlaceholders})
+           AND X.DEAL_EHI_COMMUNITY_OF_INTEREST IS NOT NULL`,
+        gridBinds,
+      ),
+      // USER_PSEUDO_ID IS NOT NULL so a qualifying development is
+      // guaranteed a non-zero DISTINCT-user baseline, not just GA rows.
+      querySnowflake<{ DEV: string }>(
+        `SELECT DISTINCT MATCHED_DEVELOPMENT_NAME AS DEV
+         FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+         WHERE ${isGaTrafficSql()} AND YEAR(GOOGLE_ANALYTICS_DATE) IN (?, ?)
+           AND MONTH(GOOGLE_ANALYTICS_DATE) IN (${monthPlaceholders})
+           AND MATCHED_DEVELOPMENT_NAME IS NOT NULL
+           AND USER_PSEUDO_ID IS NOT NULL`,
+        gridBinds,
+      ),
+      // Developments with non-zero business-plan lead goals in the checked
+      // months of the CURRENT fiscal year — the goal series only shows the
+      // current year, and all four goal types share ONE baseline fragment,
+      // so one non-zero type suffices to prove the DEVELOPMENT_NAME binding.
+      querySnowflake<{ DEV: string }>(
+        `SELECT DEVELOPMENT_NAME AS DEV
+         FROM DM_GOALS
+         WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ?
+           AND MONTH(BUDGET_DATE) IN (${monthPlaceholders})
+           AND DEVELOPMENT_NAME IS NOT NULL
+         GROUP BY 1
+         HAVING SUM(GOAL) > 0`,
+        [year, GOAL_TYPE_FOR_MEASURE.leads, ...months],
       ),
       querySnowflake<{ CH: string }>(
         `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
@@ -660,10 +778,23 @@ async function pickRepresentativeFilters(
     ]);
   const company = companyRows[0]?.COMPANY_NAME;
   const channel = channelRows[0]?.CH;
-  // Busiest lead source that has leads AND tours AND ratified deals in the
-  // grid; busiest cohort (by grid leads) that also has tours there. A value
-  // missing any bound series would leave that series comparing 0 vs 0 —
-  // fake coverage — so no qualifying value fails the audit loudly instead.
+  // Busiest development (by grid leads) with tours, deals, GA traffic, AND
+  // lead goals in the grid; busiest lead source that has leads AND tours
+  // AND ratified deals there; busiest cohort (by grid leads) that also has
+  // tours there. A value missing any bound series would leave that series
+  // comparing 0 vs 0 — fake coverage — so no qualifying value fails the
+  // audit loudly instead.
+  const devsWithTours = new Set(devTourRows.map((r) => r.DEV));
+  const devsWithDeals = new Set(devDealRows.map((r) => r.DEV));
+  const devsWithGa = new Set(devGaRows.map((r) => r.DEV));
+  const devsWithGoals = new Set(devGoalRows.map((r) => r.DEV));
+  const development = devLeadRows.find(
+    (r) =>
+      devsWithTours.has(r.DEV) &&
+      devsWithDeals.has(r.DEV) &&
+      devsWithGa.has(r.DEV) &&
+      devsWithGoals.has(r.DEV),
+  )?.DEV;
   const tourSources = new Set(tourSourceRows.map((r) => r.LS));
   const dealSources = new Set(dealSourceRows.map((r) => r.LS));
   const leadSource = leadSourceRows.find(
@@ -673,6 +804,8 @@ async function pickRepresentativeFilters(
   const cohortQuarter = cohortLeadRows.find((r) => cohortsWithTours.has(r.CQ))?.CQ;
   const missing = [
     !company && "company",
+    !development &&
+      "development with leads, tours, ratified deals, GA-matched traffic, and business-plan lead goals",
     !channel && "channel",
     !leadSource && "lead source with leads, tours, and ratified deals",
     !cohortQuarter && "cohort quarter with leads and tours",
@@ -687,6 +820,7 @@ async function pickRepresentativeFilters(
   }
   return {
     company: company!,
+    development: development!,
     channel: channel!,
     leadSource: leadSource!,
     cohortQuarter: cohortQuarter!,
@@ -715,12 +849,24 @@ async function main() {
   const months = monthsToCheck();
   console.log(`Checking months [${months.join(", ")}] for years ${year - 1} and ${year}`);
 
-  const { company, channel, leadSource, cohortQuarter } =
+  const { company, development, channel, leadSource, cohortQuarter } =
     await pickRepresentativeFilters(year, months);
 
   const scenarios: Scenario[] = [
     { name: "default view", filters: {} },
     { name: `company filter (${company})`, filters: { company } },
+    // development binds EVERY series — contacts, deals, GA, and goals —
+    // each directly on a fact-table column. The pick guarantees non-zero
+    // grid cells on all four actual series plus the lead goal type, so
+    // mustHaveData holds all four and mustHaveGoalData guards the goal
+    // side; without them a pick-vs-check drift could quietly reduce this
+    // scenario to 0 vs 0 on the very bindings it exists to prove.
+    {
+      name: `development filter (${development})`,
+      filters: { development },
+      mustHaveData: ["leads", "tours", "grossSales", "websiteUsers"],
+      mustHaveGoalData: true,
+    },
     { name: `channel filter (${channel})`, filters: { channel } },
     // leadSource must hit DM_CONTACTS.LEAD_SOURCE_OVERVIEW AND
     // DM_DEALS.DEAL_LEAD_SOURCE_OVERVIEW; cohortQuarter must hit contacts

@@ -15,7 +15,7 @@
 - [Audit timeout layering](audit-conventions.md) — request deadline ×(retries+1)+backoffs must fit the per-audit budget; kill stuck audits via detached process group (killing pnpm orphans them).
 - [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium; UI audits: page's own XHR, param-multiset wiring, route-hold proof (first-visit keys only), retry-tolerant 5xx.
 - [Client date-range guards](date-range-guards.md) — guard lone (single-set) dates too, and anchor client "today" to America/Chicago like the server: viewer-clock guards fail at quarter/year boundaries.
-- [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter filter no-ops leads; tours carry signal); pick lead sources that also have deals in range.
+- [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter no-ops leads; tours carry signal); picks need data on EVERY bound series ("General" dev bucket lacks GA/goals/deals).
 - [Batched Snowflake round trips](batched-audit-baselines.md) — collapse scalars into COUNT_IF/GROUP BY scans (0==missing; subquery binds first); same shapes halve live endpoint fan-out (totals = Σ monthly).
 - [Env-var number parsing](env-var-parsing.md) — Number("") is 0, not NaN: unset env + ">= 0" guard silently disables budgets; treat empty as absent, and test the genuinely UNSET path.
 - [In-process audit patterns](in-process-audit-pattern.md) — warm-vs-request key drift via cache observer; clock-injected timezone-rollover binding via sentinel-seeded cache; --packages=external breaks on TS-source pkgs.

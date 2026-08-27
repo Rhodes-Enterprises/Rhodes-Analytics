@@ -67,6 +67,18 @@ generation the consumers expect. Parallel tasks often repair the SAME graft:
 after the next rebase, check for doubled definitions before assuming your
 repair survived.
 
+
+## Sub-second "pass" = vacuous (lost entry-point invocation)
+
+Merges can drop a script's trailing `main().catch(...)` invocation: it then
+bundles, runs to EOF doing nothing, and exits 0 in under a second — letting
+incoherent merge results (stale helper signatures under newer call sites,
+calls to deleted helpers) accumulate dormant until a later merge restores the
+invocation and everything detonates at once.
+
+**How to apply:** treat a network-bound audit finishing in seconds as
+failing; confirm exactly one entry-point invocation exists and durations look
+like real work.
 ## Finding ALL undefined names at once
 Runtime smoke-runs surface missing helpers one at a time (slow whack-a-mole when
 each run costs minutes of Snowflake pacing). Instead scan the whole script in
