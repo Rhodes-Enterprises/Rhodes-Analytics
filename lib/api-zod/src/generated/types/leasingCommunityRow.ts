@@ -5,6 +5,7 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+import type { OwtGoalCell } from './owtGoalCell';
 
 export interface LeasingCommunityRow {
   community: string;
@@ -17,4 +18,9 @@ export interface LeasingCommunityRow {
   net: number;
   /** @nullable */
   ptgPercent: number | null;
+  /** Web traffic vs this community's web-traffic goal; the actual counts GA sessions matched via MATCHED_DEVELOPMENT_NAME. Null when GA has no development mapping for the community. */
+  webTraffic: OwtGoalCell | null;
+  leads: OwtGoalCell;
+  firstTours: OwtGoalCell;
+  moveIns: OwtGoalCell;
 }

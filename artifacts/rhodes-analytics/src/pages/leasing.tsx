@@ -246,6 +246,7 @@ export default function LeasingPage() {
             <FunnelMatrix data={dash.data} />
             <GoalMatrix data={dash.data} />
             <CommunityTable data={dash.data} />
+            <CommunityFunnelTable data={dash.data} />
             <MonthlyChart data={dash.data} />
           </>
         )}
@@ -631,6 +632,30 @@ function CommunityTable({ data }: { data: LeasingDashboard }) {
   );
 }
 
+function FunnelStageCells({
+  cell,
+}: {
+  cell: { toDateGoal: number; actual: number; ptgPercent: number | null };
+}) {
+  return (
+    <>
+      <td className="py-1.5 px-2 text-right tabular-nums border-l">
+        {fmt(cell.toDateGoal)}
+      </td>
+      <td className="py-1.5 px-2 text-right tabular-nums font-semibold">
+        {fmt(cell.actual)}
+      </td>
+      <td
+        className={cn(
+          "py-1.5 px-2 text-right tabular-nums font-semibold",
+          ptgColor(cell.ptgPercent),
+        )}
+      >
+        {fmtPct(cell.ptgPercent, 0)}
+      </td>
+    </>
+  );
+}
 type MonthlyPoint = LeasingDashboard["monthly"][number];
 
 const TREND_STAGES = [
@@ -789,5 +814,145 @@ function DashboardSkeleton() {
       <Skeleton className="h-72 w-full" />
       <Skeleton className="h-72 w-full" />
     </div>
+  );
+}
+
+/**
+ * Per-community upstream funnel: which community is behind on leads and
+ * tours, not just leases. Web traffic is GA sessions matched to the
+ * community (only mapped communities have a number; the rest show a dash).
+ */
+function DashStageCells() {
+  return (
+    <>
+      <td className="py-1.5 px-2 text-right text-muted-foreground border-l">–</td>
+      <td className="py-1.5 px-2 text-right text-muted-foreground">–</td>
+      <td className="py-1.5 px-2 text-right text-muted-foreground">–</td>
+    </>
+  );
+}
+function CommunityFunnelTable({ data }: { data: LeasingDashboard }) {
+  const rows = data.communities;
+  const totals = useMemo(() => {
+    const sum = (pick: (r: (typeof rows)[number]) => number) =>
+      rows.reduce((t, r) => t + pick(r), 0);
+    const mapped = rows
+      .map((r) => r.webTraffic)
+      .filter((c): c is NonNullable<typeof c> => c != null);
+    return {
+      webTdGoal: mapped.length
+        ? mapped.reduce((t, c) => t + c.toDateGoal, 0)
+        : null,
+      webTraffic: mapped.length
+        ? mapped.reduce((t, c) => t + c.actual, 0)
+        : null,
+      leadsTdGoal: sum((r) => r.leads.toDateGoal),
+      leads: sum((r) => r.leads.actual),
+      toursTdGoal: sum((r) => r.firstTours.toDateGoal),
+      tours: sum((r) => r.firstTours.actual),
+      moveInsTdGoal: sum((r) => r.moveIns.toDateGoal),
+      moveIns: sum((r) => r.moveIns.actual),
+    };
+  }, [rows]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">
+          Community Funnel — Traffic, Leads, Tours & Move-Ins
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="overflow-x-auto">
+        <table
+          className="w-full text-xs sm:text-sm"
+          data-testid="table-community-funnel"
+        >
+          <thead>
+            <tr className="text-muted-foreground">
+              <th rowSpan={2} className="py-2 pr-3 text-left font-medium align-bottom">
+                Community
+              </th>
+              <th colSpan={3} className="pt-2 pb-1 px-2 text-center font-medium border-l">
+                Web Traffic
+              </th>
+              <th colSpan={3} className="pt-2 pb-1 px-2 text-center font-medium border-l">
+                Leads
+              </th>
+              <th colSpan={3} className="pt-2 pb-1 px-2 text-center font-medium border-l">
+                First Tours
+              </th>
+              <th colSpan={3} className="pt-2 pb-1 px-2 text-center font-medium border-l">
+                Move-Ins
+              </th>
+            </tr>
+            <tr className="border-b text-muted-foreground">
+              <th className="py-1 px-2 text-right font-medium border-l">TD Goal</th>
+              <th className="py-1 px-2 text-right font-medium">Actual</th>
+              <th className="py-1 px-2 text-right font-medium">PTG %</th>
+              <th className="py-1 px-2 text-right font-medium border-l">TD Goal</th>
+              <th className="py-1 px-2 text-right font-medium">Actual</th>
+              <th className="py-1 px-2 text-right font-medium">PTG %</th>
+              <th className="py-1 px-2 text-right font-medium border-l">TD Goal</th>
+              <th className="py-1 px-2 text-right font-medium">Actual</th>
+              <th className="py-1 px-2 text-right font-medium">PTG %</th>
+              <th className="py-1 px-2 text-right font-medium border-l">TD Goal</th>
+              <th className="py-1 px-2 text-right font-medium">Actual</th>
+              <th className="py-1 px-2 text-right font-medium">PTG %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.community} className="border-b last:border-0">
+                <td className="py-1.5 pr-3 font-medium whitespace-nowrap">
+                  {r.community}
+                </td>
+                {r.webTraffic ? (
+                  <FunnelStageCells cell={r.webTraffic} />
+                ) : (
+                  <DashStageCells />
+                )}
+                <FunnelStageCells cell={r.leads} />
+                <FunnelStageCells cell={r.firstTours} />
+                <FunnelStageCells cell={r.moveIns} />
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="border-t font-semibold">
+              <td className="py-2 pr-3">Total</td>
+              <td className="py-2 px-2 text-right tabular-nums border-l">
+                {fmt(totals.webTdGoal)}
+              </td>
+              <td className="py-2 px-2 text-right tabular-nums">
+                {fmt(totals.webTraffic)}
+              </td>
+              <td />
+              <td className="py-2 px-2 text-right tabular-nums border-l">
+                {fmt(totals.leadsTdGoal)}
+              </td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.leads)}</td>
+              <td />
+              <td className="py-2 px-2 text-right tabular-nums border-l">
+                {fmt(totals.toursTdGoal)}
+              </td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.tours)}</td>
+              <td />
+              <td className="py-2 px-2 text-right tabular-nums border-l">
+                {fmt(totals.moveInsTdGoal)}
+              </td>
+              <td className="py-2 px-2 text-right tabular-nums">{fmt(totals.moveIns)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+        <p className="text-xs text-muted-foreground mt-2">
+          Web traffic compares GA sessions matched to a community against its
+          web-traffic goal — “–” means GA has no development mapping for it.
+          Leads, tours and move-ins count
+          contacts attributed to a community; unattributed contacts appear only
+          in the funnel totals above.
+        </p>
+      </CardContent>
+    </Card>
   );
 }

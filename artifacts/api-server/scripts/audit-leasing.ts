@@ -2,7 +2,9 @@
  * Leasing dashboard number regression audit.
  *
  * Compares the API's GET /api/dashboards/leasing response (kpis, goal
- * matrix, community summary, monthly series) against independent Snowflake
+ * matrix, community summary — lease columns plus the per-community funnel
+ * columns (web traffic, leads, first tours, move-ins) — monthly series)
+ * against independent Snowflake
  * baseline queries with identical filters. Baselines are written directly
  * against DM_DEALS ('Rhodes Living Pipeline') and DM_GOALS (RL_* goal
  * types) using their own SQL — not the API's data layer — so a query or
@@ -130,11 +132,16 @@ interface CommunityRow {
   community: string;
   fullSpanGoal: number;
   toDateGoal: number;
+  ptgPercent: number | null;
   ratified: number;
   onlineRatified: number;
   onsiteRatified: number;
   cancelled: number;
   net: number;
+  webTraffic: MatrixCell | null;
+  leads: MatrixCell;
+  firstTours: MatrixCell;
+  moveIns: MatrixCell;
 }
 
 interface MonthlyPoint {
@@ -373,6 +380,42 @@ function resolveGoalTypes(available: Set<string>): {
   };
 }
 
+/**
+ * Resolve the RL upstream-funnel goal types independently of the API, per
+ * the documented data model: FY2026 added RL_First_Tours (+channel splits)
+ * and RL_Move_Ins; FY2025 only had RL_Leads / RL_Tours.
+ */
+async function resolveFunnelGoalTypes(fiscalYear: number): Promise<{
+  webTraffic: { total?: string; online?: string; onsite?: string };
+  leads: { total?: string; online?: string; onsite?: string };
+  firstTours: { total?: string; online?: string; onsite?: string };
+  moveIns: { total?: string; online?: string; onsite?: string };
+}> {
+  const rows = await querySnowflake<{ GOAL_TYPE: string }>(
+    "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ? AND GOAL_TYPE ILIKE 'RL\\_%'",
+    [fiscalYear],
+  );
+  const set = new Set(rows.map((r) => r.GOAL_TYPE));
+  const first = (...cands: string[]) => cands.find((c) => set.has(c));
+  return {
+    webTraffic: {
+      total: first("RL_Web_Traffic"),
+      online: first("RL_Online_Web_Traffic"),
+      onsite: first("RL_Onsite_Web_Traffic"),
+    },
+    leads: {
+      total: first("RL_Leads"),
+      online: first("RL_Online_Leads"),
+      onsite: first("RL_Onsite_Leads"),
+    },
+    firstTours: {
+      total: first("RL_First_Tours", "RL_Tours"),
+      online: first("RL_Online_First_Tours"),
+      onsite: first("RL_Onsite_First_Tours"),
+    },
+    moveIns: { total: first("RL_Move_Ins") },
+  };
+}
 /** Goal sums for one goal type, plus the per-month and per-community rollups. */
 interface GoalSums {
   fullSpan: number;
@@ -431,6 +474,15 @@ async function baselineGoalsByType(
     ]),
   );
 }
+
+/**
+ * GA mapping domain — communities with any matched development row at all,
+ * independent of the scenario's date range. Distinguishes "mapped but zero
+ * sessions in range" (cell with actual 0) from "no GA mapping" (null).
+ * Memoized: the domain is range-independent by construction, so one query
+ * serves every scenario.
+ */
+let gaMappedDomainCache: Promise<Set<string>> | undefined;
 
 type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
 let failures = 0;
@@ -531,6 +583,19 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     return gt[metric];
   };
 
+  // Same channel-scoped semantics for the per-community funnel goals: with
+  // a channel filter each stage compares against that channel's goal type
+  // (undefined when the stage has no channel split, e.g. move-ins).
+  const funnelTypes = await resolveFunnelGoalTypes(fiscalYear);
+  const effStageGoalType = (
+    stage: "webTraffic" | "leads" | "firstTours" | "moveIns",
+  ): string | undefined => {
+    const t = funnelTypes[stage];
+    if (f.channel === "Online") return t.online;
+    if (f.channel === "Onsite") return t.onsite;
+    return t.total;
+  };
+
   // ---- Actual counts (bound to the expected range) ----
   const { ratified, cancelled, onlineRatified, onsiteRatified } = await baselineLeaseCounts(
     expStart,
@@ -538,9 +603,18 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     f,
   );
 
-  // ---- Goals (one grouped query also feeds communities + monthly below) ----
+  // ---- Goals (one grouped query also feeds communities + monthly below,
+  // including the per-community funnel-stage goal columns) ----
   const goalFor = await baselineGoalsByType(
-    [effGoalType("total"), effGoalType("online"), effGoalType("onsite")],
+    [
+      effGoalType("total"),
+      effGoalType("online"),
+      effGoalType("onsite"),
+      effStageGoalType("webTraffic"),
+      effStageGoalType("leads"),
+      effStageGoalType("firstTours"),
+      effStageGoalType("moveIns"),
+    ],
     fiscalYear,
     expStart,
     expEnd,
@@ -599,7 +673,12 @@ async function auditScenario(scenario: Scenario): Promise<void> {
 
   // ---- Community summary ----
   console.log("-- communities");
-  await auditCommunities(resp, f, expStart, expTo, gTotal.byCommunity);
+  await auditCommunities(resp, f, expStart, expTo, gTotal.byCommunity, {
+    webTraffic: goalFor(effStageGoalType("webTraffic")).byCommunity,
+    leads: goalFor(effStageGoalType("leads")).byCommunity,
+    firstTours: goalFor(effStageGoalType("firstTours")).byCommunity,
+    moveIns: goalFor(effStageGoalType("moveIns")).byCommunity,
+  });
 
   // ---- Monthly series ----
   console.log("-- monthly");
@@ -800,9 +879,12 @@ async function auditFunnelChannelLabels(
  * membership the old bRat ∪ bCan union produced (COUNT_IFs over channels
  * the scenario filter contradicts are structurally zero, matching the old
  * skip-to-empty-map). Goals arrive precomputed from the shared DM_GOALS
- * grouped query. The union of communities (goals ∪ ratified ∪ cancelled,
- * excluding "(No Value)") must match exactly — a missing or extra
- * community row is a failure, not just a value mismatch.
+ * grouped query — as do the per-community funnel-stage goal columns.
+ * The lease columns are joined by the per-community funnel columns (web
+ * traffic, leads, first tours, move-ins). The union of communities
+ * (goals ∪ every actuals source ∪ GA-matched traffic, excluding
+ * "(No Value)") must match exactly — a missing or extra community row is
+ * a failure, not just a value mismatch.
  */
 async function auditCommunities(
   resp: LeasingResponse,
@@ -810,6 +892,12 @@ async function auditCommunities(
   startDate: string,
   toDate: string,
   bGoals: Map<string, { fullSpan: number; toDate: number }>,
+  stageGoals: {
+    webTraffic: Map<string, { fullSpan: number; toDate: number }>;
+    leads: Map<string, { fullSpan: number; toDate: number }>;
+    firstTours: Map<string, { fullSpan: number; toDate: number }>;
+    moveIns: Map<string, { fullSpan: number; toDate: number }>;
+  },
 ): Promise<void> {
   // Bind order follows text order: subquery SELECT-list window binds, then
   // the WHERE extras.
@@ -860,7 +948,77 @@ async function auditCommunities(
     bOnsite.set(r.C, Number(r.RAT_ONSITE) || 0);
   }
 
-  const expected = new Set<string>([...bRat.keys(), ...bGoals.keys()]);
+  /** Contact-stage counts by community, honoring community/channel filters. */
+  const contactByCommunity = async (
+    stage: "leads" | "firstTours" | "moveIns",
+  ): Promise<Map<string, number>> => {
+    const dateExpr = {
+      leads: "CONTACT_CREATE_DATE",
+      firstTours: "RL_MIN_FIRST_TOUR_DATE",
+      moveIns: "TO_DATE(RL_MIN_MOVE_IN_DATE)",
+    }[stage];
+    const binds: (string | number)[] = [startDate, toDate];
+    const parts: string[] = [];
+    if (stage === "leads") {
+      parts.push(
+        "RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+      );
+    }
+    if (f.community) {
+      parts.push("TRIM(RL_COMMUNITY_OF_INTEREST) = ?");
+      binds.push(f.community);
+    }
+    if (f.channel) {
+      parts.push("ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+      binds.push(f.channel);
+    }
+    const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+    const rows = await querySnowflake<{ C: string | null; N: number }>(
+      `SELECT TRIM(RL_COMMUNITY_OF_INTEREST) AS C, COUNT(*) AS N
+       FROM DM_CONTACTS
+       WHERE ${dateExpr} BETWEEN ? AND ?${extra}
+       GROUP BY 1`,
+      binds,
+    );
+    return new Map(rows.filter((r) => r.C).map((r) => [r.C as string, Number(r.N) || 0]));
+  };
+
+  /** GA session starts by matched community (only mapped communities appear). */
+  const gaByCommunity = async (): Promise<Map<string, number>> => {
+    const binds: (string | number)[] = [startDate, toDate];
+    let extra = "";
+    if (f.community) {
+      extra = " AND TRIM(MATCHED_DEVELOPMENT_NAME) = ?";
+      binds.push(f.community);
+    }
+    const rows = await querySnowflake<{ C: string | null; N: number }>(
+      `SELECT TRIM(MATCHED_DEVELOPMENT_NAME) AS C, COUNT(*) AS N
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Rhodes Living' AND IS_SESSION_START = 'Yes'
+         AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${extra}
+       GROUP BY 1`,
+      binds,
+    );
+    return new Map(rows.filter((r) => r.C).map((r) => [r.C as string, Number(r.N) || 0]));
+  };
+
+  const [bLeads, bTours, bMoveIns, bGa, bGaDomain] = await Promise.all([
+    contactByCommunity("leads"),
+    contactByCommunity("firstTours"),
+    contactByCommunity("moveIns"),
+    gaByCommunity(),
+    gaMappedDomain(),
+  ]);
+
+  // Union across every source that can seed a row in the API's table.
+  const expected = new Set<string>([
+    ...bRat.keys(),
+    ...bGoals.keys(),
+    ...bLeads.keys(),
+    ...bTours.keys(),
+    ...bMoveIns.keys(),
+    ...bGa.keys(),
+  ]);
   expected.delete("(No Value)");
 
   const apiByName = new Map(resp.communities.map((c) => [c.community, c]));
@@ -890,6 +1048,98 @@ async function auditCommunities(
     check(`community[${name}].net`, row.net, rat - can);
     check(`community[${name}].fullSpanGoal`, row.fullSpanGoal, goal.fullSpan);
     check(`community[${name}].toDateGoal`, row.toDateGoal, goal.toDate);
+
+    // Per-community funnel columns
+    const zero = { fullSpan: 0, toDate: 0 };
+    /**
+     * PTG drives the row coloring, so verify it independently from the
+     * baseline actual and to-date goal — not by trusting the API's own
+     * inputs. A zero to-date goal must yield null (no PTG), never ±100%.
+     * Actual and goal may each legitimately drift by the per-count
+     * tolerance between the API's cached read and this fresh baseline, so
+     * the actual/goal ratio compounds to (1+t)/(1−t); convert that to an
+     * absolute percentage-point bound. Wiring bugs (wrong stage, swapped
+     * operands) diverge by orders of magnitude beyond it.
+     */
+    const checkPtg = (
+      label: string,
+      apiPtg: number | null | undefined,
+      toDateGoal: number,
+      actual: number,
+    ) => {
+      const expected = toDateGoal
+        ? ((actual - toDateGoal) / toDateGoal) * 100
+        : null;
+      const api = apiPtg ?? null;
+      if (expected === null || api === null) {
+        if (expected === null && api === null) {
+          console.log(`  OK   ${label}: null (no to-date goal)`);
+        } else {
+          failures++;
+          console.error(`  FAIL ${label}: api=${api} baseline=${expected}`);
+        }
+        return;
+      }
+      const t = TOLERANCE_PCT / 100;
+      const bound =
+        Math.abs((actual / toDateGoal) * 100) * ((1 + t) / (1 - t) - 1) + 1e-6;
+      if (Math.abs(api - expected) <= bound) {
+        console.log(`  OK   ${label}: api=${api} baseline=${expected}`);
+      } else {
+        failures++;
+        console.error(
+          `  FAIL ${label}: api=${api} baseline=${expected} (allowed drift ±${bound})`,
+        );
+      }
+    };
+    checkPtg(`community[${name}].ptgPercent`, row.ptgPercent, goal.toDate, rat);
+    const stageCell = (
+      label: string,
+      cell: MatrixCell,
+      g: { fullSpan: number; toDate: number },
+      actual: number,
+    ) => {
+      check(`community[${name}].${label}.actual`, cell.actual, actual);
+      check(`community[${name}].${label}.fullSpanGoal`, cell.fullSpanGoal, g.fullSpan);
+      check(`community[${name}].${label}.toDateGoal`, cell.toDateGoal, g.toDate);
+      checkPtg(`community[${name}].${label}.ptgPercent`, cell.ptgPercent, g.toDate, actual);
+    };
+    stageCell("leads", row.leads, stageGoals.leads.get(name) ?? zero, bLeads.get(name) ?? 0);
+    stageCell(
+      "firstTours",
+      row.firstTours,
+      stageGoals.firstTours.get(name) ?? zero,
+      bTours.get(name) ?? 0,
+    );
+    stageCell(
+      "moveIns",
+      row.moveIns,
+      stageGoals.moveIns.get(name) ?? zero,
+      bMoveIns.get(name) ?? 0,
+    );
+
+    // Web traffic must be a goal cell exactly for GA-mapped communities
+    // (a range-independent domain) and null otherwise — a mapped community
+    // with zero in-range sessions is a real 0 against its goal, while a
+    // missing mapping must not read as a goal miss.
+    const gaVal = bGa.get(name);
+    if (!bGaDomain.has(name)) {
+      if (row.webTraffic === null) {
+        console.log(`  OK   community[${name}].webTraffic: null (no GA mapping)`);
+      } else {
+        failures++;
+        console.error(
+          `  FAIL community[${name}].webTraffic: api=${row.webTraffic.actual} baseline=null (GA has no mapping)`,
+        );
+      }
+    } else if (row.webTraffic === null) {
+      failures++;
+      console.error(
+        `  FAIL community[${name}].webTraffic: api=null baseline=${gaVal ?? 0} (GA-mapped community must be a cell)`,
+      );
+    } else {
+      stageCell("webTraffic", row.webTraffic, stageGoals.webTraffic.get(name) ?? zero, gaVal ?? 0);
+    }
   }
 }
 
@@ -1178,6 +1428,15 @@ async function main() {
 
 
 /**
+ * GA mapping domain — communities with any matched development row at all,
+ * independent of the scenario's date range. Distinguishes "mapped but zero
+ * sessions in range" (cell with actual 0) from "no GA mapping" (null).
+ * Memoized: the domain is range-independent by construction, so one query
+ * serves every scenario.
+ */
+let gaMappedDomainCache: Promise<Set<string>> | undefined;
+
+/**
  * Contact-stage actual baseline from DM_CONTACTS, split by channel:
  * - leads: contacts CREATED in range that have an RL community of interest
  *   (non-null, not '' or '(No Value)')
@@ -1415,3 +1674,15 @@ const FUNNEL_CELLS: { name: FunnelCellName; stage: FunnelStage; metric: GoalMetr
 ];
 
 type GoalMetric = "total" | "online" | "onsite";
+
+function gaMappedDomain(): Promise<Set<string>> {
+  gaMappedDomainCache ??= querySnowflake<{ C: string | null }>(
+    `SELECT DISTINCT TRIM(MATCHED_DEVELOPMENT_NAME) AS C
+     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+     WHERE PROPERTY = 'Rhodes Living'
+       AND MATCHED_DEVELOPMENT_NAME IS NOT NULL
+       AND TRIM(MATCHED_DEVELOPMENT_NAME) <> ''`,
+    [],
+  ).then((rows) => new Set(rows.filter((r) => r.C).map((r) => r.C as string)));
+  return gaMappedDomainCache;
+}

@@ -516,7 +516,31 @@ export const GetLeasingDashboardResponse = zod.object({
   "onsiteRatified": zod.number(),
   "cancelled": zod.number(),
   "net": zod.number(),
+  "ptgPercent": zod.number().nullable(),
+  "webTraffic": zod.union([zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
   "ptgPercent": zod.number().nullable()
+}),zod.null()]).describe('Web traffic vs this community\'s web-traffic goal; the actual counts GA sessions matched via MATCHED_DEVELOPMENT_NAME. Null when GA has no development mapping for the community.'),
+  "leads": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "firstTours": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+}),
+  "moveIns": zod.object({
+  "fullSpanGoal": zod.number(),
+  "toDateGoal": zod.number(),
+  "actual": zod.number(),
+  "ptgPercent": zod.number().nullable()
+})
 })),
   "monthly": zod.array(zod.object({
   "month": zod.number(),
@@ -543,5 +567,3 @@ export const GetLeasingDashboardResponse = zod.object({
 export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
-
-

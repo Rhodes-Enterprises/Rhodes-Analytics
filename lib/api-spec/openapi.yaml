@@ -500,8 +500,22 @@ components:
           type: number
         ptgPercent:
           type: ["number", "null"]
+        webTraffic:
+          description: >-
+            Web traffic vs this community's web-traffic goal; the actual counts
+            GA sessions matched via MATCHED_DEVELOPMENT_NAME. Null when GA has
+            no development mapping for the community.
+          oneOf:
+            - $ref: "#/components/schemas/OwtGoalCell"
+            - type: "null"
+        leads:
+          $ref: "#/components/schemas/OwtGoalCell"
+        firstTours:
+          $ref: "#/components/schemas/OwtGoalCell"
+        moveIns:
+          $ref: "#/components/schemas/OwtGoalCell"
       required:
-        [community, fullSpanGoal, toDateGoal, ratified, onlineRatified, onsiteRatified, cancelled, net, ptgPercent]
+        [community, fullSpanGoal, toDateGoal, ratified, onlineRatified, onsiteRatified, cancelled, net, ptgPercent, webTraffic, leads, firstTours, moveIns]
     LeasingMonthlyPoint:
       type: object
       description: >

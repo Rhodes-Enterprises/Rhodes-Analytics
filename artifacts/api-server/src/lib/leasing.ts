@@ -24,6 +24,33 @@ import { createQueryCache } from "./query-cache";
 // keeps its own entry budget, but the background-refresh rate-limit gate is
 // shared process-wide.
 const cached = createQueryCache({ maxEntries: 200 });
+
+/**
+ * Minimal concurrency limiter for the dashboard's cold-cache query burst.
+ * The Snowflake proxy allows ~10 RPS per repl; an unbounded Promise.all of
+ * 15 queries can breach that on its own when the proxy is already busy.
+ */
+function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiters: (() => void)[] = [];
+  return async function limit<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) {
+      // Wait for a slot; the releasing task transfers its slot directly to
+      // us (active stays constant), so latecomers can't overshoot the cap.
+      await new Promise<void>((resolve) => waiters.push(resolve));
+    } else {
+      active++;
+    }
+    try {
+      return await fn();
+    } finally {
+      const next = waiters.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
 export interface LeasingFilters {
   community?: string;
   channel?: string;
@@ -181,26 +208,53 @@ async function fetchLeaseCounts(
   );
 }
 
-/** Count RL web sessions (GA session starts for the Rhodes Living property). */
-async function fetchTrafficCount(f: LeasingFilters): Promise<number> {
+/**
+ * Count RL web sessions (GA session starts for the Rhodes Living property)
+ * grouped by matched community. Only some communities have a GA
+ * MATCHED_DEVELOPMENT_NAME mapping; unmatched sessions come back with a
+ * null COMMUNITY (they still count toward the site-wide total).
+ */
+async function fetchTrafficByCommunity(f: LeasingFilters): Promise<LeaseRow[]> {
   const binds: (string | number)[] = [f.startDate, f.toDate];
   let communitySql = "";
   if (f.community) {
-    communitySql = " AND MATCHED_DEVELOPMENT_NAME = ?";
+    communitySql = " AND TRIM(MATCHED_DEVELOPMENT_NAME) = ?";
     binds.push(f.community);
   }
   const sql = `
-    SELECT COUNT(*) AS N
+    SELECT TRIM(MATCHED_DEVELOPMENT_NAME) AS COMMUNITY,
+           NULL AS CHANNEL,
+           COUNT(*) AS N
     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
     WHERE PROPERTY = 'Rhodes Living'
       AND IS_SESSION_START = 'Yes'
-      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}`;
-  return cached(`rlTraffic:${JSON.stringify(f)}`, async () => {
-    const rows = await querySnowflake<{ N: number }>(sql, binds);
-    return Number(rows[0]?.N) || 0;
-  });
+      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}
+    GROUP BY 1`;
+  return cached(`rlTrafficByDev:${JSON.stringify(f)}`, () =>
+    querySnowflake<LeaseRow>(sql, binds),
+  );
 }
 
+/**
+ * Communities that have a GA development mapping at all, independent of any
+ * date range or filter. Used to distinguish "mapped but zero sessions in the
+ * selected range" (a real 0 against the goal) from "GA has no mapping for
+ * this community" (null, rendered as a dash). Any event row with a matched
+ * development proves the mapping exists.
+ */
+async function fetchTrafficMappedCommunities(): Promise<Set<string>> {
+  const rows = await cached("rlTrafficMappedDomain", () =>
+    querySnowflake<{ COMMUNITY: string }>(
+      `SELECT DISTINCT TRIM(MATCHED_DEVELOPMENT_NAME) AS COMMUNITY
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = 'Rhodes Living'
+         AND MATCHED_DEVELOPMENT_NAME IS NOT NULL
+         AND TRIM(MATCHED_DEVELOPMENT_NAME) <> ''`,
+      [],
+    ),
+  );
+  return new Set(rows.map((r) => r.COMMUNITY));
+}
 /**
  * Count RL contacts by community/channel for a funnel stage.
  * - leads: contacts created in range with an RL community of interest
@@ -467,6 +521,12 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     ),
   ];
 
+  // Bound the cold-cache fan-out: this dashboard needs 15 Snowflake queries,
+  // and firing them all at once can alone breach the proxy's ~10 RPS budget
+  // (429s) when the proxy is already contended (boot warm-up, background
+  // refreshes, audits). The global refresh gate only covers SWR refreshes,
+  // so cap this endpoint's own burst; 4-wide keeps cold-miss latency low.
+  const limit = createLimiter(4);
   const [
     goals,
     ratified,
@@ -474,7 +534,7 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     monthlyRatified,
     monthlyCancelled,
     monthlyGoals,
-    traffic,
+    trafficRows,
     leadRows,
     tourRows,
     moveInRows,
@@ -482,21 +542,23 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     monthlyLeads,
     monthlyTours,
     monthlyMoveIns,
+    trafficDomain,
   ] = await Promise.all([
-    fetchGoals(f, fiscalYear, types),
-    fetchLeaseCounts(f, "LEASE_RATIFIED_DATE"),
-    fetchLeaseCounts(f, "CANCELLATION_DATE"),
-    fetchMonthly(f, "LEASE_RATIFIED_DATE"),
-    fetchMonthly(f, "CANCELLATION_DATE"),
-    fetchMonthlyGoals(f, fiscalYear, monthlyGoalTypes),
-    fetchTrafficCount(f),
-    fetchContactStageCounts(f, "leads"),
-    fetchContactStageCounts(f, "firstTours"),
-    fetchContactStageCounts(f, "moveIns"),
-    fetchMonthlyTraffic(f),
-    fetchMonthlyContactStage(f, "leads"),
-    fetchMonthlyContactStage(f, "firstTours"),
-    fetchMonthlyContactStage(f, "moveIns"),
+    limit(() => fetchGoals(f, fiscalYear, types)),
+    limit(() => fetchLeaseCounts(f, "LEASE_RATIFIED_DATE")),
+    limit(() => fetchLeaseCounts(f, "CANCELLATION_DATE")),
+    limit(() => fetchMonthly(f, "LEASE_RATIFIED_DATE")),
+    limit(() => fetchMonthly(f, "CANCELLATION_DATE")),
+    limit(() => fetchMonthlyGoals(f, fiscalYear, monthlyGoalTypes)),
+    limit(() => fetchTrafficByCommunity(f)),
+    limit(() => fetchContactStageCounts(f, "leads")),
+    limit(() => fetchContactStageCounts(f, "firstTours")),
+    limit(() => fetchContactStageCounts(f, "moveIns")),
+    limit(() => fetchMonthlyTraffic(f)),
+    limit(() => fetchMonthlyContactStage(f, "leads")),
+    limit(() => fetchMonthlyContactStage(f, "firstTours")),
+    limit(() => fetchMonthlyContactStage(f, "moveIns")),
+    limit(() => fetchTrafficMappedCommunities()),
   ]);
 
   const goalTotal = (
@@ -544,25 +606,37 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     stage: FunnelStage,
     metric: GoalMetric,
     kind: "FULL_SPAN" | "TO_DATE",
+    community?: string,
   ) => {
     const eff = effectiveMetric(metric);
     const gt = eff ? funnelGoalTypes.get(`${stage}:${eff}`) : undefined;
     if (!gt) return 0;
     let total = 0;
     for (const r of goals) {
-      if (r.GOAL_TYPE === gt) total += Number(r[kind]) || 0;
+      if (r.GOAL_TYPE !== gt) continue;
+      if (community && r.DEVELOPMENT_NAME !== community) continue;
+      total += Number(r[kind]) || 0;
     }
     return total;
   };
-  const funnelCell = (stage: FunnelStage, metric: GoalMetric, actual: number) => {
-    const toDateGoal = funnelGoalTotal(stage, metric, "TO_DATE");
+  const funnelCell = (
+    stage: FunnelStage,
+    metric: GoalMetric,
+    actual: number,
+    community?: string,
+  ) => {
+    const toDateGoal = funnelGoalTotal(stage, metric, "TO_DATE", community);
     return {
-      fullSpanGoal: funnelGoalTotal(stage, metric, "FULL_SPAN"),
+      fullSpanGoal: funnelGoalTotal(stage, metric, "FULL_SPAN", community),
       toDateGoal,
       actual,
       ptgPercent: ptg(actual, toDateGoal),
     };
   };
+
+  // Site-wide traffic = all sessions, matched to a community or not.
+  const traffic = sumRows(trafficRows);
+
   const funnel = {
     webTraffic: funnelCell("webTraffic", "total", traffic),
     leads: funnelCell("leads", "total", sumRows(leadRows)),
@@ -604,12 +678,24 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     net: cell("total", actuals.net),
   };
 
-  // Community summary — union of communities present in goals or actuals.
+  // Community summary — union of communities present in goals or any
+  // actuals (leases, funnel stages, GA-matched traffic), so a community
+  // with activity but no goals never vanishes silently.
   const names = new Set<string>();
   for (const r of goals) if (r.DEVELOPMENT_NAME) names.add(r.DEVELOPMENT_NAME);
-  for (const r of ratified) if (r.COMMUNITY) names.add(r.COMMUNITY);
-  for (const r of cancelled) if (r.COMMUNITY) names.add(r.COMMUNITY);
+  for (const rows of [ratified, cancelled, leadRows, tourRows, moveInRows, trafficRows]) {
+    for (const r of rows) if (r.COMMUNITY) names.add(r.COMMUNITY);
+  }
   names.delete("(No Value)");
+  const trafficByCommunity = new Map<string, number>();
+  for (const r of trafficRows) {
+    if (r.COMMUNITY) {
+      trafficByCommunity.set(
+        r.COMMUNITY,
+        (trafficByCommunity.get(r.COMMUNITY) ?? 0) + (Number(r.N) || 0),
+      );
+    }
+  }
   const communities = [...names].sort().map((community) => {
     const cRatified = sumRows(ratified, (r) => r.COMMUNITY === community);
     const cCancelled = sumRows(cancelled, (r) => r.COMMUNITY === community);
@@ -629,6 +715,38 @@ export async function getLeasingDashboard(f: LeasingFilters) {
       ),
       cancelled: cCancelled,
       net: cRatified - cCancelled,
+      // Per-community upstream funnel vs the community's own RL_* goals.
+      // GA traffic cells exist for communities with a GA development
+      // mapping (a range-independent fact): mapped communities with no
+      // in-range sessions show a real 0 against their goal, while unmapped
+      // ones are null (rendered as a dash) — a missing mapping must not
+      // read as a goal miss, and zero traffic must not read as unmapped.
+      webTraffic: trafficDomain.has(community)
+        ? funnelCell(
+            "webTraffic",
+            "total",
+            trafficByCommunity.get(community) ?? 0,
+            community,
+          )
+        : null,
+      leads: funnelCell(
+        "leads",
+        "total",
+        sumRows(leadRows, (r) => r.COMMUNITY === community),
+        community,
+      ),
+      firstTours: funnelCell(
+        "firstTours",
+        "total",
+        sumRows(tourRows, (r) => r.COMMUNITY === community),
+        community,
+      ),
+      moveIns: funnelCell(
+        "moveIns",
+        "total",
+        sumRows(moveInRows, (r) => r.COMMUNITY === community),
+        community,
+      ),
       ptgPercent: ptg(cRatified, tdGoal),
     };
   });
