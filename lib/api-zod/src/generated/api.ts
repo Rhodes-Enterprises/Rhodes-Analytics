@@ -218,6 +218,23 @@ export const GetOwtDashboardResponse = zod.object({
 }).describe('One CRM record missing an Online\/Onsite channel label'))
 }).describe('Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.')
 }).describe('The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain.'),
+  "unknownTrend": zod.object({
+  "leads": zod.array(zod.object({
+  "month": zod.string().describe('Calendar month, YYYY-MM'),
+  "unknown": zod.number().describe('Records dated this month with no Online\/Onsite channel label'),
+  "total": zod.number().describe('All records dated this month, any channel label')
+}).describe('One month of the channel-labeling gap: records with no Online\/Onsite label (unknown) out of all records dated that month (total). Share = unknown \/ total where total > 0.')),
+  "tours": zod.array(zod.object({
+  "month": zod.string().describe('Calendar month, YYYY-MM'),
+  "unknown": zod.number().describe('Records dated this month with no Online\/Onsite channel label'),
+  "total": zod.number().describe('All records dated this month, any channel label')
+}).describe('One month of the channel-labeling gap: records with no Online\/Onsite label (unknown) out of all records dated that month (total). Share = unknown \/ total where total > 0.')),
+  "sales": zod.array(zod.object({
+  "month": zod.string().describe('Calendar month, YYYY-MM'),
+  "unknown": zod.number().describe('Records dated this month with no Online\/Onsite channel label'),
+  "total": zod.number().describe('All records dated this month, any channel label')
+}).describe('One month of the channel-labeling gap: records with no Online\/Onsite label (unknown) out of all records dated that month (total). Share = unknown \/ total where total > 0.'))
+}).describe('Month-by-month channel-labeling gap for the applied window (startDate..toDate, zero-filled for quiet months, ascending): per bucket, how many records carried no Online\/Onsite label each month and out of how many. Same unlabeled predicate and same Snowflake statement as the matrix bucket and drill-down list, so each bucket\'s monthly unknowns sum exactly to its trafficMatrix.unknown count in this response (audited) — shows whether CRM hygiene work is actually shrinking the gap.'),
   "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
   "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
@@ -417,6 +434,7 @@ export const GetEhiGoalsResponse = zod.object({
   "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
+
 /**
  * @summary Community List directory with YTD funnel counts
  */
@@ -454,6 +472,7 @@ export const GetSnowflakeStatusResponse = zod.object({
   "schema": zod.string().optional(),
   "error": zod.string().optional()
 })
+
 
 /**
  * @summary Filter options for the Rhodes Living Leasing dashboard
@@ -636,7 +655,6 @@ export const GetLeasingDashboardResponse = zod.object({
 export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
-
 /**
  * @summary Filter options for the Overview with Targets dashboard
  */

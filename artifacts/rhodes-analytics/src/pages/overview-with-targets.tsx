@@ -27,6 +27,7 @@ import {
   getGetOwtYoyQueryKey,
   type OwtDashboard,
   type OwtRatioRow,
+  type OwtUnknownTrendPoint,
   type OwtYoy,
   type GetOwtDashboardParams,
   type GetOwtYoyParams,
@@ -39,6 +40,7 @@ import {
   InvertedRangeHint,
   LiveStatusBadge,
   LoneDateHint,
+  MONTH_NAMES,
   RefreshDataButton,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -493,6 +495,15 @@ function MatrixRow({
  * size of the attribution gap obvious at a glance. Clicking the row opens
  * the drill-down dialog listing the specific CRM records to fix.
  */
+/**
+ * Share formatting shared by the Unknown matrix rows and the monthly trend
+ * strip: null when there is nothing to divide, "<1" below one percent,
+ * whole numbers otherwise — the two surfaces must never round differently.
+ */
+function shareLabel(actual: number, total: number): string | null {
+  const pct = total > 0 && actual > 0 ? (actual / total) * 100 : null;
+  return pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
+}
 function UnknownRow({
   label,
   actual,
@@ -506,8 +517,7 @@ function UnknownRow({
   totalName: string;
   onOpen: () => void;
 }) {
-  const pct = total > 0 && actual > 0 ? (actual / total) * 100 : null;
-  const share = pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
+  const share = shareLabel(actual, total);
   return (
     <tr
       className="group border-b last:border-0 cursor-pointer transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
@@ -674,6 +684,7 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
             row to see the exact records to fix.
           </p>
         )}
+        {hasUnknown && <UnknownTrendSection data={data} />}
         <UnknownRecordsDialog
           bucket={drillBucket}
           open={drillOpen}
@@ -693,6 +704,11 @@ const UNKNOWN_BUCKET_META: Record<
   tours: { title: "Unknown Tours", noun: "tours", dateHeader: "First tour" },
   sales: { title: "Unknown Sales", noun: "sales", dateHeader: "Contract ratified" },
 };
+
+/** "2026-03" → "Mar". Ranges never cross calendar years (API-enforced). */
+function trendMonthLabel(month: string): string {
+  return MONTH_NAMES[Number(month.slice(5, 7)) - 1] ?? month;
+}
 function DivisionTable({ data }: { data: OwtDashboard }) {
   return (
     <SummaryTable
@@ -1433,5 +1449,124 @@ function UnknownRecordsBody({
               </p>
             )}
     </>
+  );
+}
+
+interface TrendChartPoint extends OwtUnknownTrendPoint {
+  label: string;
+  /** Percent 0–100, or null for months with no records at all */
+  share: number | null;
+}
+
+/**
+ * Is the channel-labeling gap shrinking? One small bar chart per bucket:
+ * each month's share of records with no Online/Onsite label, from the SAME
+ * API payload (and, server-side, the same Snowflake statement) as the
+ * matrix bucket above — the monthly counts sum exactly to the matrix's
+ * Unknown row, which the dashboard audit enforces.
+ */
+function UnknownTrendSection({ data }: { data: OwtDashboard }) {
+  const trend = data.unknownTrend;
+  const buckets: { key: UnknownBucketKey; title: string; noun: string }[] = [
+    { key: "leads", title: "Leads", noun: "leads" },
+    { key: "tours", title: "Tours", noun: "tours" },
+    { key: "sales", title: "Sales", noun: "sales" },
+  ];
+  const pctCsv = (p: OwtUnknownTrendPoint | undefined): number | null =>
+    p && p.total > 0 ? Number(((p.unknown / p.total) * 100).toFixed(1)) : null;
+  const downloadUnknownTrend = (format: DownloadFormat) => {
+    // Buckets share one zero-filled month span; key by month anyway so a
+    // shape surprise can never silently misalign rows.
+    const tours = new Map(trend.tours.map((p) => [p.month, p]));
+    const sales = new Map(trend.sales.map((p) => [p.month, p]));
+    return downloadData(
+      format,
+      "overview-with-targets-unknown-trend",
+      [
+        "Month",
+        "Unknown Leads", "Total Leads", "Unknown Leads %",
+        "Unknown Tours", "Total Tours", "Unknown Tours %",
+        "Unknown Sales", "Total Sales", "Unknown Sales %",
+      ],
+      trend.leads.map((l): CsvValue[] => {
+        const t = tours.get(l.month);
+        const s = sales.get(l.month);
+        return [
+          l.month,
+          l.unknown, l.total, pctCsv(l),
+          t?.unknown ?? 0, t?.total ?? 0, pctCsv(t),
+          s?.unknown ?? 0, s?.total ?? 0, pctCsv(s),
+        ];
+      }),
+    );
+  };
+  return (
+    <div className="mt-4 border-t pt-3" data-testid="section-unknown-trend">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Unknown share by month
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Share of each month's records with no Online/Onsite label — bars
+            trending down means the CRM cleanup is working. Counts sum to the
+            Unknown rows above.
+          </p>
+        </div>
+        <DownloadDataButton slug="unknown-trend" onDownload={downloadUnknownTrend} />
+      </div>
+      <div className="mt-2 grid gap-x-6 gap-y-3 sm:grid-cols-3">
+        {buckets.map(({ key, title, noun }) => {
+          const points: TrendChartPoint[] = trend[key].map((p) => ({
+            ...p,
+            label: trendMonthLabel(p.month),
+            share: p.total > 0 ? (p.unknown / p.total) * 100 : null,
+          }));
+          const latest = [...points].reverse().find((p) => p.total > 0);
+          const latestShare = latest ? shareLabel(latest.unknown, latest.total) : null;
+          return (
+            <div key={key} data-testid={`trend-unknown-${key}`}>
+              <div className="flex items-baseline justify-between gap-2 text-xs">
+                <span className="font-medium">{title}</span>
+                <span
+                  className="text-muted-foreground tabular-nums"
+                  data-testid={`text-trend-latest-${key}`}
+                >
+                  {latest
+                    ? `${latest.label}: ${nf.format(latest.unknown)} of ${nf.format(latest.total)}` +
+                      (latestShare != null ? ` (${latestShare}%)` : "")
+                    : "–"}
+                </span>
+              </div>
+              <div className="mt-1 h-16">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={points} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
+                    <XAxis
+                      dataKey="label"
+                      tickLine={false}
+                      axisLine={false}
+                      tick={{ fontSize: 10 }}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis hide domain={[0, "auto"]} />
+                    <RTooltip
+                      cursor={{ fill: "hsl(215 16% 62% / 0.15)" }}
+                      labelFormatter={(label, payload) => {
+                        const p = payload?.[0]?.payload as TrendChartPoint | undefined;
+                        return p
+                          ? `${p.label}: ${nf.format(p.unknown)} of ${nf.format(p.total)} ${noun} unlabeled`
+                          : String(label);
+                      }}
+                      formatter={(v: number) => [v < 1 ? "<1%" : `${Math.round(v)}%`, "Unknown share"]}
+                    />
+                    <Bar dataKey="share" fill="#d97706" radius={[2, 2, 0, 0]} maxBarSize={18} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

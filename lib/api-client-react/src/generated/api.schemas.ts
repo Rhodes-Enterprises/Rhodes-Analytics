@@ -243,6 +243,17 @@ export type OwtDashboardUnknownRecords = {
   sales: OwtUnknownBucketList;
 };
 
+/**
+ * One month of the channel-labeling gap: records with no Online/Onsite label (unknown) out of all records dated that month (total). Share = unknown / total where total > 0.
+ */
+export interface OwtUnknownTrendPoint {
+  /** Calendar month, YYYY-MM */
+  month: string;
+  /** Records dated this month with no Online/Onsite channel label */
+  unknown: number;
+  /** All records dated this month, any channel label */
+  total: number;
+}
 export interface OwtDivisionRow {
   division: string;
   newWebsiteUsers: number;
@@ -313,6 +324,8 @@ export interface OwtDashboard {
   ratios: OwtRatioRow[];
   /** The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain. */
   unknownRecords: OwtDashboardUnknownRecords;
+  /** Month-by-month channel-labeling gap for the applied window (startDate..toDate, zero-filled for quiet months, ascending): per bucket, how many records carried no Online/Onsite label each month and out of how many. Same unlabeled predicate and same Snowflake statement as the matrix bucket and drill-down list, so each bucket's monthly unknowns sum exactly to its trafficMatrix.unknown count in this response (audited) — shows whether CRM hygiene work is actually shrinking the gap. */
+  unknownTrend: OwtDashboardUnknownTrend;
   /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
   dataAsOf: string;
   /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
@@ -693,10 +706,18 @@ endDate?: string;
  */
 refresh?: ForceRefreshParameter;
 };
-
 export type GetLeasingFiltersParams = {
 /**
  * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
  */
 refresh?: ForceRefreshParameter;
+};
+
+/**
+ * Month-by-month channel-labeling gap for the applied window (startDate..toDate, zero-filled for quiet months, ascending): per bucket, how many records carried no Online/Onsite label each month and out of how many. Same unlabeled predicate and same Snowflake statement as the matrix bucket and drill-down list, so each bucket's monthly unknowns sum exactly to its trafficMatrix.unknown count in this response (audited) — shows whether CRM hygiene work is actually shrinking the gap.
+ */
+export type OwtDashboardUnknownTrend = {
+  leads: OwtUnknownTrendPoint[];
+  tours: OwtUnknownTrendPoint[];
+  sales: OwtUnknownTrendPoint[];
 };

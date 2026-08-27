@@ -145,6 +145,10 @@ router.get("/dashboards/overview-with-targets", async (req, res) => {
       // a background cache refresh can never make a drill-down dialog
       // disagree with the matrix row the user clicked.
       unknownRecords: data.unknownRecords,
+      // Month-by-month unlabeled counts from those same bundles: each
+      // bucket's monthly unknowns sum exactly to its matrix bucket above
+      // (same statement, same snapshot — audited).
+      unknownTrend: data.unknownTrend,
       divisions: data.divisions,
       developments: data.developments,
       ratios: data.ratios,

@@ -716,6 +716,31 @@ components:
             sales:
               $ref: "#/components/schemas/OwtUnknownBucketList"
           required: [leads, tours, sales]
+        unknownTrend:
+          type: object
+          description: >-
+            Month-by-month channel-labeling gap for the applied window
+            (startDate..toDate, zero-filled for quiet months, ascending):
+            per bucket, how many records carried no Online/Onsite label
+            each month and out of how many. Same unlabeled predicate and
+            same Snowflake statement as the matrix bucket and drill-down
+            list, so each bucket's monthly unknowns sum exactly to its
+            trafficMatrix.unknown count in this response (audited) — shows
+            whether CRM hygiene work is actually shrinking the gap.
+          properties:
+            leads:
+              type: array
+              items:
+                $ref: "#/components/schemas/OwtUnknownTrendPoint"
+            tours:
+              type: array
+              items:
+                $ref: "#/components/schemas/OwtUnknownTrendPoint"
+            sales:
+              type: array
+              items:
+                $ref: "#/components/schemas/OwtUnknownTrendPoint"
+          required: [leads, tours, sales]
         dataAsOf:
           type: string
           description: >-
@@ -728,7 +753,7 @@ components:
             True when at least one underlying cache entry was served stale
             with a background refresh in flight (newer numbers arrive on the
             next load).
-      required: [appliedRange, dataAsOf, refreshing, kpis, trafficMatrix, divisions, developments, ratios, unknownRecords]
+      required: [appliedRange, dataAsOf, refreshing, kpis, trafficMatrix, divisions, developments, ratios, unknownRecords, unknownTrend]
     OwtDevelopmentRow:
       allOf:
         - $ref: "#/components/schemas/OwtDivisionRow"
@@ -861,6 +886,23 @@ components:
           type: ["string", "null"]
           description: Link to the record in the CRM
       required: [name, email, development, division, date, rawChannel, crmUrl]
+    OwtUnknownTrendPoint:
+      type: object
+      description: >-
+        One month of the channel-labeling gap: records with no
+        Online/Onsite label (unknown) out of all records dated that month
+        (total). Share = unknown / total where total > 0.
+      properties:
+        month:
+          type: string
+          description: Calendar month, YYYY-MM
+        unknown:
+          type: number
+          description: Records dated this month with no Online/Onsite channel label
+        total:
+          type: number
+          description: All records dated this month, any channel label
+      required: [month, unknown, total]
     OwtUnknownBucketList:
       type: object
       description: >-

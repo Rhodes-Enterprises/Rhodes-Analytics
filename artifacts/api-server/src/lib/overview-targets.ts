@@ -271,18 +271,20 @@ const unlabeledCount = (rows: ActualRow[], company?: string, development?: strin
   );
 
 /**
- * One cache entry carries BOTH the grouped channel aggregates a matrix cell
- * is computed from AND the record-level unknown-channel list behind that
- * cell. The two result sets come from ONE Snowflake statement (UNION ALL
- * with a ROW_KIND discriminator), so they see a single statement-level
- * snapshot of the source table: CRM writes landing mid-fill cannot make the
- * list disagree with the aggregates, and because both live in one cache
- * entry they can never be served from data states cached at different
- * times either.
+ * One cache entry carries the grouped channel aggregates a matrix cell is
+ * computed from, the record-level unknown-channel list behind that cell,
+ * AND the per-month labeled/unlabeled counts the trend strip charts. The
+ * three result sets come from ONE Snowflake statement (UNION ALL with a
+ * ROW_KIND discriminator), so they see a single statement-level snapshot
+ * of the source table: CRM writes landing mid-fill cannot make the list or
+ * the monthly trend disagree with the aggregates, and because all three
+ * live in one cache entry they can never be served from data states cached
+ * at different times either.
  */
 interface ActualsBundle {
   rows: ActualRow[];
   unknownRows: UnknownRecordRow[];
+  monthly: MonthlyMixRow[];
 }
 
 async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<ActualsBundle> {
@@ -685,6 +687,13 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
       tours: toUnknownList(toursBundle),
       sales: toUnknownList(salesBundle),
     },
+    // Month-by-month unlabeled counts + denominators, from the same bundled
+    // statements as the buckets above — is the labeling gap shrinking?
+    unknownTrend: {
+      leads: toUnknownTrend(leadsBundle, f),
+      tours: toUnknownTrend(toursBundle, f),
+      sales: toUnknownTrend(salesBundle, f),
+    },
   };
 }
 
@@ -840,7 +849,9 @@ const unlabeledChannelSql = (col: string) =>
 /**
  * One bundled statement per bucket: the grouped channel aggregates (ROW_KIND
  * 'AGG') UNION ALL'd with the record-level unlabeled list (ROW_KIND 'REC',
- * capped, newest first). Both branches share the source table, lead/sale
+ * capped, newest first) and the per-month channel-mix counts (ROW_KIND
+ * 'MON': all rows vs rows satisfying the same unlabeled predicate, grouped
+ * by calendar month). All branches share the source table, lead/sale
  * membership predicate, date window (startDate..toDate), and filter
  * fragments — and because they execute as a single Snowflake statement they
  * read one consistent snapshot of the source table. Leads are dated by
@@ -849,9 +860,11 @@ const unlabeledChannelSql = (col: string) =>
  *
  * Column mapping for 'REC' rows: COMPANY_NAME carries the record's division,
  * DEVELOPMENT_NAME its community-of-interest, CHANNEL its raw channel value.
+ * For 'MON' rows: MONTH_KEY carries the calendar month (YYYY-MM), N the
+ * unlabeled count, TOTAL_N the all-channels count for that month.
  */
 interface BundledRow {
-  ROW_KIND: "AGG" | "REC";
+  ROW_KIND: "AGG" | "REC" | "MON";
   COMPANY_NAME: string | null;
   DEVELOPMENT_NAME: string | null;
   CHANNEL: string | null;
@@ -861,11 +874,19 @@ interface BundledRow {
   EVENT_DATE: string | null;
   CRM_URL: string | null;
   TOTAL_N: number | null;
+  MONTH_KEY: string | null;
 }
 
+/** One month of a bucket's channel mix: unlabeled count vs all records. */
+interface MonthlyMixRow {
+  MONTH: string;
+  UNKNOWN_N: number;
+  TOTAL_N: number;
+}
 function splitBundle(rows: BundledRow[]): ActualsBundle {
   const agg: ActualRow[] = [];
   const unknownRows: UnknownRecordRow[] = [];
+  const monthly: MonthlyMixRow[] = [];
   for (const r of rows) {
     if (r.ROW_KIND === "AGG") {
       agg.push({
@@ -873,6 +894,12 @@ function splitBundle(rows: BundledRow[]): ActualsBundle {
         DEVELOPMENT_NAME: r.DEVELOPMENT_NAME,
         CHANNEL: r.CHANNEL,
         N: Number(r.N) || 0,
+      });
+    } else if (r.ROW_KIND === "MON") {
+      monthly.push({
+        MONTH: r.MONTH_KEY ?? "",
+        UNKNOWN_N: Number(r.N) || 0,
+        TOTAL_N: Number(r.TOTAL_N) || 0,
       });
     } else {
       unknownRows.push({
@@ -887,7 +914,7 @@ function splitBundle(rows: BundledRow[]): ActualsBundle {
       });
     }
   }
-  return { rows: agg, unknownRows };
+  return { rows: agg, unknownRows, monthly };
 }
 
 function bundledLeadActualsQuery(
@@ -903,7 +930,7 @@ function bundledLeadActualsQuery(
              C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
              COUNT(*) AS N,
              NULL AS NAME, NULL AS EMAIL, NULL AS EVENT_DATE,
-             NULL AS CRM_URL, NULL AS TOTAL_N
+             NULL AS CRM_URL, NULL AS TOTAL_N, NULL AS MONTH_KEY
       FROM DM_CONTACTS C
       LEFT JOIN ${DEV_DIM} D
         ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
@@ -911,8 +938,19 @@ function bundledLeadActualsQuery(
         AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
       GROUP BY 2, 3, 4
       UNION ALL
+      SELECT 'MON', NULL, NULL, NULL,
+             COUNT_IF(${unlabeledChannelSql("C.ONSITE_ONLINE_SOURCE_CHANNEL")}),
+             NULL, NULL, NULL, NULL, COUNT(*),
+             TO_CHAR(DATE_TRUNC('MONTH', C.${dateCol}), 'YYYY-MM')
+      FROM DM_CONTACTS C
+      LEFT JOIN ${DEV_DIM} D
+        ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+      WHERE ${isLeadSql("C")}
+        AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
+      GROUP BY 11
+      UNION ALL
       SELECT 'REC', R.DIVISION, R.DEVELOPMENT, R.RAW_CHANNEL, NULL,
-             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N
+             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N, NULL
       FROM (
         SELECT C.CONTACT_FULL_NAME AS NAME,
                C.CONTACT_EMAIL AS EMAIL,
@@ -931,7 +969,11 @@ function bundledLeadActualsQuery(
         ORDER BY C.${dateCol} DESC, C.CONTACT_FULL_NAME
         LIMIT ${UNKNOWN_RECORDS_LIMIT}
       ) R`,
-    binds: [f.startDate, f.toDate, ...cf.binds, f.startDate, f.toDate, ...cf.binds],
+    binds: [
+      f.startDate, f.toDate, ...cf.binds,
+      f.startDate, f.toDate, ...cf.binds,
+      f.startDate, f.toDate, ...cf.binds,
+    ],
   };
 }
 
@@ -948,7 +990,7 @@ function bundledSalesActualsQuery(f: DashboardFilters): {
              X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
              COUNT(*) AS N,
              NULL AS NAME, NULL AS EMAIL, NULL AS EVENT_DATE,
-             NULL AS CRM_URL, NULL AS TOTAL_N
+             NULL AS CRM_URL, NULL AS TOTAL_N, NULL AS MONTH_KEY
       FROM DM_DEALS X
       LEFT JOIN ${DEV_DIM} D
         ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
@@ -956,8 +998,19 @@ function bundledSalesActualsQuery(f: DashboardFilters): {
         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
       GROUP BY 2, 3, 4
       UNION ALL
+      SELECT 'MON', NULL, NULL, NULL,
+             COUNT_IF(${unlabeledChannelSql("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL")}),
+             NULL, NULL, NULL, NULL, COUNT(*),
+             TO_CHAR(DATE_TRUNC('MONTH', X.CONTRACT_RATIFIED_DATE), 'YYYY-MM')
+      FROM DM_DEALS X
+      LEFT JOIN ${DEV_DIM} D
+        ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+      WHERE ${isSaleSql("X")}
+        AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
+      GROUP BY 11
+      UNION ALL
       SELECT 'REC', R.DIVISION, R.DEVELOPMENT, R.RAW_CHANNEL, NULL,
-             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N
+             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N, NULL
       FROM (
         SELECT X.DEAL_NAME AS NAME,
                NULL AS EMAIL,
@@ -976,7 +1029,11 @@ function bundledSalesActualsQuery(f: DashboardFilters): {
         ORDER BY X.CONTRACT_RATIFIED_DATE DESC, X.DEAL_NAME
         LIMIT ${UNKNOWN_RECORDS_LIMIT}
       ) R`,
-    binds: [f.startDate, f.toDate, ...df.binds, f.startDate, f.toDate, ...df.binds],
+    binds: [
+      f.startDate, f.toDate, ...df.binds,
+      f.startDate, f.toDate, ...df.binds,
+      f.startDate, f.toDate, ...df.binds,
+    ],
   };
 }
 
@@ -1031,6 +1088,14 @@ interface UnknownBucketList {
  * background cache refresh between render and click can never make the
  * dialog disagree with the on-screen count.
  */
+export interface UnknownTrendPoint {
+  /** Calendar month, YYYY-MM */
+  month: string;
+  /** Records dated this month with no Online/Onsite channel label */
+  unknown: number;
+  /** All records dated this month, any channel label */
+  total: number;
+}
 function toUnknownList(bundle: ActualsBundle): UnknownBucketList {
   const rows = bundle.unknownRows;
   const total = rows.length > 0 ? Number(rows[0].TOTAL_N) || 0 : 0;
@@ -1047,4 +1112,55 @@ function toUnknownList(bundle: ActualsBundle): UnknownBucketList {
       crmUrl: r.CRM_URL,
     })),
   };
+}
+
+/**
+ * The monthly channel-labeling-gap trend for one bucket: how many records
+ * carried no Online/Onsite label each month (and out of how many), from the
+ * bundle's 'MON' rows. Months inside the applied window with no records at
+ * all are zero-filled so the chart axis stays continuous; the SQL emits no
+ * row for them. Because the 'MON' branch shares the statement, membership
+ * predicate, and date window with the 'AGG' branch, each bucket's monthly
+ * unknown counts sum EXACTLY to the matrix's unknown bucket in the same
+ * response — the audit fails on any drift.
+ */
+function toUnknownTrend(bundle: ActualsBundle, f: DashboardFilters): UnknownTrendPoint[] {
+  const byMonth = new Map<string, { unknown: number; total: number }>();
+  for (const r of bundle.monthly) {
+    // Months are unique out of GROUP BY; merge defensively anyway so an
+    // upstream surprise inflates a month rather than dropping counts.
+    const prev = byMonth.get(r.MONTH) ?? { unknown: 0, total: 0 };
+    prev.unknown += r.UNKNOWN_N;
+    prev.total += r.TOTAL_N;
+    byMonth.set(r.MONTH, prev);
+  }
+  for (const month of monthSpan(f.startDate, f.toDate)) {
+    if (!byMonth.has(month)) byMonth.set(month, { unknown: 0, total: 0 });
+  }
+  return [...byMonth.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([month, v]) => ({ month, unknown: v.unknown, total: v.total }));
+}
+
+/**
+ * Every calendar month touched by startDate..toDate (inclusive), as YYYY-MM
+ * keys. Derived purely from the already-resolved filter strings — no clock
+ * reads, no timezone parsing — so it cannot drift from the SQL window.
+ */
+function monthSpan(startDate: string, toDate: string): string[] {
+  const [sy, sm] = startDate.split("-").map(Number);
+  const [ey, em] = toDate.split("-").map(Number);
+  const out: string[] = [];
+  let y = sy;
+  let m = sm;
+  // Bounded defensively; validated ranges never span anywhere near this.
+  while ((y < ey || (y === ey && m <= em)) && out.length < 240) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
 }

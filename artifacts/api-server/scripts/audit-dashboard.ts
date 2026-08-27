@@ -368,6 +368,15 @@ interface OverviewResponse {
       }[];
     }
   >;
+  /**
+   * Month-by-month unlabeled counts + denominators per bucket, from the
+   * same bundled statements as the matrix buckets — Σ monthly.unknown must
+   * equal trafficMatrix.unknown per bucket in the same response.
+   */
+  unknownTrend: Record<
+    "leads" | "tours" | "sales",
+    { month: string; unknown: number; total: number }[]
+  >;
 }
 
 async function fetchOverview(params: Record<string, string>): Promise<OverviewResponse> {
@@ -498,6 +507,14 @@ interface Scenario {
    * guard.
    */
   withGaFlagGuard?: boolean;
+
+  /**
+   * Vacuity guard for the monthly unknown-channel trend: on scenarios whose
+   * window is known to contain traffic (default view, prior fiscal year),
+   * fail if every bucket's monthly totals sum to zero — Σ==bucket equalities
+   * on an all-zero trend verify nothing.
+   */
+  requireTrendData?: boolean;
 }
 
 interface Frag {
@@ -1690,6 +1707,7 @@ async function main() {
       withGaPropertyGuard: true,
       withGaFreshnessGuard: true,
       withGaFlagGuard: true,
+      requireTrendData: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
@@ -1743,6 +1761,7 @@ async function main() {
         endDate: `${priorYear}-12-31`,
       },
       pinTargets: true,
+      requireTrendData: true,
     },
   ];
   const elapsedQuarter = latestElapsedQuarterRange();
@@ -1787,6 +1806,19 @@ async function main() {
         result.expTo,
       );
       if (!drilldownOk) anyFailed = true;
+    }
+    // Same free in-response net for the monthly channel-labeling trend: per
+    // bucket, Σ monthly unknowns must equal the matrix bucket and Σ monthly
+    // totals its period denominator, with one zero-filled point per month
+    // of the applied window.
+    {
+      const trendOk = auditUnknownTrend(
+        scenario,
+        result.overview,
+        result.expStart,
+        result.expTo,
+      );
+      if (!trendOk) anyFailed = true;
     }
     // Goal-derived numbers are audited in EVERY scenario: goals respond to
     // company/development filters, must ignore channel filters, and rebind
@@ -2671,6 +2703,27 @@ function auditUnknownRecordsDrilldown(
   return !failed;
 }
 
+/**
+ * Every calendar month touched by start..to (inclusive), as YYYY-MM keys —
+ * pure string arithmetic on the audit's already-validated expected range,
+ * mirroring the API's zero-fill contract.
+ */
+function expectedMonthSpan(start: string, to: string): string[] {
+  const [sy, sm] = start.split("-").map(Number);
+  const [ey, em] = to.split("-").map(Number);
+  const out: string[] = [];
+  let y = sy;
+  let m = sm;
+  while ((y < ey || (y === ey && m <= em)) && out.length < 240) {
+    out.push(`${y}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
 function fmtNullable(v: number | null): string {
   return v === null ? "null" : String(v);
 }
@@ -3040,3 +3093,106 @@ function expectedGoalType(
 
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
+
+/**
+ * The monthly channel-labeling trend must reconcile with the SAME response's
+ * matrix, per bucket: Σ monthly.unknown == trafficMatrix.unknown and
+ * Σ monthly.total == the bucket's period denominator (total leads actual /
+ * total tours actual / gross sales). Server-side, every figure per bucket
+ * comes from ONE Snowflake statement, so a mismatch is real drift between
+ * the trend branch and the aggregate branch (predicate, date window, or
+ * plumbing) — never a race between separately timed queries. Integer
+ * equality, no tolerance. Also pins the shape the chart renders from:
+ * exactly one point per calendar month of the applied window, ascending,
+ * zero-filled, integers, unknown <= total.
+ *
+ * Vacuity: on scenarios whose data is known non-empty (requireTrendData),
+ * all three buckets summing to zero totals means the equalities verified
+ * nothing — fail loudly instead of passing 0 == 0.
+ */
+function auditUnknownTrend(
+  scenario: Scenario,
+  overview: OverviewResponse,
+  expStart: string,
+  expTo: string,
+): boolean {
+  console.log(`--- Unknown-channel monthly trend vs matrix buckets: ${scenario.name} ---`);
+  let failed = false;
+  const expectedMonths = expectedMonthSpan(expStart, expTo);
+  const denominators = {
+    leads: overview.trafficMatrix.total.leads.actual,
+    tours: overview.trafficMatrix.total.tours.actual,
+    sales: overview.kpis.grossSales,
+  } as const;
+  let grandTotal = 0;
+  for (const bucket of ["leads", "tours", "sales"] as const) {
+    const points = overview.unknownTrend?.[bucket];
+    if (!Array.isArray(points)) {
+      console.error(`FAIL unknownTrend.${bucket} missing from the response`);
+      failed = true;
+      continue;
+    }
+    const months = points.map((p) => p.month);
+    if (months.join(",") !== expectedMonths.join(",")) {
+      console.error(
+        `FAIL unknownTrend.${bucket} months [${months.join(", ")}] != expected ` +
+          `${expStart}..${expTo} span [${expectedMonths.join(", ")}] — the chart ` +
+          `axis no longer covers the applied window (missing/extra/unsorted months)`,
+      );
+      failed = true;
+    }
+    const malformed = points.filter(
+      (p) =>
+        !Number.isInteger(p.unknown) ||
+        !Number.isInteger(p.total) ||
+        p.unknown < 0 ||
+        p.unknown > p.total,
+    );
+    if (malformed.length > 0) {
+      const m = malformed[0];
+      console.error(
+        `FAIL unknownTrend.${bucket}: ${malformed.length} malformed points — counts ` +
+          `must be integers with 0 <= unknown <= total (e.g. ${m.month}: ` +
+          `unknown=${m.unknown}, total=${m.total})`,
+      );
+      failed = true;
+    }
+    const sumUnknown = points.reduce((t, p) => t + Number(p.unknown), 0);
+    const sumTotal = points.reduce((t, p) => t + Number(p.total), 0);
+    grandTotal += sumTotal;
+    const bucketCount = overview.trafficMatrix.unknown[bucket];
+    if (sumUnknown !== bucketCount) {
+      console.error(
+        `FAIL unknownTrend.${bucket} Σ monthly unknown=${sumUnknown} != matrix ` +
+          `unknown.${bucket}=${bucketCount} in the same response — the trend ` +
+          `branch and the aggregate branch disagree on what "unlabeled" means`,
+      );
+      failed = true;
+    } else {
+      console.log(`OK unknownTrend.${bucket} Σ unknown=${sumUnknown} == matrix bucket`);
+    }
+    const denom = denominators[bucket];
+    if (sumTotal !== denom) {
+      console.error(
+        `FAIL unknownTrend.${bucket} Σ monthly total=${sumTotal} != period ` +
+          `denominator ${denom} in the same response — monthly denominators no ` +
+          `longer add up to the bucket's headline total`,
+      );
+      failed = true;
+    } else {
+      console.log(`OK unknownTrend.${bucket} Σ total=${sumTotal} == period denominator`);
+    }
+  }
+  if (scenario.requireTrendData && grandTotal === 0) {
+    console.error(
+      `FAIL unknownTrend: every bucket's monthly totals sum to 0 on "${scenario.name}", ` +
+        `whose data is known non-empty — the trend equalities verified nothing ` +
+        `(0 == 0 across the board)`,
+    );
+    failed = true;
+  }
+  if (!failed) {
+    console.log("OK unknown-channel monthly trend reconciles with matrix buckets (same response)");
+  }
+  return !failed;
+}

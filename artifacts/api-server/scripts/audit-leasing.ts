@@ -468,6 +468,69 @@ const EMPTY_GOAL_SUMS: GoalSums = {
   byMonth: new Map(),
   byCommunity: new Map(),
 };
+
+/**
+ * Rich goal lookup: full-span/to-date sums PLUS per-month and per-community
+ * rollups for several goal types in ONE grouped query. Returns a lookup
+ * function; unknown/undefined types resolve to EMPTY_GOAL_SUMS. Feeds the
+ * headline goals, community summary, and monthly series baselines. (The
+ * flat Map-returning baselineGoalsByType below serves the funnel table,
+ * which only needs the scalar sums.)
+ */
+async function baselineGoalLookup(
+  goalTypes: (string | undefined)[],
+  fiscalYear: number,
+  startDate: string,
+  endDate: string,
+  toDate: string,
+  community?: string,
+): Promise<(goalType: string | undefined) => GoalSums> {
+  const types = [...new Set(goalTypes.filter((t): t is string => !!t))];
+  const byType = new Map<string, GoalSums>();
+  if (types.length) {
+    const binds: (string | number)[] = [toDate, fiscalYear, ...types, startDate, endDate];
+    let extra = "";
+    if (community) {
+      extra = " AND DEVELOPMENT_NAME = ?";
+      binds.push(community);
+    }
+    const rows = await querySnowflake<{
+      GT: string;
+      DEV: string | null;
+      M: number;
+      FULL_SPAN: number | null;
+      TO_DATE: number | null;
+    }>(
+      `SELECT GOAL_TYPE AS GT, DEVELOPMENT_NAME AS DEV, MONTH(BUDGET_DATE) AS M,
+              SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+       FROM DM_GOALS
+       WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(", ")})
+         AND BUDGET_DATE BETWEEN ? AND ?${extra}
+       GROUP BY 1, 2, 3`,
+      binds,
+    );
+    for (const row of rows) {
+      let g = byType.get(row.GT);
+      if (!g) {
+        g = { fullSpan: 0, toDate: 0, byMonth: new Map(), byCommunity: new Map() };
+        byType.set(row.GT, g);
+      }
+      const full = Number(row.FULL_SPAN) || 0;
+      const td = Number(row.TO_DATE) || 0;
+      const month = Number(row.M);
+      g.fullSpan += full;
+      g.toDate += td;
+      g.byMonth.set(month, (g.byMonth.get(month) ?? 0) + full);
+      if (row.DEV) {
+        const c = g.byCommunity.get(row.DEV) ?? { fullSpan: 0, toDate: 0 };
+        c.fullSpan += full;
+        c.toDate += td;
+        g.byCommunity.set(row.DEV, c);
+      }
+    }
+  }
+  return (goalType) => (goalType && byType.get(goalType)) || EMPTY_GOAL_SUMS;
+}
 /**
  * Goal baselines for every needed goal type in ONE grouped query, honoring
  * the community filter. Grouping DM_GOALS by (type, development, month)
@@ -664,7 +727,7 @@ async function auditScenario(scenario: Scenario): Promise<void> {
 
   // ---- Goals (one grouped query also feeds communities + monthly below,
   // including the per-community funnel-stage goal columns) ----
-  const goalFor = await baselineGoalsByType(
+  const goalFor = await baselineGoalLookup(
     [
       effGoalType("total"),
       effGoalType("online"),

@@ -35,3 +35,5 @@ stacked duplicates in files BOTH branches touched even if unconflicted,
 `pnpm typecheck` does NOT cover `scripts/` (tsconfig includes only `src`) and
 esbuild does not typecheck, so duplicate identifiers in audit scripts surface
 nowhere else.
+
+**Stacked-generation helper loss:** when one branch REWRITES a helper's shape (e.g. Map-returning) while another branch keeps calling the OLD shape (lookup-function-returning), auto-merge keeps one definition + both call-site generations — un-typechecked audit scripts then die at runtime with "X is not a function"/"X is not defined" (a batching branch can also DELETE a helper a sibling still calls). Repair: git log -S the symbol, restore the historical definition under a distinct name (or verbatim if deleted), point the orphaned call sites at it, then tsc-scan the script standalone (--noEmit --skipLibCheck, ignore TS2307 module noise — TS2304 undefined-name is the signal) to find ALL such symbols before burning full audit runs one crash at a time.
