@@ -129,46 +129,27 @@ function sendSnowflakeError(res: import("express").Response, err: unknown) {
 router.get("/dashboards/overview-with-targets/filters", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
-    res.json(await withForcedRefresh(wantsLiveData(query), () => getFilterOptions()));
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getLeasingFilterOptions()));
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/overview-with-targets", async (req, res) => {
+router.get("/dashboards/leasing", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getOverviewWithTargets(filters)),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
-    res.json({
-      appliedRange: {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        toDate: filters.toDate,
-        target: filters.target,
-      },
-      dataAsOf,
-      refreshing,
-      kpis: data.kpis,
-      trafficMatrix: data.trafficMatrix,
-      // Record-level lists behind the unknown buckets ride in the same
-      // response as the counts they explain, from the same cached bundle —
-      // a background cache refresh can never make a drill-down dialog
-      // disagree with the matrix row the user clicked.
-      unknownRecords: data.unknownRecords,
-      divisions: data.divisions,
-      developments: data.developments,
-      ratios: data.ratios,
-    });
+    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/overview-with-targets/yoy", async (req, res) => {
+router.get("/dashboards/communities", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
@@ -221,38 +202,24 @@ router.get("/dashboards/leasing/filters", async (req, res) => {
 router.get("/dashboards/leasing", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
-    const filters = buildLeasingFilters(query);
+    const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getLeasingDashboard(filters)),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
-    res.json({
-      appliedRange: {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        toDate: filters.toDate,
-      },
-      dataAsOf,
-      refreshing,
-      fiscalYear: data.fiscalYear,
-      kpis: data.kpis,
-      funnel: data.funnel,
-      matrix: data.matrix,
-      communities: data.communities,
-      monthly: data.monthly,
-    });
+    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/website-traffic", async (req, res) => {
+router.get("/dashboards/communities", async (req, res) => {
   try {
     const query = req.query as Record<string, unknown>;
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getWebsiteTraffic(filters)),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
@@ -273,7 +240,7 @@ router.get("/dashboards/funnel", async (req, res) => {
     const filters = buildFilters(query);
     const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
       wantsLiveData(query),
-      () => withDataFreshness(() => getFunnelMetric(metric, filters)),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
