@@ -877,6 +877,13 @@ components:
           type: number
         priorYear:
           type: number
+        gaHistoryStart:
+          type: ["string", "null"]
+          description: >-
+            Earliest GOOGLE_ANALYTICS_DATE with traffic rows (YYYY-MM-DD), or
+            null when no Google Analytics history exists at all. Months before
+            this date predate website tracking, so their websiteUsers points
+            are null ("no data yet") rather than 0.
         measures:
           type: array
           items:
@@ -892,14 +899,21 @@ components:
                     month:
                       type: number
                     currentYear:
-                      type: number
+                      type: ["number", "null"]
+                      description: >-
+                        Actual value, or null when the month predates the
+                        measure's source history (websiteUsers months before
+                        gaHistoryStart). True zeros after history began stay 0.
                     priorYear:
-                      type: number
+                      type: ["number", "null"]
+                      description: >-
+                        Prior-year value; null under the same no-history rule
+                        as currentYear.
                     goal:
                       type: number
                   required: [month, currentYear, priorYear, goal]
             required: [measure, points]
-      required: [year, priorYear, measures]
+      required: [year, priorYear, gaHistoryStart, measures]
     AppliedRange:
       type: object
       properties:

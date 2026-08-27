@@ -706,7 +706,7 @@ export async function getYearOverYear(f: DashboardFilters) {
       querySnowflake<T>(sql, binds),
     );
 
-  const [usersRows, leadRows, tourRows, salesRows, goalRows] = await Promise.all([
+  const [usersRows, leadRows, tourRows, salesRows, goalRows, gaStartRows] = await Promise.all([
     monthly(
       `SELECT YEAR(GOOGLE_ANALYTICS_DATE) Y, MONTH(GOOGLE_ANALYTICS_DATE) M,
               COUNT(DISTINCT USER_PSEUDO_ID) N
@@ -753,7 +753,27 @@ export async function getYearOverYear(f: DashboardFilters) {
        GROUP BY 1, 2, 3`,
       [year, ...gf.binds],
     ) as Promise<{ Y: number; M: number; GT: string; N: number }[]>,
+    // Earliest GA traffic date = when website tracking history begins.
+    // Deliberately UNFILTERED (no company/development): when tracking began
+    // is a property of the data pipeline, not of the current view — a
+    // filtered view with no traffic after this date is a true zero, while
+    // months before it are "no data yet" for every view. Cached under a
+    // global key so all filter combinations share one warehouse scan.
+    cached("gaHistoryStart", () =>
+      querySnowflake<{ D: string | null }>(
+        `SELECT MIN(GOOGLE_ANALYTICS_DATE) D
+         FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+         WHERE ${isGaTrafficSql()}`,
+      ),
+    ),
   ]);
+
+  // "YYYY-MM-DD" (the Snowflake layer renders DATE columns as ISO date
+  // strings), or null when the GA table has no traffic rows at all.
+  const gaHistoryStart = gaStartRows[0]?.D ?? null;
+  const gaStartMonthIndex = gaHistoryStart
+    ? Number(gaHistoryStart.slice(0, 4)) * 12 + (Number(gaHistoryStart.slice(5, 7)) - 1)
+    : null;
 
   const goalTypeForMeasure: Record<string, string> = {
     websiteUsers: "business_plan_web_traffic_year",
@@ -771,6 +791,14 @@ export async function getYearOverYear(f: DashboardFilters) {
   const measures = Object.keys(sets).map((measure) => {
     const rows = sets[measure];
     const gt = goalTypeForMeasure[measure];
+    // Website tracking has a hard start (the earliest GA row): months before
+    // it are "no data yet", NOT zero — report null so the chart can honestly
+    // draw a gap instead of a fake zero line. True zeros after history began
+    // stay 0. Only the GA-sourced measure has this cutoff; CRM-backed
+    // measures (leads/tours/sales) keep plain zeros.
+    const noHistory = (yr: number, m: number) =>
+      measure === "websiteUsers" &&
+      (gaStartMonthIndex === null || yr * 12 + (m - 1) < gaStartMonthIndex);
     const points = Array.from({ length: 12 }, (_, i) => {
       const m = i + 1;
       const pick = (yr: number) =>
@@ -782,15 +810,15 @@ export async function getYearOverYear(f: DashboardFilters) {
         .reduce((total, r) => total + (Number(r.N) || 0), 0);
       return {
         month: m,
-        currentYear: pick(year),
-        priorYear: pick(prior),
+        currentYear: noHistory(year, m) ? null : pick(year),
+        priorYear: noHistory(prior, m) ? null : pick(prior),
         goal,
       };
     });
     return { measure, points };
   });
 
-  return { year, priorYear: prior, measures };
+  return { year, priorYear: prior, gaHistoryStart, measures };
 }
 
 export const cached = createQueryCache({ maxEntries: 500 });

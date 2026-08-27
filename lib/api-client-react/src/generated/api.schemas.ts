@@ -312,8 +312,16 @@ export interface OwtDashboard {
 
 export type OwtYoyMeasuresItemPointsItem = {
   month: number;
-  currentYear: number;
-  priorYear: number;
+  /**
+     * Actual value, or null when the month predates the measure's source history (websiteUsers months before gaHistoryStart). True zeros after history began stay 0.
+     * @nullable
+     */
+  currentYear: number | null;
+  /**
+     * Prior-year value; null under the same no-history rule as currentYear.
+     * @nullable
+     */
+  priorYear: number | null;
   goal: number;
 };
 
@@ -325,6 +333,11 @@ export type OwtYoyMeasuresItem = {
 export interface OwtYoy {
   year: number;
   priorYear: number;
+  /**
+     * Earliest GOOGLE_ANALYTICS_DATE with traffic rows (YYYY-MM-DD), or null when no Google Analytics history exists at all. Months before this date predate website tracking, so their websiteUsers points are null ("no data yet") rather than 0.
+     * @nullable
+     */
+  gaHistoryStart: string | null;
   measures: OwtYoyMeasuresItem[];
 }
 

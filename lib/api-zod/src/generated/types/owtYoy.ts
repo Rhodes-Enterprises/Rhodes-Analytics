@@ -10,5 +10,10 @@ import type { OwtYoyMeasuresItem } from './owtYoyMeasuresItem';
 export interface OwtYoy {
   year: number;
   priorYear: number;
+  /**
+     * Earliest GOOGLE_ANALYTICS_DATE with traffic rows (YYYY-MM-DD), or null when no Google Analytics history exists at all. Months before this date predate website tracking, so their websiteUsers points are null ("no data yet") rather than 0.
+     * @nullable
+     */
+  gaHistoryStart: string | null;
   measures: OwtYoyMeasuresItem[];
 }

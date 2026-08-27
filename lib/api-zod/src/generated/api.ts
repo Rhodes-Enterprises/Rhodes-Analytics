@@ -235,12 +235,13 @@ export const GetOwtYoyQueryParams = zod.object({
 export const GetOwtYoyResponse = zod.object({
   "year": zod.number(),
   "priorYear": zod.number(),
+  "gaHistoryStart": zod.string().nullable().describe('Earliest GOOGLE_ANALYTICS_DATE with traffic rows (YYYY-MM-DD), or null when no Google Analytics history exists at all. Months before this date predate website tracking, so their websiteUsers points are null (\"no data yet\") rather than 0.'),
   "measures": zod.array(zod.object({
   "measure": zod.string(),
   "points": zod.array(zod.object({
   "month": zod.number(),
-  "currentYear": zod.number(),
-  "priorYear": zod.number(),
+  "currentYear": zod.number().nullable().describe('Actual value, or null when the month predates the measure\'s source history (websiteUsers months before gaHistoryStart). True zeros after history began stay 0.'),
+  "priorYear": zod.number().nullable().describe('Prior-year value; null under the same no-history rule as currentYear.'),
   "goal": zod.number()
 }))
 }))
@@ -638,4 +639,3 @@ export const HealthCheckResponse = zod.object({
 export const GetOwtFiltersQueryParams = zod.object({
   "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
-

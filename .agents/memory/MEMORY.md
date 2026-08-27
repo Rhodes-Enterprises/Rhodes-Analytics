@@ -25,3 +25,4 @@
 - [Post-rebase env drift](post-rebase-env-drift.md) — completion rebases don't reinstall deps; instant ERR_MODULE_NOT_FOUND in validation means run pnpm install, not debug the script.
 - [Stale TS project references](stale-project-references.md) — "no exported member" from @workspace libs during typecheck usually means stale dist/ declarations; run tsc -b on the lib first.
 - [Merge windows time out](merge-window-timeout.md) — resolve conflicts and call continueMergeResolution fast; platform aborts stalled rebases and drops WIP resolutions; verify before/after, not inside.
+- [No-history nulls](no-history-nulls.md) — months before a source's history start are null ("no data yet"), never 0; cutoff = unfiltered MIN(date), month-granular; audits require null exactly there.

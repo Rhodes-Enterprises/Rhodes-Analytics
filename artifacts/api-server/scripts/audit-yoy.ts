@@ -29,6 +29,16 @@
  * it is audited with the same rigor. Business-plan goal points are also
  * checked against DM_GOALS directly.
  *
+ * Months that predate GA history entirely (before the earliest
+ * GOOGLE_ANALYTICS_DATE) are a special case: the API reports websiteUsers
+ * as null ("no data yet") rather than 0 there, and exposes the cutoff as
+ * gaHistoryStart. The audit recomputes that cutoff independently
+ * (MIN(GOOGLE_ANALYTICS_DATE) under the same traffic predicate), requires
+ * the API's gaHistoryStart to match it exactly, requires null on exactly
+ * the pre-history months (all 12 points of both years), and requires plain
+ * numbers everywhere else — so neither a hardcoded cutoff date nor a
+ * null-everything regression can pass.
+ *
  * The websiteUsers baselines filter on the same shared GA property constant
  * the API uses (GA_PROPERTY_NAME in src/lib/business-defs.ts), so a renamed
  * analytics property upstream would zero
@@ -67,14 +77,17 @@ const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
 interface YoyPoint {
   month: number;
-  currentYear: number;
-  priorYear: number;
+  /** null = month predates GA history ("no data yet") — websiteUsers only */
+  currentYear: number | null;
+  priorYear: number | null;
   goal: number;
 }
 
 interface YoyResponse {
   year: number;
   priorYear: number;
+  /** Earliest GOOGLE_ANALYTICS_DATE (YYYY-MM-DD), or null when GA is empty */
+  gaHistoryStart: string | null;
   measures: { measure: string; points: YoyPoint[] }[];
 }
 
@@ -284,17 +297,45 @@ const GOAL_TYPE_FOR_MEASURE: Record<string, string> = {
   grossSales: "business_plan_gross_sales_year",
 };
 
+/**
+ * Independent baseline for when GA history starts: the earliest
+ * GOOGLE_ANALYTICS_DATE among traffic rows, under the SAME shared traffic
+ * predicate the API uses. The API must null out websiteUsers months BEFORE
+ * this month ("no data yet" instead of a fake zero line) and expose the
+ * date as gaHistoryStart — recomputing it here catches a hardcoded or
+ * drifted cutoff the moment upstream history changes.
+ */
+async function fetchGaHistoryStartBaseline(): Promise<string | null> {
+  const rows = await querySnowflake<{ D: string | null }>(
+    `SELECT MIN(GOOGLE_ANALYTICS_DATE) AS D
+     FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+     WHERE ${isGaTrafficSql()}`,
+  );
+  return rows[0]?.D ?? null;
+}
+
+/** Comparable calendar-month index (year*12 + month0) of a YYYY-MM-DD date. */
+function monthIndexOf(date: string): number {
+  return Number(date.slice(0, 4)) * 12 + (Number(date.slice(5, 7)) - 1);
+}
+
 // ---------- Scenario execution ----------
 
 interface Check {
   label: string;
-  api: number;
+  api: number | null;
   baseline: number;
+  /**
+   * Month predates GA history: the API must report null ("no data yet"),
+   * and the independent baseline must agree there are no rows (0).
+   */
+  expectNoData?: boolean;
 }
 
 async function auditScenario(
   scenario: Scenario,
   months: number[],
+  gaHistoryStart: string | null,
 ): Promise<boolean> {
   const f = scenario.filters;
   console.log(`\n=== Scenario: ${scenario.name} ===`);
@@ -323,6 +364,50 @@ async function auditScenario(
     if (!points || points.length !== 12) {
       console.error(`FAIL measure ${m} missing or does not have 12 monthly points`);
       return false;
+    }
+  }
+
+  // The API's no-history cutoff must be the data-driven earliest GA date —
+  // not a hardcoded constant that drifts as upstream history changes.
+  if ((yoy.gaHistoryStart ?? null) !== gaHistoryStart) {
+    console.error(
+      `FAIL gaHistoryStart mismatch: api=${JSON.stringify(yoy.gaHistoryStart)} ` +
+        `baseline MIN(GOOGLE_ANALYTICS_DATE)=${JSON.stringify(gaHistoryStart)}`,
+    );
+    return false;
+  }
+  const startYm = gaHistoryStart === null ? null : monthIndexOf(gaHistoryStart);
+  const preHistory = (yr: number, month: number) =>
+    startYm === null || yr * 12 + (month - 1) < startYm;
+  // The null pattern is structural, so check ALL 12 points of BOTH years —
+  // not just the spot-checked months: websiteUsers must be null on exactly
+  // the pre-history months, and every other measure must never be null
+  // (their CRM sources predate GA history).
+  for (const m of measures) {
+    for (const pt of byMeasure.get(m)!) {
+      const cells: [number, number | null][] = [
+        [yoy.year, pt.currentYear],
+        [yoy.priorYear, pt.priorYear],
+      ];
+      for (const [yr, val] of cells) {
+        const expectNull = m === "websiteUsers" && preHistory(yr, pt.month);
+        if (expectNull && val !== null) {
+          console.error(
+            `FAIL ${m} ${yr}-${String(pt.month).padStart(2, "0")}: month predates GA ` +
+              `history (${gaHistoryStart}), so the API must report null ("no data ` +
+              `yet"), got ${val}`,
+          );
+          return false;
+        }
+        if (!expectNull && typeof val !== "number") {
+          console.error(
+            `FAIL ${m} ${yr}-${String(pt.month).padStart(2, "0")}: expected a number, ` +
+              `got ${JSON.stringify(val)} (null is only allowed for pre-history ` +
+              `websiteUsers months)`,
+          );
+          return false;
+        }
+      }
     }
   }
 
@@ -369,11 +454,13 @@ async function auditScenario(
         label: `${measure} ${yoy.year}-${String(month).padStart(2, "0")}`,
         api: pt.currentYear,
         baseline: currentBaseline,
+        expectNoData: measure === "websiteUsers" && preHistory(yoy.year, month),
       });
       checks.push({
         label: `${measure} ${yoy.priorYear}-${String(month).padStart(2, "0")}`,
         api: pt.priorYear,
         baseline: priorBaseline,
+        expectNoData: measure === "websiteUsers" && preHistory(yoy.priorYear, month),
       });
     }
     baselineNonZeroByMeasure.set(measure, nonZeroBaselines);
@@ -412,17 +499,30 @@ async function auditScenario(
   let failed = false;
   let nonZero = 0;
   for (const c of checks) {
-    const divergencePct =
-      c.baseline === 0
-        ? c.api === 0
-          ? 0
-          : Infinity
-        : (Math.abs(c.api - c.baseline) / c.baseline) * 100;
-    const ok = divergencePct <= TOLERANCE_PCT;
-    if (c.baseline !== 0 || c.api !== 0) nonZero++;
-    console.log(
-      `${ok ? "OK  " : "FAIL"} ${c.label.padEnd(28)} api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`,
-    );
+    let ok: boolean;
+    let detail: string;
+    if (c.expectNoData) {
+      // Pre-history month: the API must say "no data yet" (null), and the
+      // independent baseline must agree there are no rows at all.
+      ok = c.api === null && c.baseline === 0;
+      detail = `api=${c.api === null ? "null (no data yet)" : c.api} baseline=${c.baseline} (pre-GA-history month)`;
+    } else if (c.api === null) {
+      ok = false;
+      detail = `api=null baseline=${c.baseline} (null outside the pre-history window)`;
+    } else {
+      const divergencePct =
+        c.baseline === 0
+          ? c.api === 0
+            ? 0
+            : Infinity
+          : (Math.abs(c.api - c.baseline) / c.baseline) * 100;
+      ok = divergencePct <= TOLERANCE_PCT;
+      detail = `api=${c.api} baseline=${c.baseline} divergence=${divergencePct.toFixed(3)}%`;
+    }
+    // Null cells are "no data", not data — only numeric values (or a
+    // non-zero baseline) count toward the vacuity guard.
+    if (c.baseline !== 0 || (typeof c.api === "number" && c.api !== 0)) nonZero++;
+    console.log(`${ok ? "OK  " : "FAIL"} ${c.label.padEnd(28)} ${detail}`);
     if (!ok) failed = true;
   }
   // A scenario where every checked point is 0 on both sides proves nothing —
@@ -640,6 +740,13 @@ async function main() {
   ];
   console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
 
+  // Independent no-history cutoff (earliest GA traffic date), fetched once
+  // and asserted against every scenario's gaHistoryStart and null pattern.
+  const gaHistoryStart = await fetchGaHistoryStartBaseline();
+  console.log(
+    `GA history baseline: earliest traffic date = ${gaHistoryStart ?? "none (GA table empty)"}`,
+  );
+
   let anyFailed = false;
 
   // GA property label-drift guard over the current year to date: the
@@ -651,7 +758,7 @@ async function main() {
     anyFailed = true;
   }
   for (const scenario of scenarios) {
-    const ok = await auditScenario(scenario, months);
+    const ok = await auditScenario(scenario, months, gaHistoryStart);
     if (!ok) anyFailed = true;
   }
 

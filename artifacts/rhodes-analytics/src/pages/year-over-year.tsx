@@ -70,6 +70,12 @@ export default function YearOverYearPage() {
     return [...new Set(scoped.map((d) => d.development))];
   }, [filters.data, company]);
 
+  // "Oct 2025"-style label for when website tracking history begins.
+  const gaStartLabel = useMemo(() => {
+    const d = yoy.data?.gaHistoryStart;
+    return d ? `${MONTH_NAMES[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}` : null;
+  }, [yoy.data?.gaHistoryStart]);
+
   const downloadMeasure = (m: OwtYoy["measures"][number]) => {
     const d = yoy.data;
     if (!d) return;
@@ -151,7 +157,13 @@ export default function YearOverYearPage() {
 
         {yoy.data && (
           <div className="grid gap-4 lg:grid-cols-2">
-            {yoy.data.measures.map((m) => (
+            {yoy.data.measures.map((m) => {
+              // Pre-tracking months arrive as null (never 0) so the chart
+              // shows an honest gap; note below explains it.
+              const noHistoryGap =
+                m.measure === "websiteUsers" &&
+                m.points.some((p) => p.currentYear === null || p.priorYear === null);
+              return (
               <Card key={m.measure} data-testid={`chart-yoy-${m.measure}`}>
                 <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
                   <CardTitle className="text-base">
@@ -173,7 +185,9 @@ export default function YearOverYearPage() {
                       <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                       <XAxis dataKey="name" fontSize={12} />
                       <YAxis fontSize={12} tickFormatter={(v) => fmt(v)} />
-                      <RTooltip formatter={(v: number) => fmt(v)} />
+                      <RTooltip
+                        formatter={(v) => (v == null ? "No data yet" : fmt(Number(v)))}
+                      />
                       <Legend />
                       <Area
                         type="monotone"
@@ -202,8 +216,19 @@ export default function YearOverYearPage() {
                     </ComposedChart>
                   </ResponsiveContainer>
                 </CardContent>
+                {noHistoryGap && (
+                  <p
+                    className="px-6 pb-4 text-xs text-muted-foreground"
+                    data-testid="note-ga-history-gap"
+                  >
+                    {gaStartLabel
+                      ? `Website tracking began ${gaStartLabel} — earlier months show as gaps (no data yet), not zeros.`
+                      : "No website tracking data yet — months show as gaps until tracking data arrives."}
+                  </p>
+                )}
               </Card>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

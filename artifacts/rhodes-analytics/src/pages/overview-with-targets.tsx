@@ -1137,6 +1137,15 @@ function YoySection({
 
   const measureLabel =
     YOY_MEASURES.find((m) => m.key === measure)?.label ?? measure;
+  // Months before website tracking began come back as null (not 0) for
+  // websiteUsers; recharts draws null points as gaps. Explain the gap.
+  const noHistoryGap =
+    measure === "websiteUsers" &&
+    (series?.points.some((p) => p.currentYear === null || p.priorYear === null) ??
+      false);
+  const gaStartLabel = yoy?.gaHistoryStart
+    ? `${MONTHS[Number(yoy.gaHistoryStart.slice(5, 7)) - 1]} ${yoy.gaHistoryStart.slice(0, 4)}`
+    : null;
   const downloadYoy = () => {
     if (!yoy || !series) return;
     downloadCsv(
@@ -1187,12 +1196,15 @@ function YoySection({
         ) : loading ? (
           <Skeleton className="h-64 w-full" />
         ) : (
+          <>
           <ResponsiveContainer width="100%" height={280}>
             <AreaChart data={data} margin={{ left: 8, right: 8 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} tickFormatter={(v: number) => nf.format(v)} width={64} />
-              <RTooltip formatter={(v: number) => nf.format(v)} />
+              <RTooltip
+                formatter={(v) => (v == null ? "No data yet" : nf.format(Number(v)))}
+              />
               <Legend />
               <Area
                 type="monotone"
@@ -1218,6 +1230,17 @@ function YoySection({
               />
             </AreaChart>
           </ResponsiveContainer>
+          {noHistoryGap && (
+            <p
+              className="mt-2 text-xs text-muted-foreground"
+              data-testid="note-ga-history-gap"
+            >
+              {gaStartLabel
+                ? `Website tracking began ${gaStartLabel} — earlier months show as gaps (no data yet), not zeros.`
+                : "No website tracking data yet — months show as gaps until tracking data arrives."}
+            </p>
+          )}
+          </>
         )}
       </CardContent>
     </Card>
