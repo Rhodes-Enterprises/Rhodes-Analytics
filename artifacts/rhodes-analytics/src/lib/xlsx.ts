@@ -22,6 +22,13 @@
  * Call sites that need to correct the inference can pass explicit per-column
  * overrides through `downloadData`/`downloadXlsx`.
  *
+ * The "%"-in-header convention is enforced statically: `pnpm run
+ * test:xlsx-headers` (scripts/check-xlsx-percent-headers.ts, part of `pnpm
+ * run test`) scans every download call site and fails when a header that
+ * reads like a ratio/percent column (e.g. "Conversion Rate") carries neither
+ * a "%" nor an explicit override — so a 0–100-scale column can't silently
+ * export as a plain number.
+ *
  * Provenance (optional `info` param): when a call site passes a
  * `DownloadInfo`, a second "Info" sheet lists the dashboard, each active
  * filter and its value, the export timestamp, and the backend's data-as-of

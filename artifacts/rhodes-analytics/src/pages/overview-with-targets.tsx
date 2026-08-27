@@ -987,7 +987,9 @@ function RatioChart({
       `overview-with-targets-${slug}`,
       ["Ratio", "Goal %", "Actual %"],
       data.map((d): CsvValue[] => [d.name, d.Goal, d.Actual]),
-      undefined,
+      // "Ratio" holds conversion-ratio NAMES (labels), not percent values —
+      // the explicit override tells the percent-header check it's deliberate.
+      ["text"],
       downloadInfo,
     );
   return (
@@ -1047,7 +1049,9 @@ function RatioSection({
         +(r.actual * 100).toFixed(1),
         r.ptgPercent,
       ]),
-      undefined,
+      // "Conversion Ratio" holds ratio NAMES (labels), not percent values —
+      // the explicit override tells the percent-header check it's deliberate.
+      ["text"],
       downloadInfo,
     );
   return (

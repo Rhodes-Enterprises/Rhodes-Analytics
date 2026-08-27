@@ -7,9 +7,10 @@
     "dev": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
-    "test": "vitest run && node --test src/lib/*.test.ts",
+    "test": "vitest run && node --test src/lib/*.test.ts && pnpm run test:xlsx-headers",
     "test:csv": "esbuild scripts/test-csv.ts --bundle --platform=node --format=esm --outfile=dist-test/test-csv.mjs --log-level=warning && node dist-test/test-csv.mjs",
     "test:xlsx": "esbuild scripts/test-xlsx.ts --bundle --platform=node --format=cjs --outfile=dist-test/test-xlsx.cjs --log-level=warning && node dist-test/test-xlsx.cjs",
+    "test:xlsx-headers": "esbuild scripts/check-xlsx-percent-headers.ts --bundle --platform=node --format=cjs --outfile=dist-test/check-xlsx-percent-headers.cjs --log-level=warning && node dist-test/check-xlsx-percent-headers.cjs",
     "typecheck": "tsc -b ../../tsconfig.json && tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

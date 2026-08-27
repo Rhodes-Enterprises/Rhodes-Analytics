@@ -36,7 +36,16 @@ surfaced all three in seconds.
   tree): `npx tsc --noEmit --skipLibCheck --module preserve
   --moduleResolution bundler --target es2022 scripts/audit-X.ts 2>&1 | grep
   "Cannot find name"` — finds every undefined identifier in ~30s with no
-  Snowflake run.
+  Snowflake run. Prove the scan can fail first (append a bogus
+  `neverDefinedHelper();` to a copy and expect a hit) — a mis-flagged tsc
+  run exits quietly and looks clean.
+- Merges drop DEFINITIONS, not just rename them: parallel lineages each keep
+  the other's call sites while only one side's definition survives (observed:
+  a stale Map-returning variant squatting on a name whose newer call sites
+  expect a lookup function, and a deleted helper still called once).
+  `git log --all -S name` lists removals as well as adds — check whether the
+  definition's remover or the call site's author is newer, then restore the
+  richer definition that satisfies both (or align call sites to it).
 - The net CANNOT see a dropped entry-point call: an uninvoked `main()` is
   legal TS, and the audit then passes vacuously (observed: a leasing audit
   "passing" in 0.5s with zero output). Trust a PASS only if the audit printed
