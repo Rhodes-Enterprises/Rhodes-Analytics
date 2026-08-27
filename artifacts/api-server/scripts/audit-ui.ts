@@ -33,10 +33,32 @@
  *      null API value, and a rounding tolerance of half a unit in the last
  *      rendered decimal place is allowed. Only real mis-bindings fail; a
  *      cosmetic change in decimal places does not.
+ *   6. PHASE 2 — filter-request WIRING. Drives every filter control on the
+ *      page (Division, Development, Cohort Quarter, Lead Source, Contact
+ *      Channel, Deal Channel, start/end date, target selector) one at a
+ *      time and, after each change, asserts that the page's NEXT
+ *      overview-with-targets request carries exactly the chosen value in
+ *      the RIGHT query parameter and nothing else (a stray, missing,
+ *      duplicated, renamed, or wrong-valued parameter fails with the
+ *      offending control and the actual query string), and that the
+ *      headline (applied-range subtitle + all five KPI cells) re-renders
+ *      from that request's own response payload. Each such request is
+ *      briefly withheld at the route layer and the headline must enter its
+ *      loading state during the hold — proving the view is bound to the
+ *      request's lifecycle even when old and new headline values coincide
+ *      (contact-scoped filters legitimately leave sales KPIs unchanged, so
+ *      value equality alone would pass vacuously against a stale mount).
+ *      This is the only audit
+ *      that can catch a dropdown wired to the wrong query param (Division
+ *      sent as ?development, Contact/Deal Channel swapped, a broken "All"
+ *      sentinel leaking `__all__`): the page would show correct-looking
+ *      numbers for the wrong question while every payload-vs-Snowflake
+ *      audit stays green.
  *
  * Structural drift fails LOUDLY instead of passing vacuously: a missing
  * data-testid, a renamed/added column header, a row-count mismatch with the
- * payload, or the page rendering its error state are all audit failures.
+ * payload, a dropdown that offers no option to pick, or the page rendering
+ * its error state are all audit failures.
  *
  * Run from artifacts/api-server (the API server must be reachable):
  *   AUDIT_API_BASE=http://localhost:8099/api pnpm run audit:ui
@@ -52,7 +74,8 @@
  *                    preview proxy; the page must reach its API itself)
  *   AUDIT_CHROMIUM   path to a Chromium binary (default: `which chromium`)
  *
- * Exits 0 when every rendered value matches its API field, 1 otherwise.
+ * Exits 0 when every rendered value matches its API field and every filter
+ * control is wired to the right query parameter, 1 otherwise.
  */
 
 import { execSync, spawnSync } from "node:child_process";
@@ -61,7 +84,7 @@ import { createServer, type Server } from "node:http";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type Page, type Request } from "playwright-core";
 
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
@@ -71,6 +94,7 @@ const PAGE_PATH = "/workspaces/marketing/overview-with-targets";
 const OVERVIEW_API_PATH = "/api/dashboards/overview-with-targets";
 const DATA_TIMEOUT_MS = 240_000; // first hit may run cold Snowflake queries
 
+const WIRING_REQUEST_TIMEOUT_MS = 10_000;
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const uiDir = resolve(pkgDir, "..", "rhodes-analytics");
 const uiDist = join(uiDir, "dist", "public");
@@ -171,58 +195,19 @@ function parseRendered(raw: string): Parsed {
   return { value: Number(t), decimals, isPercent };
 }
 
-/**
- * Compare one rendered cell against the API field it must bind.
- *  - `times100`: API value is a fraction rendered as a percent (ratio goal/actual)
- *  - `percent`:  whether the rendered text must (true) / must not (false) carry a % suffix
- * Tolerance is half a unit of the LAST RENDERED decimal place — exactly the
- * information lost to display rounding, nothing more.
- */
+interface CellVerdict {
+  pass: boolean;
+  detail: string;
+}
 function checkCell(
   label: string,
   raw: string | null | undefined,
   api: number | null | undefined,
   opts: { times100?: boolean; percent: boolean },
 ): void {
-  if (raw == null) {
-    fail(label, `rendered cell not found on page (api=${api})`);
-    return;
-  }
-  const p = parseRendered(raw);
-  const apiIsNull = api == null || Number.isNaN(api);
-  if (apiIsNull) {
-    if (p.empty) ok(label, `"${raw.trim()}" ↔ api null`);
-    else fail(label, `api value is null but page rendered "${raw.trim()}" instead of "${EN_DASH}"`);
-    return;
-  }
-  if (p.empty) {
-    fail(label, `page rendered placeholder "${EN_DASH}" but api value is ${api}`);
-    return;
-  }
-  if (p.invalid) {
-    fail(label, `unparseable rendered value "${raw.trim()}" (api=${api})`);
-    return;
-  }
-  if (opts.percent && !p.isPercent) {
-    fail(label, `expected a percent but page rendered "${raw.trim()}" without % (api=${api})`);
-    return;
-  }
-  if (!opts.percent && p.isPercent) {
-    fail(label, `expected a plain number but page rendered "${raw.trim()}" with % (api=${api})`);
-    return;
-  }
-  const expected = opts.times100 ? api * 100 : api;
-  const tol = 0.5 * Math.pow(10, -(p.decimals ?? 0)) + 1e-9;
-  const diff = Math.abs((p.value as number) - expected);
-  if (diff <= tol) {
-    ok(label, `rendered "${raw.trim()}" ↔ api ${expected}${opts.times100 ? ` (${api} ×100)` : ""}`);
-  } else {
-    fail(
-      label,
-      `rendered "${raw.trim()}" (=${p.value}) does not match api ${expected}` +
-        `${opts.times100 ? ` (${api} ×100)` : ""} — diff ${diff} exceeds display-rounding tolerance ${tol}`,
-    );
-  }
+  const v = evaluateCell(raw, api, opts);
+  if (v.pass) ok(label, v.detail);
+  else fail(label, v.detail);
 }
 
 function checkText(label: string, rendered: string | null | undefined, expected: string): void {
@@ -353,12 +338,18 @@ function chromiumPath(): string {
   }
 }
 
-interface CapturedResponse {
-  url: string;
-  status: number;
-  body: Promise<unknown>;
+/**
+ * One overview-with-targets request the PAGE ITSELF issued. Recorded at
+ * REQUEST time (so phase 2 can assert "this control fired a request with
+ * these exact params" even before the — possibly slow — response lands),
+ * then enriched with status/body when the response arrives.
+ */
+interface OverviewHit {
+  url: URL;
+  status: number | null;
+  failure: string | null;
+  body: Promise<unknown> | null;
 }
-
 /** Everything the audit reads off the rendered page, extracted in one pass. */
 interface DomSnapshot {
   errorAlert: string | null;
@@ -512,17 +503,18 @@ function columnIndex(
   return idx;
 }
 
-// ---------- section checks ----------
-
-function checkKpis(dom: DomSnapshot, p: OverviewPayload): void {
-  const specs: { id: string; api: number | null; percent: boolean }[] = [
+/** The five headline KPI bindings — shared by phase 1 and the phase-2 re-render check. */
+function kpiSpecs(p: OverviewPayload): { id: string; api: number | null; percent: boolean }[] {
+  return [
     { id: "kpi-sales-goal", api: p.kpis.salesGoal, percent: false },
     { id: "kpi-sales-td-goal", api: p.kpis.salesTdGoal, percent: false },
     { id: "kpi-gross-sales", api: p.kpis.grossSales, percent: false },
     { id: "kpi-ptg-variance", api: p.kpis.ptgVariance, percent: false },
     { id: "kpi-ptg-percent", api: p.kpis.ptgPercent, percent: true },
   ];
-  for (const s of specs) {
+}
+function checkKpis(dom: DomSnapshot, p: OverviewPayload): void {
+  for (const s of kpiSpecs(p)) {
     checkCell(`KPI ${s.id}`, dom.kpis[s.id], s.api, { percent: s.percent });
   }
 }
@@ -819,8 +811,13 @@ function checkSummaryTable(
   }
 }
 
-// ---------- main ----------
-
+function fmtParams(expected: Record<string, string>): string {
+  return (
+    Object.entries(expected)
+      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+      .join(" & ") || "(no parameters)"
+  );
+}
 async function main(): Promise<void> {
   console.log(`audit:ui — auditing rendered Overview with Targets against ${API_BASE}`);
 
@@ -852,21 +849,7 @@ async function main(): Promise<void> {
     });
     page.on("pageerror", (err) => consoleErrors.push(`pageerror: ${err.message}`));
 
-    const captured: CapturedResponse[] = [];
-    page.on("response", (res) => {
-      try {
-        const u = new URL(res.url());
-        if (u.pathname === OVERVIEW_API_PATH) {
-          captured.push({
-            url: res.url(),
-            status: res.status(),
-            body: res.json().catch((e) => ({ __parseError: String(e) })),
-          });
-        }
-      } catch {
-        /* ignore non-URL responses */
-      }
-    });
+    const hits = trackOverviewRequests(page);
 
     const pageUrl = `${uiBase}${PAGE_PATH}`;
     console.log(`audit:ui — loading ${pageUrl}`);
@@ -890,19 +873,37 @@ async function main(): Promise<void> {
     // Let the remaining sections (ratios render with the same payload) settle.
     await page.waitForTimeout(1000);
 
-    if (captured.length === 0) {
+    if (hits.length === 0) {
       throw new Error(
         `page never issued GET ${OVERVIEW_API_PATH} — cannot audit bindings` +
           (consoleErrors.length ? `\nconsole errors:\n${consoleErrors.join("\n")}` : ""),
       );
     }
-    const last = captured[captured.length - 1];
+    const last = hits[hits.length - 1];
+    await waitUntil(() => last.status != null || last.failure != null, DATA_TIMEOUT_MS, 250);
+    if (last.failure != null) {
+      throw new Error(`the page's overview request failed in-browser: ${last.failure}`);
+    }
     console.log(
       `audit:ui — captured the page's own request: ${last.url} → HTTP ${last.status}` +
-        (captured.length > 1 ? ` (${captured.length} requests, comparing against the latest)` : ""),
+        (hits.length > 1 ? ` (${hits.length} requests, comparing against the latest)` : ""),
     );
     if (last.status !== 200) {
       throw new Error(`the page's overview request returned HTTP ${last.status}`);
+    }
+    // The initial request is itself a wiring check: the default view must ask
+    // the default question — ?target=goal and nothing else.
+    {
+      const problems = paramProblems(last.url.searchParams, { target: "goal" });
+      if (problems.length > 0) {
+        fail(
+          "wiring · initial load",
+          `the page's first request was "${last.url.pathname}${last.url.search}" — ${problems.join("; ")} ` +
+            `(expected exactly target="goal")`,
+        );
+      } else {
+        ok("wiring · initial load", 'initial request carried exactly target="goal"');
+      }
     }
     const payload = (await last.body) as OverviewPayload & { __parseError?: string };
     if (payload.__parseError) {
@@ -946,6 +947,8 @@ async function main(): Promise<void> {
       payload,
     );
 
+    await auditFilterWiring(page, hits);
+
     if (consoleErrors.length > 0) {
       console.log(`\naudit:ui — note: ${consoleErrors.length} browser console error(s):`);
       for (const e of consoleErrors.slice(0, 10)) console.log(`  ${e}`);
@@ -954,13 +957,15 @@ async function main(): Promise<void> {
     console.log("");
     if (failures > 0) {
       console.error(
-        `AUDIT FAILED: ${failures} of ${checks} rendered value(s) do not match the API fields they must bind. ` +
-          `The dashboard is showing users numbers the audited API did not produce.`,
+        `AUDIT FAILED: ${failures} of ${checks} check(s) failed — rendered values or filter→request wiring ` +
+          `do not match the page's own API contract. The dashboard is showing users numbers the audited ` +
+          `API did not produce, or asking the API a different question than the filters claim.`,
       );
       process.exitCode = 1;
     } else {
       console.log(
-        `Audit passed: all ${checks} rendered values on Overview with Targets match the page's own API payload.`,
+        `Audit passed: all ${checks} rendered values AND filter-wiring checks on Overview with Targets ` +
+          `match the page's own API requests and payloads.`,
       );
     }
   } finally {
@@ -969,7 +974,587 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(`AUDIT ERRORED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  process.exit(1);
-});
+/**
+ * Open a (Radix) select by its trigger testid and click one option, picked
+ * from the RENDERED option texts by `wanted`. Returns the chosen option's
+ * raw textContent — the page's SelectItem uses the option string as BOTH its
+ * value and its visible text, so the clicked text is the exact string the
+ * next request must carry. (If those ever diverge, this audit fails loudly
+ * and must be updated together with the page.)
+ */
+async function pickOption(
+  page: Page,
+  control: string,
+  testId: string,
+  wanted: (texts: string[]) => number,
+  description: string,
+): Promise<string | null> {
+  const trigger = page.locator(`[data-testid="${testId}"]`);
+  if ((await trigger.count()) === 0) {
+    fail(`wiring · ${control}`, `select trigger [data-testid="${testId}"] not found on the page`);
+    return null;
+  }
+  // The option list is fed by the filters endpoint; retry briefly in case it
+  // is still resolving when phase 2 starts ("All" alone means not loaded yet
+  // — or a genuinely empty dropdown, which fails after the retries).
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await trigger.click();
+    const options = page.locator('[role="option"]');
+    const appeared = await options
+      .first()
+      .waitFor({ state: "visible", timeout: 5_000 })
+      .then(
+        () => true,
+        () => false,
+      );
+    const texts = appeared ? await options.allTextContents() : [];
+    const idx = appeared ? wanted(texts) : -1;
+    if (idx >= 0 && idx < texts.length) {
+      await options.nth(idx).click();
+      return texts[idx];
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(1_000);
+  }
+  fail(
+    `wiring · ${control}`,
+    `dropdown [data-testid="${testId}"] never offered ${description} — cannot drive this control`,
+  );
+  return null;
+}
+
+/**
+ * Compare one rendered cell against the API field it must bind.
+ *  - `times100`: API value is a fraction rendered as a percent (ratio goal/actual)
+ *  - `percent`:  whether the rendered text must (true) / must not (false) carry a % suffix
+ * Tolerance is half a unit of the LAST RENDERED decimal place — exactly the
+ * information lost to display rounding, nothing more.
+ * Pure verdict (no logging) so the phase-2 re-render poller can evaluate
+ * quietly; `checkCell` wraps it with ok/fail bookkeeping.
+ */
+function evaluateCell(
+  raw: string | null | undefined,
+  api: number | null | undefined,
+  opts: { times100?: boolean; percent: boolean },
+): CellVerdict {
+  if (raw == null) {
+    return { pass: false, detail: `rendered cell not found on page (api=${api})` };
+  }
+  const p = parseRendered(raw);
+  const apiIsNull = api == null || Number.isNaN(api);
+  if (apiIsNull) {
+    if (p.empty) return { pass: true, detail: `"${raw.trim()}" ↔ api null` };
+    return {
+      pass: false,
+      detail: `api value is null but page rendered "${raw.trim()}" instead of "${EN_DASH}"`,
+    };
+  }
+  if (p.empty) {
+    return { pass: false, detail: `page rendered placeholder "${EN_DASH}" but api value is ${api}` };
+  }
+  if (p.invalid) {
+    return { pass: false, detail: `unparseable rendered value "${raw.trim()}" (api=${api})` };
+  }
+  if (opts.percent && !p.isPercent) {
+    return { pass: false, detail: `expected a percent but page rendered "${raw.trim()}" without % (api=${api})` };
+  }
+  if (!opts.percent && p.isPercent) {
+    return { pass: false, detail: `expected a plain number but page rendered "${raw.trim()}" with % (api=${api})` };
+  }
+  const expected = opts.times100 ? api * 100 : api;
+  const tol = 0.5 * Math.pow(10, -(p.decimals ?? 0)) + 1e-9;
+  const diff = Math.abs((p.value as number) - expected);
+  if (diff <= tol) {
+    return {
+      pass: true,
+      detail: `rendered "${raw.trim()}" ↔ api ${expected}${opts.times100 ? ` (${api} ×100)` : ""}`,
+    };
+  }
+  return {
+    pass: false,
+    detail:
+      `rendered "${raw.trim()}" (=${p.value}) does not match api ${expected}` +
+      `${opts.times100 ? ` (${api} ×100)` : ""} — diff ${diff} exceeds display-rounding tolerance ${tol}`,
+  };
+}
+
+function trackOverviewRequests(page: Page): OverviewHit[] {
+  const hits: OverviewHit[] = [];
+  const byRequest = new Map<Request, OverviewHit>();
+  page.on("request", (req) => {
+    try {
+      const u = new URL(req.url());
+      if (u.pathname === OVERVIEW_API_PATH) {
+        const hit: OverviewHit = { url: u, status: null, failure: null, body: null };
+        hits.push(hit);
+        byRequest.set(req, hit);
+      }
+    } catch {
+      /* ignore non-URL requests */
+    }
+  });
+  page.on("response", (res) => {
+    const hit = byRequest.get(res.request());
+    if (hit) {
+      hit.status = res.status();
+      hit.body = res.json().catch((e) => ({ __parseError: String(e) }));
+    }
+  });
+  page.on("requestfailed", (req) => {
+    const hit = byRequest.get(req);
+    if (hit && hit.status == null) hit.failure = req.failure()?.errorText ?? "request failed";
+  });
+  return hits;
+}
+
+/**
+ * Install a route that can hold ONE armed overview request before it is
+ * forwarded to the server. While held, its response cannot possibly have
+ * arrived — so the page showing its loading state during the hold PROVES the
+ * headline is keyed to this request's lifecycle. Value-equality alone cannot
+ * prove that: for contact-scoped filters (Cohort Quarter, Contact Channel)
+ * the new payload's headline legitimately equals the old one, so a view that
+ * kept stale data mounted would pass the equality check vacuously.
+ * Un-armed requests (page retries, reset steps) pass straight through.
+ */
+async function installOverviewHold(page: Page): Promise<() => OverviewHold> {
+  let pending: { onHeld: (v: boolean) => void; released: Promise<void> } | null = null;
+  await page.route(
+    (url) => url.pathname === OVERVIEW_API_PATH,
+    async (route) => {
+      const p = pending;
+      pending = null;
+      if (p) {
+        p.onHeld(true);
+        await p.released;
+      }
+      try {
+        await route.continue();
+      } catch {
+        // page tearing down mid-flight — nothing left to audit on this route
+      }
+    },
+  );
+  return () => {
+    let onHeld!: (v: boolean) => void;
+    let onRelease!: () => void;
+    const held = new Promise<boolean>((r) => (onHeld = r));
+    const released = new Promise<void>((r) => (onRelease = r));
+    const timer = setTimeout(() => onHeld(false), WIRING_REQUEST_TIMEOUT_MS + 2_000);
+    pending = { onHeld, released };
+    return {
+      held,
+      release: () => {
+        clearTimeout(timer);
+        pending = null; // disarm if the request never came
+        onRelease();
+        onHeld(false); // no-op when already resolved true
+      },
+    };
+  };
+}
+
+/**
+ * After a filter change the headline must re-render FROM THE NEW PAYLOAD:
+ * the applied-range subtitle must echo the new response's appliedRange and
+ * every KPI cell its kpis. (The render-lifecycle check in wiringStep proved
+ * the headline unmounted while this request was in flight, so a match here
+ * proves repopulation from the new response — not a leftover of the old
+ * payload, even when old and new values coincide.)
+ */
+async function checkHeadlineRerender(page: Page, control: string, p: OverviewPayload): Promise<void> {
+  const deadline = Date.now() + RERENDER_TIMEOUT_MS;
+  let snap = await readHeadline(page);
+  while (!headlineMatches(snap, p) && Date.now() < deadline) {
+    await page.waitForTimeout(250);
+    snap = await readHeadline(page);
+  }
+  if (headlineMatches(snap, p)) {
+    ok(
+      `wiring · ${control} · re-render`,
+      "headline (applied-range subtitle + 5 KPI cells) re-rendered from the new payload",
+    );
+    return;
+  }
+  // Timed out — emit per-cell diagnostics so the offending binding is named.
+  checkText(
+    `wiring · ${control} · re-render applied-range`,
+    snap.appliedRange?.replace(/\s+/g, " "),
+    expectedAppliedRangeText(p),
+  );
+  for (const s of kpiSpecs(p)) {
+    checkCell(`wiring · ${control} · re-render ${s.id}`, snap.kpis[s.id], s.api, {
+      percent: s.percent,
+    });
+  }
+}
+
+interface HeadlineSnapshot {
+  kpis: Record<string, string | null>;
+  appliedRange: string | null;
+}
+
+const DRAIN_TIMEOUT_MS = 30_000;
+
+function headlineMatches(snap: HeadlineSnapshot, p: OverviewPayload): boolean {
+  if ((snap.appliedRange ?? "").replace(/\s+/g, " ") !== expectedAppliedRangeText(p)) return false;
+  return kpiSpecs(p).every((s) => evaluateCell(snap.kpis[s.id], s.api, { percent: s.percent }).pass);
+}
+
+function headlinePresent(snap: HeadlineSnapshot): boolean {
+  return snap.appliedRange != null || Object.values(snap.kpis).some((v) => v != null);
+}
+const RERENDER_TIMEOUT_MS = 15_000;
+
+const DRAIN_GRACE_MS = 800;
+
+function expectedAppliedRangeText(p: OverviewPayload): string {
+  // Mirrors the page's subtitle: "<start> → <end> · progress through <toDate>".
+  return `${p.appliedRange.startDate} \u2192 ${p.appliedRange.endDate} \u00b7 progress through ${p.appliedRange.toDate}`;
+}
+
+interface OverviewHold {
+  /** Resolves true once the next overview request is held at the route layer (false: timed out unheld). */
+  held: Promise<boolean>;
+  release: () => void;
+}
+
+interface WiringStepOpts {
+  control: string;
+  /** Drive the control; return false when it could not be driven (failure already recorded). */
+  action: () => Promise<boolean>;
+  /** Exact query params the next request must carry (evaluated after the action ran). */
+  expected: () => Record<string, string> | null;
+  verifyRerender: boolean;
+}
+
+/**
+ * Drive one control, then verify the page's next overview request(s):
+ * fired at all, carrying exactly the expected params, completed HTTP 200
+ * with a parseable payload — and (for filter changes) that the headline
+ * re-rendered from that payload. Returns the payload, or null when the step
+ * failed in a way that leaves the page usable for the next control.
+ */
+async function wiringStep(
+  page: Page,
+  hits: OverviewHit[],
+  opts: WiringStepOpts,
+): Promise<OverviewPayload | null> {
+  // Let stragglers from the previous step (late page retries, cache-refresh
+  // writes) land BEFORE this step's window opens so they are not
+  // misattributed to this control — and the shared proxy gets breathing room.
+  await waitUntil(() => hits.every((h) => h.status != null || h.failure != null), DRAIN_TIMEOUT_MS, 250);
+  await page.waitForTimeout(DRAIN_GRACE_MS);
+
+  // For re-render steps, hold the upcoming request at the route layer so we
+  // can prove the headline enters its loading state WHILE the request is in
+  // flight (response provably not yet available).
+  const hold = opts.verifyRerender && armOverviewHold ? armOverviewHold() : null;
+  let expected: Record<string, string> | null = null;
+  let stepHits: OverviewHit[] = [];
+  try {
+    const before = hits.length;
+    if (!(await opts.action())) return null;
+    expected = opts.expected();
+    if (expected == null) return null;
+
+    if (!(await waitUntil(() => hits.length > before, WIRING_REQUEST_TIMEOUT_MS))) {
+      fail(
+        `wiring · ${opts.control}`,
+        `changing this control fired NO ${OVERVIEW_API_PATH} request within ` +
+          `${WIRING_REQUEST_TIMEOUT_MS / 1000}s — the control is not connected to the dashboard query ` +
+          `(expected a request carrying exactly ${fmtParams(expected)})`,
+      );
+      return null;
+    }
+    await page.waitForTimeout(WIRING_SETTLE_MS);
+    stepHits = hits.slice(before);
+    let wired = true;
+    for (const hit of stepHits) {
+      const problems = paramProblems(hit.url.searchParams, expected);
+      if (problems.length > 0) {
+        wired = false;
+        fail(
+          `wiring · ${opts.control}`,
+          `the page requested "${hit.url.pathname}${hit.url.search}" — WRONG WIRING: ${problems.join("; ")} ` +
+            `(expected exactly ${fmtParams(expected)})`,
+        );
+      }
+    }
+    if (wired) {
+      ok(
+        `wiring · ${opts.control}`,
+        `${stepHits.length === 1 ? "request" : `all ${stepHits.length} requests`} carried exactly ` +
+          `${fmtParams(expected)} ("${stepHits[stepHits.length - 1].url.search}")`,
+      );
+    }
+
+    if (hold) {
+      if (!(await hold.held)) {
+        fail(
+          `wiring · ${opts.control} · render lifecycle`,
+          `the new overview request was never intercepted for the in-flight render check — ` +
+            `cannot prove the headline is bound to this request`,
+        );
+      } else {
+        // The response is withheld right now: a headline still showing values
+        // is provably NOT rendering this request's data.
+        const deadline = Date.now() + INFLIGHT_ABSENT_TIMEOUT_MS;
+        let snap = await readHeadline(page);
+        while (headlinePresent(snap) && Date.now() < deadline) {
+          await page.waitForTimeout(100);
+          snap = await readHeadline(page);
+        }
+        if (headlinePresent(snap)) {
+          fail(
+            `wiring · ${opts.control} · render lifecycle`,
+            `the headline kept showing values (applied-range="${snap.appliedRange}") while this request was ` +
+              `withheld — the view is NOT bound to this request's lifecycle, so it would keep showing stale ` +
+              `data even when the filters ask a different question`,
+          );
+        } else {
+          ok(
+            `wiring · ${opts.control} · render lifecycle`,
+            `headline entered its loading state while the request was in flight`,
+          );
+        }
+      }
+    }
+  } finally {
+    hold?.release();
+  }
+
+  if (expected == null || stepHits.length === 0) return null; // early-return paths above
+
+  // The page must settle on this response before the next control is driven.
+  // A transient failure (proxy rate-limit 429→502) is recovered by the page's
+  // own query retries: keep judging the newest attempt — whose params must
+  // ALSO match — until success, retries stop, or the recovery budget is spent.
+  let last = stepHits[stepHits.length - 1];
+  let retries = 0;
+  const recoveryDeadline = Date.now() + TRANSIENT_RECOVERY_MS;
+  for (;;) {
+    if (!(await waitUntil(() => last.status != null || last.failure != null, DATA_TIMEOUT_MS, 250))) {
+      throw new Error(
+        `wiring · ${opts.control}: the overview request never completed within ${DATA_TIMEOUT_MS / 1000}s — ` +
+          `server unresponsive, aborting the wiring phase`,
+      );
+    }
+    const transient = last.failure != null || last.status === 429 || (last.status ?? 0) >= 500;
+    if (!transient || Date.now() >= recoveryDeadline) break;
+    const seenCount = hits.length;
+    if (!(await waitUntil(() => hits.length > seenCount, RETRY_WAIT_MS, 250))) break; // page gave up retrying
+    for (const h of hits.slice(seenCount)) {
+      const problems = paramProblems(h.url.searchParams, expected);
+      if (problems.length > 0) {
+        fail(
+          `wiring · ${opts.control}`,
+          `retry request "${h.url.pathname}${h.url.search}" — WRONG WIRING: ${problems.join("; ")} ` +
+            `(expected exactly ${fmtParams(expected)})`,
+        );
+      }
+    }
+    retries += hits.length - seenCount;
+    last = hits[hits.length - 1];
+  }
+  if (last.failure != null) {
+    fail(`wiring · ${opts.control} · response`, `the request failed in-browser: ${last.failure}`);
+    return null;
+  }
+  if (last.status !== 200) {
+    fail(
+      `wiring · ${opts.control} · response`,
+      `HTTP ${last.status} for "${last.url.search}"` +
+        `${retries > 0 ? ` (still failing after ${retries} page retr${retries === 1 ? "y" : "ies"})` : ""}`,
+    );
+    return null;
+  }
+  if (retries > 0) {
+    ok(
+      `wiring · ${opts.control} · response`,
+      `recovered with HTTP 200 after ${retries} transient failure(s) — the page retried itself`,
+    );
+  }
+  const payload = (await last.body) as (OverviewPayload & { __parseError?: string }) | null;
+  if (payload == null || payload.__parseError || !payload.kpis || !payload.appliedRange) {
+    fail(
+      `wiring · ${opts.control} · response`,
+      `unparseable/malformed payload for "${last.url.search}"` +
+        `${payload?.__parseError ? `: ${payload.__parseError}` : ""}`,
+    );
+    return null;
+  }
+  if (opts.verifyRerender) {
+    await checkHeadlineRerender(page, opts.control, payload);
+  }
+  return payload;
+}
+
+const TRANSIENT_RECOVERY_MS = 45_000;
+
+async function readHeadline(page: Page): Promise<HeadlineSnapshot> {
+  return page.evaluate(() => {
+    const text = (el: Element | null): string | null =>
+      el ? (el as HTMLElement).innerText.trim() : null;
+    const kpis: Record<string, string | null> = {};
+    for (const id of [
+      "kpi-sales-goal",
+      "kpi-sales-td-goal",
+      "kpi-gross-sales",
+      "kpi-ptg-variance",
+      "kpi-ptg-percent",
+    ]) {
+      kpis[id] = text(document.querySelector(`[data-testid="${id}"]`));
+    }
+    return {
+      kpis,
+      appliedRange: text(document.querySelector('[data-testid="text-applied-range"]')),
+    };
+  });
+}
+
+async function waitUntil(cond: () => boolean, timeoutMs: number, pollMs = 100): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return true;
+}
+
+const WIRING_SETTLE_MS = 700; // window to catch duplicate/straggler requests from one change
+
+const INFLIGHT_ABSENT_TIMEOUT_MS = 4_000; // headline must enter loading state while its request is withheld
+
+async function auditFilterWiring(page: Page, hits: OverviewHit[]): Promise<void> {
+  console.log("\naudit:ui — phase 2: driving each filter control and auditing its query-param wiring...");
+
+  armOverviewHold = await installOverviewHold(page);
+
+  const BASE: Record<string, string> = { target: "goal" };
+  const firstReal = (texts: string[]) => texts.findIndex((t) => t.trim() !== "All" && t.trim() !== "");
+  const allOption = (texts: string[]) => texts.findIndex((t) => t.trim() === "All");
+
+  // Every dropdown on the filter bar and the query param it MUST drive.
+  // Contact and Deal Channel share one option list, so only the param name
+  // can tell them apart — exactly the swap this phase exists to catch.
+  const selects = [
+    { label: "Division", testId: "select-division", param: "company" },
+    { label: "Development", testId: "select-development", param: "development" },
+    { label: "Cohort Quarter", testId: "select-cohort", param: "cohortQuarter" },
+    { label: "Lead Source", testId: "select-lead-source", param: "leadSource" },
+    { label: "Contact Channel", testId: "select-contact-channel", param: "contactChannel" },
+    { label: "Deal Channel", testId: "select-deal-channel", param: "dealChannel" },
+  ] as const;
+
+  for (const s of selects) {
+    const control = `${s.label} select → ?${s.param}`;
+    let chosen: string | null = null;
+    await wiringStep(page, hits, {
+      control,
+      action: async () => {
+        chosen = await pickOption(page, control, s.testId, firstReal, 'an option besides "All"');
+        return chosen != null;
+      },
+      expected: () => (chosen == null ? null : { ...BASE, [s.param]: chosen }),
+      verifyRerender: true,
+    });
+    if (chosen != null) {
+      // Return the control to "All" so each control is audited in isolation —
+      // and the reset wiring is itself verified: a broken "All" sentinel
+      // would leak e.g. company="__all__" into this request.
+      await wiringStep(page, hits, {
+        control: `${s.label} select reset → All`,
+        action: async () =>
+          (await pickOption(page, `${s.label} select reset → All`, s.testId, allOption, 'an "All" option')) !=
+          null,
+        expected: () => BASE,
+        verifyRerender: false,
+      });
+    }
+  }
+
+  // Date range — each input is its own check, so a startDate↔endDate swap
+  // names the offending input directly. Values stay inside the current year
+  // (valid under the one-calendar-year range rule whenever the audit runs).
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const startPick = `${now.getFullYear()}-01-01`;
+  const endPick = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+  const fillDate = async (control: string, testId: string, value: string): Promise<boolean> => {
+    const input = page.locator(`[data-testid="${testId}"]`);
+    if ((await input.count()) === 0) {
+      fail(`wiring · ${control}`, `date input [data-testid="${testId}"] not found on the page`);
+      return false;
+    }
+    await input.fill(value);
+    return true;
+  };
+
+  await wiringStep(page, hits, {
+    control: "Start date input → ?startDate",
+    action: () => fillDate("Start date input → ?startDate", "input-start-date", startPick),
+    expected: () => ({ ...BASE, startDate: startPick }),
+    verifyRerender: true,
+  });
+  await wiringStep(page, hits, {
+    control: "End date input → ?endDate",
+    action: () => fillDate("End date input → ?endDate", "input-end-date", endPick),
+    expected: () => ({ ...BASE, startDate: startPick, endDate: endPick }),
+    verifyRerender: true,
+  });
+
+  // Target selector — keeps the date range applied; exact-param matching
+  // proves the button changed ONLY ?target.
+  await wiringStep(page, hits, {
+    control: "Target selector → ?target=proforma",
+    action: async () => {
+      const btn = page.locator('[data-testid="button-target-proforma"]');
+      if ((await btn.count()) === 0) {
+        fail(
+          "wiring · Target selector → ?target=proforma",
+          'button [data-testid="button-target-proforma"] not found on the page',
+        );
+        return false;
+      }
+      await btn.click();
+      return true;
+    },
+    expected: () => ({ target: "proforma", startDate: startPick, endDate: endPick }),
+    verifyRerender: true,
+  });
+}
+
+/**
+ * The request must carry EXACTLY the expected parameters, compared as a
+ * multiset: an extra, missing, duplicated, renamed, or wrong-valued
+ * parameter is wrong wiring, not a cosmetic difference.
+ */
+function paramProblems(actual: URLSearchParams, expected: Record<string, string>): string[] {
+  const seen = new Map<string, string[]>();
+  for (const [k, v] of actual.entries()) {
+    seen.set(k, [...(seen.get(k) ?? []), v]);
+  }
+  const problems: string[] = [];
+  for (const [k, vs] of seen) {
+    if (!(k in expected)) {
+      problems.push(`unexpected parameter ${k}=${JSON.stringify(vs.join(","))} — no control set this`);
+    } else if (vs.length > 1) {
+      problems.push(`parameter ${k} sent ${vs.length} times (${vs.map((v) => JSON.stringify(v)).join(", ")})`);
+    } else if (vs[0] !== expected[k]) {
+      problems.push(
+        `parameter ${k} carries ${JSON.stringify(vs[0])} but the control chose ${JSON.stringify(expected[k])}`,
+      );
+    }
+  }
+  for (const [k, v] of Object.entries(expected)) {
+    if (!seen.has(k)) problems.push(`missing parameter ${k} (should carry ${JSON.stringify(v)})`);
+  }
+  return problems;
+}
+
+const RETRY_WAIT_MS = 8_000; // covers the page's exponential retry backoff gaps
+
+/** Set once phase 2 installs its route; null during phase 1. */
+let armOverviewHold: (() => OverviewHold) | null = null;

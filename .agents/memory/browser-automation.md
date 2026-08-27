@@ -16,6 +16,29 @@ distros and do not run on NixOS; the Nix chromium works headless out of the box
 **How to apply:** any check that needs a real browser. Keep the binary path
 env-overridable rather than hardcoding a /nix/store path.
 
+# Filter-wiring & render-lifecycle audit principles
+
+- Judge wiring by the **exact query-param multiset** of the page's own next
+  request after driving one control (missing/extra/duplicated/renamed/
+  wrong-valued all fail, naming the control + actual query string) — and
+  assert reset-to-All *omits* the sentinel (an `__all__` leak is a wiring
+  bug too).
+- A value-equality "re-rendered" check is **vacuous** whenever a filter
+  legitimately leaves the audited cells unchanged (e.g. contact-scoped
+  filters vs a sales headline): stale mounted DOM passes it. Prove the
+  DOM↔request binding instead: withhold the response at the route layer and
+  require the loading state while held; only then trust value equality
+  against the released payload.
+- Never fail on the first transient 5xx/429 from the shared proxy: keep
+  judging the page's own retry requests (their params must match too). 4xx
+  is never transient.
+- Data-gated UI must be audited in both directions: required when the
+  payload says present, required-absent when it says empty — anything else
+  goes red on data drift or passes vacuously.
+- Mutation-test wiring audits both ways: planted miswirings AND a planted
+  stale mount (headline frozen to the first payload) must each fail with
+  correct attribution before the audit is trusted.
+
 # UI-binding audit principles
 
 - Compare rendered DOM values against the **page's own captured response**

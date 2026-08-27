@@ -170,7 +170,10 @@ export default function OverviewWithTargetsPage() {
               Overview with Targets
             </h1>
             {dash.data && (
-              <p className="text-sm text-muted-foreground mt-1">
+              <p
+                className="text-sm text-muted-foreground mt-1"
+                data-testid="text-applied-range"
+              >
                 {dash.data.appliedRange.startDate} →{" "}
                 {dash.data.appliedRange.endDate} · progress through{" "}
                 {dash.data.appliedRange.toDate}
