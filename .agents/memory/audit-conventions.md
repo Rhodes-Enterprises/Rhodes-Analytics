@@ -1,6 +1,6 @@
 ---
 name: Audit tolerance conventions
-description: How dashboard audits set divergence tolerances against cached endpoints, and how their timeout layers must nest
+description: How dashboard audits set divergence tolerances against cached endpoints, how their timeout layers must nest, and how membership spot-checks dodge cache staleness
 ---
 
 - When an audit compares a same-day-cached endpoint (e.g. per-UTC-day cache keys) against fresh Snowflake baselines, do NOT use exact equality or a flat absolute tolerance. Bound each value by the cache-consistent window: `baseline − todayStampedCount − slack ≤ api ≤ baseline + slack`, where todayStampedCount is fetched per row alongside the baseline (one `COUNT_IF(dateCol = today)` in the same GROUP BY) and slack = max(2, TOLERANCE_PCT% of baseline) absorbs rare restatements of past days.
@@ -10,3 +10,6 @@ description: How dashboard audits set divergence tolerances against cached endpo
 - Timeout layering: the audits' per-request deadline must satisfy (max transient retries + 1) × deadline + backoffs < the umbrella runner's per-audit budget, so a hung endpoint fails with the retry-exhausted error that NAMES the URL instead of the runner's blunt kill.
   **Why:** the runner-level kill can't say which request hung; the retry chain can. And the API server keeps computing/caching after a client abort, so a timed-out cold request usually succeeds on retry — the request deadline is a stall detector, not a latency ceiling.
   **How to apply:** re-check the inequality whenever changing the retry count, request deadline, or per-audit budget. When killing a stuck audit process, spawn it detached and signal the NEGATIVE pid: pnpm sits between the runner and the real audit process, and killing only pnpm (e.g. spawnSync's timeout) orphans the audit, which keeps hammering the shared API server. The UI audit's page-data wait is deliberately longer than the fetch deadline (cold first paint) — don't "harmonize" its API proxy fetch down to the shared deadline or cold loads will 502.
+- Membership (dropdown-list) checks against SWR-cached endpoints: pick spot-check values using the endpoint's OWN predicates (shared modules like isLeadSql/DEV_DIM, so picks are subsets-by-construction) over a trailing window that ENDS beyond the cache's keep horizon (today−2d for keepMs=24h).
+  **Why:** a busiest-value pick computed "now" can include a value whose first activity postdates a legitimately stale cached response (false positive on long-running servers); quarter-bound pick windows are empty on day one of a quarter.
+  **How to apply:** reuse for any other filter-options endpoint (leasing, future dashboards): trailing ~90d window shifted back 2 days; a pick query returning nothing FAILS the audit rather than skipping the check.

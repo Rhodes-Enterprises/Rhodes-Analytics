@@ -11,6 +11,7 @@
     "audit:all": "node scripts/audit-all.mjs",
     "audit:cache-swr": "esbuild scripts/audit-cache-swr.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-cache-swr.mjs --log-level=warning && node dist/audit-cache-swr.mjs",
     "audit:dashboard": "esbuild scripts/audit-dashboard.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-dashboard.mjs --log-level=warning && node dist/audit-dashboard.mjs",
+    "audit:filters": "esbuild scripts/audit-filters.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-filters.mjs --log-level=warning && node dist/audit-filters.mjs",
     "audit:yoy": "esbuild scripts/audit-yoy.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-yoy.mjs --log-level=warning && node dist/audit-yoy.mjs",
     "audit:leasing": "esbuild scripts/audit-leasing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-leasing.mjs --log-level=warning && node dist/audit-leasing.mjs",
     "audit:ui": "esbuild scripts/audit-ui.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-ui.mjs --log-level=warning && node dist/audit-ui.mjs",
