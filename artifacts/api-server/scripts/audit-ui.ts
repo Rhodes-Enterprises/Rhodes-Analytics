@@ -146,7 +146,6 @@ interface OverviewPayload {
     /** Rows with neither 'Online' nor 'Onsite' label — actuals only, no goals exist for the bucket. */
     unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
-    unknown: { leads: number; tours: number; sales: number };
     newWebsiteUsers: number;
   };
 
