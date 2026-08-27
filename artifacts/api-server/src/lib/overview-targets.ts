@@ -1,6 +1,13 @@
 import { querySnowflake } from "./snowflake";
 import { DEV_DIM } from "./dev-dim";
-import { isGaTrafficSql, isLeadSql, isSaleSql } from "./business-defs";
+import {
+  CHANNEL_LABELS,
+  CHANNEL_ONLINE,
+  CHANNEL_ONSITE,
+  isGaTrafficSql,
+  isLeadSql,
+  isSaleSql,
+} from "./business-defs";
 import { createQueryCache } from "./query-cache";
 
 /**
@@ -257,8 +264,8 @@ const unlabeledCount = (rows: ActualRow[], company?: string, development?: strin
     rows,
     (r) => Number(r.N) || 0,
     (r) =>
-      r.CHANNEL !== "Online" &&
-      r.CHANNEL !== "Onsite" &&
+      r.CHANNEL !== CHANNEL_ONLINE &&
+      r.CHANNEL !== CHANNEL_ONSITE &&
       (!company || r.COMPANY_NAME === company) &&
       (!development || r.DEVELOPMENT_NAME === development),
   );
@@ -471,14 +478,14 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     websiteUsers: totalUsers,
     newWebsiteUsers: newUsers,
     leads: chan(leads),
-    onlineLeads: chan(leads, "Online"),
-    onsiteLeads: chan(leads, "Onsite"),
+    onlineLeads: chan(leads, CHANNEL_ONLINE),
+    onsiteLeads: chan(leads, CHANNEL_ONSITE),
     tours: chan(tours),
-    onlineTours: chan(tours, "Online"),
-    onsiteTours: chan(tours, "Onsite"),
+    onlineTours: chan(tours, CHANNEL_ONLINE),
+    onsiteTours: chan(tours, CHANNEL_ONSITE),
     sales: chan(sales),
-    onlineSales: chan(sales, "Online"),
-    onsiteSales: chan(sales, "Onsite"),
+    onlineSales: chan(sales, CHANNEL_ONLINE),
+    onsiteSales: chan(sales, CHANNEL_ONSITE),
     unknownLeads: unlabeledCount(leads),
     unknownTours: unlabeledCount(tours),
     unknownSales: unlabeledCount(sales),
@@ -563,12 +570,12 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
       toursPtg: p("first_tours", cTours),
       leadsPtg: p("leads", cLeads),
       onlineTrafficPtg: p("web_traffic", cTotalUsers),
-      onlineLeadsPtg: p("online_leads", chan(leads, "Online", company)),
-      onlineToursPtg: p("online_first_tours", chan(tours, "Online", company)),
-      onlineSalesPtg: p("online_gross_sales", chan(sales, "Online", company)),
-      onsiteLeadsPtg: p("onsite_leads", chan(leads, "Onsite", company)),
-      onsiteToursPtg: p("onsite_first_tours", chan(tours, "Onsite", company)),
-      onsiteSalesPtg: p("onsite_gross_sales", chan(sales, "Onsite", company)),
+      onlineLeadsPtg: p("online_leads", chan(leads, CHANNEL_ONLINE, company)),
+      onlineToursPtg: p("online_first_tours", chan(tours, CHANNEL_ONLINE, company)),
+      onlineSalesPtg: p("online_gross_sales", chan(sales, CHANNEL_ONLINE, company)),
+      onsiteLeadsPtg: p("onsite_leads", chan(leads, CHANNEL_ONSITE, company)),
+      onsiteToursPtg: p("onsite_first_tours", chan(tours, CHANNEL_ONSITE, company)),
+      onsiteSalesPtg: p("onsite_gross_sales", chan(sales, CHANNEL_ONSITE, company)),
       // This division's leads/tours/sales with no Online/Onsite channel
       // label — same direct recount as the matrix's Unknown section, so
       // within the row online + onsite + unknown equals the counts above.
@@ -626,12 +633,12 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
         toursPtg: p("first_tours", dTours),
         leadsPtg: p("leads", dLeads),
         onlineTrafficPtg: p("web_traffic", dTotalUsers),
-        onlineLeadsPtg: p("online_leads", chan(leads, "Online", company, development)),
-        onlineToursPtg: p("online_first_tours", chan(tours, "Online", company, development)),
-        onlineSalesPtg: p("online_gross_sales", chan(sales, "Online", company, development)),
-        onsiteLeadsPtg: p("onsite_leads", chan(leads, "Onsite", company, development)),
-        onsiteToursPtg: p("onsite_first_tours", chan(tours, "Onsite", company, development)),
-        onsiteSalesPtg: p("onsite_gross_sales", chan(sales, "Onsite", company, development)),
+        onlineLeadsPtg: p("online_leads", chan(leads, CHANNEL_ONLINE, company, development)),
+        onlineToursPtg: p("online_first_tours", chan(tours, CHANNEL_ONLINE, company, development)),
+        onlineSalesPtg: p("online_gross_sales", chan(sales, CHANNEL_ONLINE, company, development)),
+        onsiteLeadsPtg: p("onsite_leads", chan(leads, CHANNEL_ONSITE, company, development)),
+        onsiteToursPtg: p("onsite_first_tours", chan(tours, CHANNEL_ONSITE, company, development)),
+        onsiteSalesPtg: p("onsite_gross_sales", chan(sales, CHANNEL_ONSITE, company, development)),
         // Same unlabeled-channel recount as the division rows, scoped to
         // this (company, development) pair.
         unknownLeads: unlabeledCount(leads, company, development),
@@ -800,7 +807,7 @@ const UNKNOWN_RECORDS_LIMIT = 500;
  * against the matrix bucket, so drift between the two fails the audit.
  */
 const unlabeledChannelSql = (col: string) =>
-  `(${col} IS NULL OR ${col} NOT IN ('Online','Onsite'))`;
+  `(${col} IS NULL OR ${col} NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(",")}))`;
 
 /**
  * One bundled statement per bucket: the grouped channel aggregates (ROW_KIND

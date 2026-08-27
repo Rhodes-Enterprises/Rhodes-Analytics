@@ -1,5 +1,6 @@
 import { querySnowflake } from "./snowflake";
 import { createQueryCache } from "./query-cache";
+import { CHANNEL_ONLINE, CHANNEL_ONSITE } from "./business-defs";
 
 /**
  * Data layer for the "Rhodes Living Leasing" dashboard.
@@ -493,8 +494,8 @@ export async function getLeasingDashboard(f: LeasingFilters) {
   // the opposite channel has no target (null PTG) rather than an
   // all-channel goal against a zero actual.
   const effectiveMetric = (metric: GoalMetric): GoalMetric | null => {
-    if (f.channel === "Online") return metric === "onsite" ? null : "online";
-    if (f.channel === "Onsite") return metric === "online" ? null : "onsite";
+    if (f.channel === CHANNEL_ONLINE) return metric === "onsite" ? null : "online";
+    if (f.channel === CHANNEL_ONSITE) return metric === "online" ? null : "onsite";
     return metric;
   };
   const trendGoalType = (() => {
@@ -580,8 +581,8 @@ export async function getLeasingDashboard(f: LeasingFilters) {
 
   const actuals = {
     ratified: sumRows(ratified),
-    onlineRatified: sumRows(ratified, (r) => r.CHANNEL === "Online"),
-    onsiteRatified: sumRows(ratified, (r) => r.CHANNEL === "Onsite"),
+    onlineRatified: sumRows(ratified, (r) => r.CHANNEL === CHANNEL_ONLINE),
+    onsiteRatified: sumRows(ratified, (r) => r.CHANNEL === CHANNEL_ONSITE),
     cancelled: sumRows(cancelled),
     net: sumRows(ratified) - sumRows(cancelled),
   };
@@ -643,23 +644,23 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     onlineLeads: funnelCell(
       "leads",
       "online",
-      sumRows(leadRows, (r) => r.CHANNEL === "Online"),
+      sumRows(leadRows, (r) => r.CHANNEL === CHANNEL_ONLINE),
     ),
     onsiteLeads: funnelCell(
       "leads",
       "onsite",
-      sumRows(leadRows, (r) => r.CHANNEL === "Onsite"),
+      sumRows(leadRows, (r) => r.CHANNEL === CHANNEL_ONSITE),
     ),
     firstTours: funnelCell("firstTours", "total", sumRows(tourRows)),
     onlineFirstTours: funnelCell(
       "firstTours",
       "online",
-      sumRows(tourRows, (r) => r.CHANNEL === "Online"),
+      sumRows(tourRows, (r) => r.CHANNEL === CHANNEL_ONLINE),
     ),
     onsiteFirstTours: funnelCell(
       "firstTours",
       "onsite",
-      sumRows(tourRows, (r) => r.CHANNEL === "Onsite"),
+      sumRows(tourRows, (r) => r.CHANNEL === CHANNEL_ONSITE),
     ),
     moveIns: funnelCell("moveIns", "total", sumRows(moveInRows)),
   };
@@ -707,11 +708,11 @@ export async function getLeasingDashboard(f: LeasingFilters) {
       ratified: cRatified,
       onlineRatified: sumRows(
         ratified,
-        (r) => r.COMMUNITY === community && r.CHANNEL === "Online",
+        (r) => r.COMMUNITY === community && r.CHANNEL === CHANNEL_ONLINE,
       ),
       onsiteRatified: sumRows(
         ratified,
-        (r) => r.COMMUNITY === community && r.CHANNEL === "Onsite",
+        (r) => r.COMMUNITY === community && r.CHANNEL === CHANNEL_ONSITE,
       ),
       cancelled: cCancelled,
       net: cRatified - cCancelled,

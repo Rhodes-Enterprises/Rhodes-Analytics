@@ -1,6 +1,12 @@
 import { querySnowflake } from "./snowflake";
 import { DEV_DIM, devDimSql } from "./dev-dim";
-import { isGaTrafficSql, isLeadSql, isSaleSql } from "./business-defs";
+import {
+  CHANNEL_ONLINE,
+  CHANNEL_ONSITE,
+  isGaTrafficSql,
+  isLeadSql,
+  isSaleSql,
+} from "./business-defs";
 import {
   cached,
   listGoalTypes,
@@ -335,8 +341,8 @@ export async function getFunnelMetric(metric: FunnelMetric, f: DashboardFilters)
     rows.reduce((t, r) => (!filter || filter(r) ? t + n(r.N) : t), 0);
 
   const total = sum();
-  const online = sum((r) => r.CHANNEL === "Online");
-  const onsite = sum((r) => r.CHANNEL === "Onsite");
+  const online = sum((r) => r.CHANNEL === CHANNEL_ONLINE);
+  const onsite = sum((r) => r.CHANNEL === CHANNEL_ONSITE);
   const fullSpanGoal = totalGoals.reduce((t, r) => t + n(r.FULL_SPAN), 0);
   const toDateGoal = totalGoals.reduce((t, r) => t + n(r.TO_DATE), 0);
   const goalSum = (
@@ -366,8 +372,8 @@ export async function getFunnelMetric(metric: FunnelMetric, f: DashboardFilters)
     monthly.push({
       month: m,
       total: sum((r) => n(r.M) === m),
-      online: sum((r) => n(r.M) === m && r.CHANNEL === "Online"),
-      onsite: sum((r) => n(r.M) === m && r.CHANNEL === "Onsite"),
+      online: sum((r) => n(r.M) === m && r.CHANNEL === CHANNEL_ONLINE),
+      onsite: sum((r) => n(r.M) === m && r.CHANNEL === CHANNEL_ONSITE),
       goal: goalByMonth.get(m) ?? 0,
     });
   }
@@ -393,8 +399,8 @@ export async function getFunnelMetric(metric: FunnelMetric, f: DashboardFilters)
     return {
       division: company,
       total: cTotal,
-      online: sum((r) => r.COMPANY_NAME === company && r.CHANNEL === "Online"),
-      onsite: sum((r) => r.COMPANY_NAME === company && r.CHANNEL === "Onsite"),
+      online: sum((r) => r.COMPANY_NAME === company && r.CHANNEL === CHANNEL_ONLINE),
+      onsite: sum((r) => r.COMPANY_NAME === company && r.CHANNEL === CHANNEL_ONSITE),
       toDateGoal: td,
       ptgPercent: ptg(cTotal, td),
     };
@@ -424,13 +430,13 @@ export async function getFunnelMetric(metric: FunnelMetric, f: DashboardFilters)
           (r) =>
             r.COMPANY_NAME === company &&
             r.DEVELOPMENT_NAME === development &&
-            r.CHANNEL === "Online",
+            r.CHANNEL === CHANNEL_ONLINE,
         ),
         onsite: sum(
           (r) =>
             r.COMPANY_NAME === company &&
             r.DEVELOPMENT_NAME === development &&
-            r.CHANNEL === "Onsite",
+            r.CHANNEL === CHANNEL_ONSITE,
         ),
         toDateGoal: td,
         ptgPercent: ptg(dTotal, td),
@@ -586,21 +592,21 @@ export async function getEhiGoals(f: DashboardFilters) {
       case "leads":
         return match("leads");
       case "online_leads":
-        return match("leads", "Online");
+        return match("leads", CHANNEL_ONLINE);
       case "onsite_leads":
-        return match("leads", "Onsite");
+        return match("leads", CHANNEL_ONSITE);
       case "first_tours":
         return match("tours");
       case "online_first_tours":
-        return match("tours", "Online");
+        return match("tours", CHANNEL_ONLINE);
       case "onsite_first_tours":
-        return match("tours", "Onsite");
+        return match("tours", CHANNEL_ONSITE);
       case "gross_sales":
         return deals();
       case "online_gross_sales":
-        return deals("Online");
+        return deals(CHANNEL_ONLINE);
       case "onsite_gross_sales":
-        return deals("Onsite");
+        return deals(CHANNEL_ONSITE);
     }
   };
 

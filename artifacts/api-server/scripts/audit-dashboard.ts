@@ -62,9 +62,10 @@
  * total − online − onsite — so there is still NO sum-to-total assumption
  * anywhere: per-cell baselines only.
  *
- * Because those baselines hardcode the SAME 'Online'/'Onsite' literals the
- * API uses, they share its blind spot: if the upstream data relabels the
- * channel values (e.g. dbt renames 'Online' to 'Digital'), both sides
+ * Because those baselines key on the SAME shared channel-label constants
+ * the API uses (CHANNEL_ONLINE / CHANNEL_ONSITE in src/lib/business-defs.ts,
+ * so the two sides cannot drift apart in code), they share its blind spot:
+ * if the upstream data relabels the channel values (e.g. dbt renames 'Online' to 'Digital'), both sides
  * compute 0 and every per-cell check passes 0=0 while the dashboard ships a
  * zeroed online/onsite section. The default view therefore runs a channel
  * label-drift guard: a materially non-zero headline baseline whose Online
@@ -213,7 +214,14 @@ import { querySnowflake as querySnowflakeRaw } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
 import { auditGaFlagLabels, auditGaFreshness, auditGaPropertyLabels } from "./ga-property-guard";
 import { fetchJsonWithRetry } from "./lib/fetch-retry";
-import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
+import {
+  CHANNEL_LABELS,
+  CHANNEL_ONLINE,
+  CHANNEL_ONSITE,
+  isGaTrafficSql,
+  isLeadSql,
+  isSaleSql,
+} from "../src/lib/business-defs";
 
 // Default to the API server's own local port (same PORT contract the server
 // uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.const API_BASE =
@@ -668,8 +676,9 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   //    window is dropped by the outer WHERE and contributed to no count
   //    anyway (BETWEEN over a NULL date is NULL, and TRUE OR NULL is TRUE,
   //    so no in-window row is lost);
-  //  - channel cells restrict on the hardcoded 'Online'/'Onsite' literals
-  //    on the channel column the dashboard keys on; the unlabeled bucket
+  //  - channel cells restrict on the shared CHANNEL_ONLINE/CHANNEL_ONSITE
+  //    labels (src/lib/business-defs.ts) on the channel column the dashboard
+  //    keys on; the unlabeled bucket
   //    (behind trafficMatrix.unknown) recounts rows carrying NEITHER
   //    literal ('Unknown', NULL, or any other value) — still a direct
   //    recount of source rows, never total − online − onsite, so the audit
@@ -678,18 +687,18 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   //    correct by construction: a matching label is redundant, a
   //    contradicting one makes that COUNT_IF structurally zero — exactly
   //    what the API's cell must show under that filter.
-  const UNLABELED = "(CH IS NULL OR CH NOT IN ('Online','Onsite'))";
+  const UNLABELED = `(CH IS NULL OR CH NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(",")}))`;
   // Bind order follows text order: subquery SELECT-list window binds come
   // before the WHERE fragment binds.
   const [contactRows, dealRows, gaRows] = await Promise.all([
     sfQuery<Record<string, number>>(
       `SELECT COUNT_IF(IN_LEAD_WINDOW) AS LEADS,
-              COUNT_IF(IN_LEAD_WINDOW AND CH = 'Online') AS ONLINE_LEADS,
-              COUNT_IF(IN_LEAD_WINDOW AND CH = 'Onsite') AS ONSITE_LEADS,
+              COUNT_IF(IN_LEAD_WINDOW AND CH = '${CHANNEL_ONLINE}') AS ONLINE_LEADS,
+              COUNT_IF(IN_LEAD_WINDOW AND CH = '${CHANNEL_ONSITE}') AS ONSITE_LEADS,
               COUNT_IF(IN_LEAD_WINDOW AND ${UNLABELED}) AS UNLABELED_LEADS,
               COUNT_IF(IN_TOUR_WINDOW) AS TOURS,
-              COUNT_IF(IN_TOUR_WINDOW AND CH = 'Online') AS ONLINE_TOURS,
-              COUNT_IF(IN_TOUR_WINDOW AND CH = 'Onsite') AS ONSITE_TOURS,
+              COUNT_IF(IN_TOUR_WINDOW AND CH = '${CHANNEL_ONLINE}') AS ONLINE_TOURS,
+              COUNT_IF(IN_TOUR_WINDOW AND CH = '${CHANNEL_ONSITE}') AS ONSITE_TOURS,
               COUNT_IF(IN_TOUR_WINDOW AND ${UNLABELED}) AS UNLABELED_TOURS
        FROM (
          SELECT C.CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
@@ -703,10 +712,10 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     ),
     sfQuery<Record<string, number>>(
       `SELECT COUNT(*) AS SALES,
-              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = 'Online') AS ONLINE_SALES,
-              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = 'Onsite') AS ONSITE_SALES,
+              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = '${CHANNEL_ONLINE}') AS ONLINE_SALES,
+              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = '${CHANNEL_ONSITE}') AS ONSITE_SALES,
               COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
-                       OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online','Onsite')) AS UNLABELED_SALES
+                       OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(",")})) AS UNLABELED_SALES
        FROM DM_DEALS X
        WHERE ${isSaleSql("X")}
          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}`,
@@ -782,8 +791,10 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   }
 
   // ---- Channel label-drift guard ----
-  // The per-cell channel checks above and the API's channel split hardcode
-  // the same 'Online'/'Onsite' literals (chan() in src/lib/overview-targets.ts).
+  // The per-cell channel checks above and the API's channel split key on the
+  // same shared channel labels (CHANNEL_ONLINE/CHANNEL_ONSITE in
+  // src/lib/business-defs.ts, matched by chan() in src/lib/overview-targets.ts),
+  // so the two sides cannot drift apart in code.
   // If upstream data relabels the channel values (e.g. dbt renames 'Online'
   // to 'Digital' in DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL or
   // DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL), BOTH sides compute 0, every
@@ -843,7 +854,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
       }
       if (g.online > 0 || g.onsite > 0) {
         console.log(
-          `OK   ${name} 'Online'/'Onsite' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
+          `OK   ${name} '${CHANNEL_ONLINE}'/'${CHANNEL_ONSITE}' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
         );
         continue;
       }
@@ -856,12 +867,13 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         labelRows.map((r) => `'${r.LABEL}' (${Number(r.N) || 0})`).join(", ") ||
         "(no rows)";
       console.error(
-        `FAIL ${name} ${g.total} ${g.metric} in ${expStart}..${expTo} but ZERO match 'Online' and ZERO match 'Onsite' ` +
+        `FAIL ${name} ${g.total} ${g.metric} in ${expStart}..${expTo} but ZERO match '${CHANNEL_ONLINE}' and ZERO match '${CHANNEL_ONSITE}' ` +
           `on ${g.column} — the expected channel labels are missing from the data; labels present: ${present}. ` +
-          `The dashboard's channel split AND this audit's baselines both hardcode 'Online'/'Onsite' ` +
-          `(chan() in src/lib/overview-targets.ts; the channel COUNT_IFs here), so every online/onsite ` +
+          `The dashboard's channel split AND this audit's baselines both key on the ` +
+          `shared CHANNEL_ONLINE/CHANNEL_ONSITE constants (src/lib/business-defs.ts — chan() in ` +
+          `src/lib/overview-targets.ts; the channel COUNT_IFs here), so every online/onsite ` +
           `cell reads 0 and the per-cell checks pass 0=0. If upstream renamed the channel values, update ` +
-          `those literals to the new labels.`,
+          `those constants to the new labels.`,
       );
       failed = true;
     }
@@ -1001,10 +1013,10 @@ async function auditBreakdowns(
   // "No Online/Onsite label" predicates for the unknown* metrics, applied to
   // the channel column each grouped scan already exposes. Independent
   // recounts: the audit never derives unlabeled as total − online − onsite.
-  const UNLAB_CONTACT = "(C.CH IS NULL OR C.CH NOT IN ('Online', 'Onsite'))";
+  const UNLAB_CONTACT = `(C.CH IS NULL OR C.CH NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(", ")}))`;
   const UNLAB_DEAL =
     "(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL IS NULL " +
-    "OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))";
+    `OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(", ")}))`;
 
   // BATCHED baselines (the Snowflake proxy rate-limits at ~10 RPS, so round
   // trips dominate audit wall time):
@@ -1077,10 +1089,10 @@ async function auditBreakdowns(
               COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?) AS N_TOURS,
               COUNT_IF(C.CONTACT_CREATE_DATE BETWEEN ? AND ?
                        AND (C.ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
-                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))) AS N_UNK_LEADS,
+                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(", ")}))) AS N_UNK_LEADS,
               COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
                        AND (C.ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
-                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online', 'Onsite'))) AS N_UNK_TOURS
+                            OR C.ONSITE_ONLINE_SOURCE_CHANNEL NOT IN (${CHANNEL_LABELS.map((l) => `'${l}'`).join(", ")}))) AS N_UNK_TOURS
        FROM DM_CONTACTS C
        WHERE ${isLeadSql("C")}
          AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
@@ -2504,7 +2516,7 @@ function auditUnknownRecordsDrilldown(
       failed = true;
     }
     const mislabeled = list.records.filter(
-      (r) => r.rawChannel === "Online" || r.rawChannel === "Onsite",
+      (r) => r.rawChannel === CHANNEL_ONLINE || r.rawChannel === CHANNEL_ONSITE,
     );
     if (mislabeled.length > 0) {
       console.error(

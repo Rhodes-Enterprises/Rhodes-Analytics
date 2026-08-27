@@ -55,8 +55,14 @@ env-overridable rather than hardcoding a /nix/store path.
   wrong-field bindings, and an injected duplicate/extra column must each
   exit non-zero. (Swapping two numerically equal values is invisible by
   construction and harmless — same digits shown.)
-
-
+- The binding map must move WITH the page: adding rows/captions to an audited
+  page without extending the UI audit's binding map turns the audit red for
+  every downstream task (unbound rows fail by design). Land both in one change.
+- Conditionally rendered rows must be bound presence-iff the page's own
+  visibility rule (e.g. section hidden when its bucket is empty): expected
+  present AND checked when the condition holds, expected absent otherwise —
+  and derived sub-lines (shares) must mirror the page's exact formatting,
+  including special cases like "<1" for sub-1% values.
 ## Conditional page sections (hidden-when-zero)
 
 UI-binding audits must gate conditional sections on the SAME payload condition the page uses (e.g. unknown-channel matrix rows render only when that bucket is non-zero): expect the rows when the condition holds, fail if they render when it doesn't, and fail if they're missing when it does.

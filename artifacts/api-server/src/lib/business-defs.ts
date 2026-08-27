@@ -5,6 +5,7 @@
  *   - a SALE  is a deal in the 'Esperanza Homes Sales Pipeline'
  *   - a LEAD  is a contact with EHI_LEAD = 1
  *   - TRAFFIC is GA rows for the 'Esperanza Homes' property
+ *   - the 'Online' / 'Onsite' channel labels the funnels split on
  *
  * These used to be hand-copied SQL text across the API data layers
  * (src/lib/overview-targets.ts, src/lib/marketing-dashboards.ts) and the
@@ -28,6 +29,28 @@ export const SALES_PIPELINE_NAME = "Esperanza Homes Sales Pipeline";
 
 /** Google Analytics property whose traffic counts as website users. */
 export const GA_PROPERTY_NAME = "Esperanza Homes";
+
+/**
+ * Channel labels the dashboards split leads/tours/sales/leases on, exactly
+ * as they appear in the CRM's channel columns
+ * (DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL,
+ * DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL). Rows carrying neither label
+ * fall into the dashboards' unknown/unlabeled bucket.
+ *
+ * The audits' independent baselines key on these same constants — sharing
+ * the label TEXT (not the aggregation logic) is what keeps the dashboards
+ * and their safety nets from drifting apart. The complementary label-domain
+ * guards in the audits cover the remaining blind spot: an upstream relabel
+ * of the data itself zeroes both sides at once (see the chLabels guards in
+ * scripts/audit-dashboard.ts and scripts/audit-leasing.ts). If upstream
+ * renames the channel values, update the labels HERE and both sides follow.
+ */
+export const CHANNEL_ONLINE = "Online";
+export const CHANNEL_ONSITE = "Onsite";
+
+/** Both channel labels, for iteration and SQL IN (...) lists. */
+export const CHANNEL_LABELS = [CHANNEL_ONLINE, CHANNEL_ONSITE] as const;
+export type ChannelLabel = (typeof CHANNEL_LABELS)[number];
 
 const prefix = (alias?: string): string => (alias ? `${alias}.` : "");
 

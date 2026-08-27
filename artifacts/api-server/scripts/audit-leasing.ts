@@ -101,6 +101,11 @@
  * Exits 0 when all values match within tolerance, 1 otherwise.
  */
 
+import {
+  CHANNEL_LABELS,
+  CHANNEL_ONLINE,
+  CHANNEL_ONSITE,
+} from "../src/lib/business-defs";
 import { querySnowflake as rawQuerySnowflake } from "../src/lib/snowflake";
 import { auditGaFlagLabels } from "./ga-property-guard";
 import { fetchJsonWithRetry } from "./lib/fetch-retry";
@@ -356,8 +361,8 @@ async function baselineLeaseCounts(
     CANCELLED: number;
   }>(
     `SELECT COUNT_IF(IN_RAT_WINDOW) AS RATIFIED,
-            COUNT_IF(IN_RAT_WINDOW AND CH = 'Online') AS ONLINE_RATIFIED,
-            COUNT_IF(IN_RAT_WINDOW AND CH = 'Onsite') AS ONSITE_RATIFIED,
+            COUNT_IF(IN_RAT_WINDOW AND CH = '${CHANNEL_ONLINE}') AS ONLINE_RATIFIED,
+            COUNT_IF(IN_RAT_WINDOW AND CH = '${CHANNEL_ONSITE}') AS ONSITE_RATIFIED,
             COUNT_IF(IN_CAN_WINDOW) AS CANCELLED
      FROM (
        SELECT LEASE_RATIFIED_DATE BETWEEN ? AND ? AS IN_RAT_WINDOW,
@@ -497,7 +502,6 @@ async function baselineGoalsByType(
     ]),
   );
 }
-
 /**
  * GA mapping domain — communities with any matched development row at all,
  * independent of the scenario's date range. Distinguishes "mapped but zero
@@ -506,7 +510,6 @@ async function baselineGoalsByType(
  * serves every scenario.
  */
 let gaMappedDomainCache: Promise<Set<string>> | undefined;
-
 type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
 let failures = 0;
 
@@ -601,8 +604,8 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   // channel filter is applied, "total"/"net" compare against that channel's
   // goal and the opposite channel has no target.
   const effGoalType = (metric: "total" | "online" | "onsite"): string | undefined => {
-    if (f.channel === "Online") return metric === "onsite" ? undefined : gt.online;
-    if (f.channel === "Onsite") return metric === "online" ? undefined : gt.onsite;
+    if (f.channel === CHANNEL_ONLINE) return metric === "onsite" ? undefined : gt.online;
+    if (f.channel === CHANNEL_ONSITE) return metric === "online" ? undefined : gt.onsite;
     return gt[metric];
   };
 
@@ -614,8 +617,8 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     stage: "webTraffic" | "leads" | "firstTours" | "moveIns",
   ): string | undefined => {
     const t = funnelTypes[stage];
-    if (f.channel === "Online") return t.online;
-    if (f.channel === "Onsite") return t.onsite;
+    if (f.channel === CHANNEL_ONLINE) return t.online;
+    if (f.channel === CHANNEL_ONSITE) return t.onsite;
     return t.total;
   };
 
@@ -752,7 +755,7 @@ async function judgeChannelLabels(g: {
   onsite: number;
   /** Channel column the dashboard keys this metric's split on. */
   column: string;
-  /** Where the 'Online'/'Onsite' literals live (API and audit sides). */
+  /** Where the shared channel constants are compared (API and audit sides). */
   literalSites: string;
   /** Audited window, e.g. "2026-01-01..2026-08-26". */
   window: string;
@@ -768,19 +771,20 @@ async function judgeChannelLabels(g: {
   }
   if (g.online > 0 || g.onsite > 0) {
     console.log(
-      `  OK   ${name}: 'Online'/'Onsite' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
+      `  OK   ${name}: '${CHANNEL_ONLINE}'/'${CHANNEL_ONSITE}' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
     );
     return;
   }
   const present = await g.labelsPresent();
   failures++;
   console.error(
-    `  FAIL ${name}: ${g.total} ${g.noun} in ${g.window} but ZERO match 'Online' and ` +
-      `ZERO match 'Onsite' on ${g.column} — the expected channel labels are missing ` +
+    `  FAIL ${name}: ${g.total} ${g.noun} in ${g.window} but ZERO match '${CHANNEL_ONLINE}' and ` +
+      `ZERO match '${CHANNEL_ONSITE}' on ${g.column} — the expected channel labels are missing ` +
       `from the data; labels present: ${present}. The leasing dashboard's channel ` +
-      `split AND this audit both hardcode 'Online'/'Onsite' (${g.literalSites}), so ` +
+      `split AND this audit both key on the shared CHANNEL_ONLINE/CHANNEL_ONSITE ` +
+      `constants (src/lib/business-defs.ts; ${g.literalSites}), so ` +
       `the dashboard's online/onsite cells for this metric read 0 and every check ` +
-      `passes 0=0. If upstream renamed the channel values, update those literals to ` +
+      `passes 0=0. If upstream renamed the channel values, update those constants to ` +
       `the new labels.`,
   );
 }
@@ -893,8 +897,8 @@ async function auditFunnelChannelLabels(
       metric: s.metric,
       noun: s.noun,
       total: rows.reduce((t, r) => t + (Number(r.N) || 0), 0),
-      online: labelCount("Online"),
-      onsite: labelCount("Onsite"),
+      online: labelCount(CHANNEL_ONLINE),
+      onsite: labelCount(CHANNEL_ONSITE),
       column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
       literalSites:
         "r.CHANNEL === ... over fetchContactStageCounts rows in src/lib/leasing.ts; " +
@@ -956,8 +960,8 @@ async function auditCommunities(
   }>(
     `SELECT C,
             COUNT_IF(IN_RAT_WINDOW) AS RAT,
-            COUNT_IF(IN_RAT_WINDOW AND CH = 'Online') AS RAT_ONLINE,
-            COUNT_IF(IN_RAT_WINDOW AND CH = 'Onsite') AS RAT_ONSITE,
+            COUNT_IF(IN_RAT_WINDOW AND CH = '${CHANNEL_ONLINE}') AS RAT_ONLINE,
+            COUNT_IF(IN_RAT_WINDOW AND CH = '${CHANNEL_ONSITE}') AS RAT_ONSITE,
             COUNT_IF(IN_CAN_WINDOW) AS CAN
      FROM (
        SELECT TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) AS C,
@@ -1429,7 +1433,7 @@ async function main() {
   // (e.g. 'Unknown'), visiting neither. Add funnel-only variants (full
   // funnel Snowflake baselines + trend consistency) for whichever literal
   // channels the scenarios above miss.
-  for (const ch of ["Online", "Onsite"]) {
+  for (const ch of CHANNEL_LABELS) {
     if (!scenarios.some((s) => s.filters.channel === ch)) {
       scenarios.push({
         name: `channel filter (${ch}) — funnel baselines + trend consistency`,
@@ -1515,8 +1519,8 @@ async function baselineContactStage(
   for (const r of rows) {
     const n = Number(r.N) || 0;
     total += n;
-    if (r.CH === "Online") online += n;
-    else if (r.CH === "Onsite") onsite += n;
+    if (r.CH === CHANNEL_ONLINE) online += n;
+    else if (r.CH === CHANNEL_ONSITE) onsite += n;
   }
   return { total, online, onsite };
 }
@@ -1606,8 +1610,8 @@ async function auditFunnel(
   // filter, "total" cells compare against that channel's goal and the
   // opposite channel's cells have no goal at all.
   const effMetric = (metric: GoalMetric): GoalMetric | null => {
-    if (f.channel === "Online") return metric === "onsite" ? null : "online";
-    if (f.channel === "Onsite") return metric === "online" ? null : "onsite";
+    if (f.channel === CHANNEL_ONLINE) return metric === "onsite" ? null : "online";
+    if (f.channel === CHANNEL_ONSITE) return metric === "online" ? null : "onsite";
     return metric;
   };
   const cellGoalType = (stage: FunnelStage, metric: GoalMetric): string | undefined => {
