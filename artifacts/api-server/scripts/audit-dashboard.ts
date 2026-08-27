@@ -73,6 +73,25 @@
  * Quiet windows (total below AUDIT_CHANNEL_GUARD_MIN_TOTAL, e.g. day one of
  * a quarter) are exempt so they cannot false-positive.
  *
+ * Two scenarios additionally pin the API's TARGET resolution (the goal-type
+ * walk-back that picks the latest goal_<metric>_q<N> re-issue <= the range's
+ * elapsed cutoff, excluding old_* renames and RL_* rental variants):
+ * - A PRIOR fiscal year scenario (the full previous calendar year). Years
+ *   before FY2026 carry no goal_* regime in DM_GOALS (only legacy display
+ *   names like 'Gross Sales'), so as long as the prior year predates the
+ *   regime the scenario pins strict fiscal isolation — every target cell
+ *   (KPI + all traffic-matrix goal columns, online/onsite included) must
+ *   be EXACTLY zero, anything else means goals leaked in from another
+ *   fiscal year or goal type. From January 2027 (FY2026 becomes the prior
+ *   year) it automatically upgrades to pinning real target values.
+ * - The latest fully-elapsed quarter of the current year (skipped with a
+ *   note during Q1), whose cutoff sits in a PAST quarter — the walk-back
+ *   must resolve THAT quarter's re-issue, not the newest one, so a change
+ *   that ignores the as-of date or stops excluding old_* re-issues fails.
+ * When a pinned scenario's year DOES carry the goal_* regime, empty goal
+ * sums FAIL loudly (mirroring audit-leasing's requireGoalData check) instead
+ * of letting every target check pass on meaningless 0-vs-0 comparisons.
+ *
  * The website-user metrics share the same blind-spot class through the GA
  * property: the API's GA queries and this audit's GA baselines both
  * filter on the shared GA_PROPERTY_NAME constant in src/lib/business-defs.ts
@@ -198,6 +217,13 @@ interface DevelopmentRow {
   sales: number;
 }
 
+/** Traffic-matrix cell: actual plus the resolved target values. */
+interface TargetCell {
+  fullSpanGoal: number;
+  toDateGoal: number;
+  actual: number;
+  ptgPercent: number | null;
+}
 interface RatioRow {
   name: string;
   group: string;
@@ -207,27 +233,37 @@ interface RatioRow {
 }
 interface OverviewResponse {
   appliedRange: { startDate: string; endDate: string; toDate: string; target: string };
-  kpis: { grossSales: number };
+
+  kpis: {
+    grossSales: number;
+    salesGoal: number;
+    salesTdGoal: number;
+    ptgPercent: number | null;
+  };
+
   trafficMatrix: {
     online: {
-      websiteUsers: { actual: number };
-      leads: { actual: number };
-      tours: { actual: number };
-      sales: { actual: number };
+      websiteUsers: TargetCell;
+      leads: TargetCell;
+      tours: TargetCell;
+      sales: TargetCell;
     };
     onsite: {
-      leads: { actual: number };
-      tours: { actual: number };
-      sales: { actual: number };
+      leads: TargetCell;
+      tours: TargetCell;
+      sales: TargetCell;
     };
     /** Rows with neither 'Online' nor 'Onsite' label — shown so the split adds up */
     unknown: { leads: number; tours: number; sales: number };
-    total: { leads: { actual: number }; tours: { actual: number } };
+    total: { leads: TargetCell; tours: TargetCell };
     /** Headline NEW-users count from the overall () grouping-set row */
     newWebsiteUsers: number;
   };
+
   divisions: DivisionRow[];
+
   developments: DevelopmentRow[];
+
   ratios: RatioRow[];
 }
 
@@ -314,6 +350,7 @@ interface Scenario {
    * counts, goals against the ratio-goal input table). Default view only:
    * those baselines bind no filters.
    */
+
   withRatios?: boolean;
   /**
    * Run the channel label-drift guard: fail when a headline baseline is
@@ -322,6 +359,7 @@ interface Scenario {
    * Default view only: a channel-filtered scenario legitimately zeroes the
    * opposite channel's cells.
    */
+
   withChannelLabelGuard?: boolean;
   /**
    * Run the shared GA property label-drift guard: fail when GA rows exist
@@ -330,7 +368,21 @@ interface Scenario {
    * one guard pass per audit run is coverage enough, and the default range
    * is the one the dashboard ships.
    */
+
   withGaPropertyGuard?: boolean;
+  /**
+   * Also audit every TARGET value (KPI sales goal + ALL traffic-matrix
+   * goal columns, online/onsite cells included) against an independent
+   * resolution of the goal-type regime actually present in DM_GOALS for
+   * the scenario's fiscal year:
+   * - Year carries the goal_* regime: compare real target values, and FAIL
+   *   loudly when the resolved goal data sums to zero (requireGoalData
+   *   semantics from audit-leasing.ts) — 0-vs-0 target checks test nothing.
+   * - Year predates the regime (no goal_* types at all, e.g. FY2025): pin
+   *   strict fiscal isolation — every target must be EXACTLY zero, so goals
+   *   leaking in from another fiscal year or goal type fail immediately.
+   */
+  pinTargets?: boolean;
 }
 
 interface Frag {
@@ -455,6 +507,7 @@ interface ScenarioResult {
   /** set on every range-honoring scenario result */
   headline?: HeadlineBaselines;
 }
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   const f = scenario.filters;
   console.log(`\n=== Scenario: ${scenario.name} ===`);
@@ -712,6 +765,11 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     if (!(await auditGaPropertyLabels(expStart, expTo))) failed = true;
   }
 
+  if (scenario.pinTargets) {
+    const targetsOk = await auditTargets(overview, expStart, expEnd, expTo);
+    if (!targetsOk) failed = true;
+  }
+
   return {
     ok: !failed,
     rangeOk: true,
@@ -732,6 +790,24 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     },
   };
 }
+
+/**
+ * Every target-bearing cell of the overview response: the sales KPI plus all
+ * traffic-matrix goal columns, online/onsite channel cells included. Names
+ * match the <metric> segment of the goal_<metric>_q<N> GOAL_TYPE convention.
+ */
+const TARGET_METRICS = [
+  "gross_sales",
+  "leads",
+  "first_tours",
+  "web_traffic",
+  "online_leads",
+  "onsite_leads",
+  "online_first_tours",
+  "onsite_first_tours",
+  "online_gross_sales",
+  "onsite_gross_sales",
+] as const;
 
 // ---------- Breakdown table audit (divisions / developments) ----------
 
@@ -1242,6 +1318,26 @@ function explicitRangeScenario(defaultStart: string): Scenario {
   };
 }
 
+/**
+ * The most recent fully-elapsed quarter of the current year, or null during
+ * Q1. Its elapsed cutoff sits in a PAST quarter, so the API's goal-type
+ * walk-back must resolve THAT quarter's re-issue (e.g. goal_*_q2 with a
+ * June 30 cutoff), not the newest one available — pinning the walk-back
+ * against real goal data today, while the prior-year scenario carries the
+ * pin for whole past years.
+ */
+function latestElapsedQuarterRange(): { startDate: string; endDate: string } | null {
+  const t = new Date(todayChicago() + "T00:00:00");
+  const q = Math.floor(t.getMonth() / 3); // 0-based current quarter
+  if (q === 0) return null;
+  const year = t.getFullYear();
+  const startMonth = (q - 1) * 3 + 1;
+  const end = new Date(year, q * 3, 0); // last day of the elapsed quarter
+  return {
+    startDate: `${year}-${String(startMonth).padStart(2, "0")}-01`,
+    endDate: `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`,
+  };
+}
 async function main() {
   console.log(
     `Auditing ${API_BASE}/dashboards/overview-with-targets (tolerance ${TOLERANCE_PCT}%)`,
@@ -1254,6 +1350,7 @@ async function main() {
   const { company, development, channel, leadSource, cohortQuarter } =
     await pickRepresentativeFilters(startDate, toDate);
 
+  const priorYear = Number(startDate.slice(0, 4)) - 1;
   const scenarios: Scenario[] = [
     {
       name: "default view",
@@ -1282,7 +1379,28 @@ async function main() {
       withBreakdowns: true,
     },
     { ...explicitRangeScenario(startDate), withBreakdowns: true },
+    {
+      name: `prior fiscal year (${priorYear}) — past-year target resolution`,
+      filters: {
+        startDate: `${priorYear}-01-01`,
+        endDate: `${priorYear}-12-31`,
+      },
+      pinTargets: true,
+    },
   ];
+  const elapsedQuarter = latestElapsedQuarterRange();
+  if (elapsedQuarter) {
+    scenarios.push({
+      name: `elapsed quarter (${elapsedQuarter.startDate}..${elapsedQuarter.endDate}) — goal walk-back pin`,
+      filters: elapsedQuarter,
+      pinTargets: true,
+    });
+  } else {
+    console.log(
+      "note: no fully-elapsed quarter in the current year yet (Q1) — the goal-type " +
+        "walk-back value pin runs through the prior-year scenario instead",
+    );
+  }
   console.log(
     `Scenarios: ${scenarios
       .map((s) => `${s.name}${s.withBreakdowns ? " [+breakdowns]" : ""}`)
@@ -1345,7 +1463,8 @@ async function main() {
         "labels, upstream renaming of the 'Online'/'Onsite' channel values (see any " +
         "chLabels guard failure above), upstream renaming of the GA PROPERTY values " +
         "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
-        "name, ignored date parameters, changed filters, stale cached data, or " +
+        "name, a goal-type walk-back/target-resolution regression, ignored date " +
+        "parameters, changed filters, stale cached data, or " +
         "mislabeled/hidden communities or per-community YTD numbers drifting " +
         "from Snowflake in the Community List.",
     );
@@ -1937,6 +2056,7 @@ interface DimRawRow {
   RENTAL_COMMUNITY_FLAG: string | null;
 }
 
+type TargetMetric = (typeof TARGET_METRICS)[number];
 /** Per-community YTD baseline: full-window count plus its today-dated slice. */
 interface YtdBaselineRow {
   DEV: string | null;
@@ -1979,4 +2099,250 @@ async function sfQuery<T extends object>(
     sfActive--;
     sfWaiters.shift()?.();
   }
+}
+
+/** Full-span and elapsed (to-date) goal sums per goal type over the range. */
+async function baselineGoalSums(
+  fiscalYear: number,
+  goalTypes: string[],
+  startDate: string,
+  endDate: string,
+  toDate: string,
+): Promise<Map<string, { fullSpan: number; toDate: number }>> {
+  if (goalTypes.length === 0) return new Map();
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const rows = await sfQuery<{
+    GOAL_TYPE: string;
+    FULL_SPAN: number;
+    TD: number;
+  }>(
+    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TD
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
+       AND BUDGET_DATE BETWEEN ? AND ?
+     GROUP BY 1`,
+    [toDate, fiscalYear, ...goalTypes, startDate, endDate],
+  );
+  return new Map(
+    rows.map((r) => [
+      r.GOAL_TYPE,
+      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TD) || 0 },
+    ]),
+  );
+}
+
+/**
+ * Audits every target value of a pinned scenario (KPI sales goal and ALL
+ * traffic-matrix goal columns — total, online, and onsite cells) against an
+ * independent resolution of the goal-type regime present in DM_GOALS for
+ * the scenario's fiscal year. In regime years, every audited metric must
+ * resolve a goal type with a non-zero full-span sum — a metric silently
+ * dropping out of DM_GOALS would otherwise pass 0-vs-0 forever.
+ * See the Scenario.pinTargets doc for the two pinning modes.
+ */
+async function auditTargets(
+  overview: OverviewResponse,
+  expStart: string,
+  expEnd: string,
+  expTo: string,
+): Promise<boolean> {
+  const fiscalYear = Number(expStart.slice(0, 4));
+  console.log(`-- targets (FY${fiscalYear}, elapsed cutoff ${expTo})`);
+
+  // The baselines below resolve the DEFAULT target's ("goal") regime; if the
+  // API applied some other target, every comparison would test the wrong
+  // thing — fail fast instead.
+  if (overview.appliedRange.target !== "goal") {
+    console.error(
+      `FAIL applied target is '${overview.appliedRange.target}', expected the default 'goal' — ` +
+        "the target pin assumes the server default",
+    );
+    return false;
+  }
+
+  const regime = await resolveGoalRegime(fiscalYear, expTo);
+  const cells: {
+    metric: TargetMetric;
+    path: string;
+    fullSpan: number;
+    toDate: number;
+    ptg: number | null;
+  }[] = [
+    {
+      metric: "gross_sales",
+      path: "kpis.sales(Goal|TdGoal)",
+      fullSpan: overview.kpis.salesGoal,
+      toDate: overview.kpis.salesTdGoal,
+      ptg: overview.kpis.ptgPercent,
+    },
+    {
+      metric: "leads",
+      path: "trafficMatrix.total.leads",
+      fullSpan: overview.trafficMatrix.total.leads.fullSpanGoal,
+      toDate: overview.trafficMatrix.total.leads.toDateGoal,
+      ptg: overview.trafficMatrix.total.leads.ptgPercent,
+    },
+    {
+      metric: "first_tours",
+      path: "trafficMatrix.total.tours",
+      fullSpan: overview.trafficMatrix.total.tours.fullSpanGoal,
+      toDate: overview.trafficMatrix.total.tours.toDateGoal,
+      ptg: overview.trafficMatrix.total.tours.ptgPercent,
+    },
+    {
+      metric: "web_traffic",
+      path: "trafficMatrix.online.websiteUsers",
+      fullSpan: overview.trafficMatrix.online.websiteUsers.fullSpanGoal,
+      toDate: overview.trafficMatrix.online.websiteUsers.toDateGoal,
+      ptg: overview.trafficMatrix.online.websiteUsers.ptgPercent,
+    },
+    {
+      metric: "online_leads",
+      path: "trafficMatrix.online.leads",
+      fullSpan: overview.trafficMatrix.online.leads.fullSpanGoal,
+      toDate: overview.trafficMatrix.online.leads.toDateGoal,
+      ptg: overview.trafficMatrix.online.leads.ptgPercent,
+    },
+    {
+      metric: "onsite_leads",
+      path: "trafficMatrix.onsite.leads",
+      fullSpan: overview.trafficMatrix.onsite.leads.fullSpanGoal,
+      toDate: overview.trafficMatrix.onsite.leads.toDateGoal,
+      ptg: overview.trafficMatrix.onsite.leads.ptgPercent,
+    },
+    {
+      metric: "online_first_tours",
+      path: "trafficMatrix.online.tours",
+      fullSpan: overview.trafficMatrix.online.tours.fullSpanGoal,
+      toDate: overview.trafficMatrix.online.tours.toDateGoal,
+      ptg: overview.trafficMatrix.online.tours.ptgPercent,
+    },
+    {
+      metric: "onsite_first_tours",
+      path: "trafficMatrix.onsite.tours",
+      fullSpan: overview.trafficMatrix.onsite.tours.fullSpanGoal,
+      toDate: overview.trafficMatrix.onsite.tours.toDateGoal,
+      ptg: overview.trafficMatrix.onsite.tours.ptgPercent,
+    },
+    {
+      metric: "online_gross_sales",
+      path: "trafficMatrix.online.sales",
+      fullSpan: overview.trafficMatrix.online.sales.fullSpanGoal,
+      toDate: overview.trafficMatrix.online.sales.toDateGoal,
+      ptg: overview.trafficMatrix.online.sales.ptgPercent,
+    },
+    {
+      metric: "onsite_gross_sales",
+      path: "trafficMatrix.onsite.sales",
+      fullSpan: overview.trafficMatrix.onsite.sales.fullSpanGoal,
+      toDate: overview.trafficMatrix.onsite.sales.toDateGoal,
+      ptg: overview.trafficMatrix.onsite.sales.ptgPercent,
+    },
+  ];
+
+  let failed = false;
+
+  if (regime.size === 0) {
+    // The fiscal year predates the goal_* regime (before FY2026, DM_GOALS
+    // carries only legacy display names like 'Gross Sales' that no target
+    // resolves). The walk-back must therefore resolve NOTHING — pin strict
+    // fiscal isolation: every target exactly zero and ptg null. A non-zero
+    // target means the API leaked goals from another fiscal year or goal
+    // type into a past-year view. This pin upgrades to real value checks
+    // automatically once the scenario's year carries the regime (FY2026
+    // becomes the prior year in January 2027).
+    console.log(
+      `note: FY${fiscalYear} carries no goal_* types in DM_GOALS — pinning zero-target ` +
+        "fiscal isolation (any non-zero target = goals leaked across fiscal years)",
+    );
+    for (const c of cells) {
+      const ok = c.fullSpan === 0 && c.toDate === 0 && c.ptg === null;
+      console.log(
+        `${ok ? "OK  " : "FAIL"} target ${c.path.padEnd(37)} [no regime — must be exactly 0] ` +
+          `fullSpan=${c.fullSpan} toDate=${c.toDate} ptg=${c.ptg}`,
+      );
+      if (!ok) failed = true;
+    }
+    return !failed;
+  }
+
+  // The year carries the goal_* regime, so real values are pinned. Mirror
+  // audit-leasing's requireGoalData: a resolved regime whose goal rows sum
+  // to zero means the walk-back is NOT actually being tested — fail loudly
+  // instead of letting every target check pass on 0-vs-0.
+  const sums = await baselineGoalSums(
+    fiscalYear,
+    [...new Set(regime.values())],
+    expStart,
+    expEnd,
+    expTo,
+  );
+  for (const metric of TARGET_METRICS) {
+    const type = regime.get(metric);
+    const sum = type ? sums.get(type) : undefined;
+    if (!type || !sum || sum.fullSpan === 0) {
+      failed = true;
+      console.error(
+        `FAIL no usable goal data for FY${fiscalYear} metric '${metric}': resolved ` +
+          `type=${type ?? "(none)"}, full-span sum=${sum?.fullSpan ?? 0} — this ` +
+          "scenario pins the goal-type walk-back, so empty goal data means that " +
+          "metric's walk-back is NOT being tested (goals missing from DM_GOALS, " +
+          "or the audit's scenario selection needs updating)",
+      );
+    }
+  }
+
+  for (const c of cells) {
+    const type = regime.get(c.metric);
+    const base = (type && sums.get(type)) || { fullSpan: 0, toDate: 0 };
+    for (const [kind, api, baseline] of [
+      ["fullSpanGoal", c.fullSpan, base.fullSpan],
+      ["toDateGoal", c.toDate, base.toDate],
+    ] as const) {
+      const d = divergedPct(api, baseline);
+      const ok = d <= TOLERANCE_PCT;
+      console.log(
+        `${ok ? "OK  " : "FAIL"} target ${c.path.padEnd(37)} ${kind.padEnd(12)} ` +
+          `[${type ?? "no type resolves"}] api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+      );
+      if (!ok) failed = true;
+    }
+  }
+
+  return !failed;
+}
+
+function quarterOf(date: string): number {
+  return Math.floor((Number(date.slice(5, 7)) - 1) / 3) + 1;
+}
+
+/**
+ * Independently resolve the "goal" target's GOAL_TYPE per metric for a
+ * fiscal year, per the documented regime: goal_<metric>_q<N> quarterly
+ * re-issues, walking back from the quarter of the elapsed cutoff to q1.
+ * Exact-name matching excludes the old_* renames and RL_* rental variants
+ * by construction — FY2026 carries old_goal_*_q3 rows whose sums differ
+ * from goal_*_q3, so a walk-back that stopped excluding them diverges
+ * immediately instead of silently.
+ */
+async function resolveGoalRegime(
+  fiscalYear: number,
+  asOf: string,
+): Promise<Map<TargetMetric, string>> {
+  const rows = await sfQuery<{ GOAL_TYPE: string }>(
+    "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ?",
+    [fiscalYear],
+  );
+  const available = new Set(rows.map((r) => r.GOAL_TYPE));
+  const resolved = new Map<TargetMetric, string>();
+  for (const metric of TARGET_METRICS) {
+    for (let quarter = quarterOf(asOf); quarter >= 1; quarter--) {
+      const name = `goal_${metric}_q${quarter}`;
+      if (available.has(name)) {
+        resolved.set(metric, name);
+        break;
+      }
+    }
+  }
+  return resolved;
 }
