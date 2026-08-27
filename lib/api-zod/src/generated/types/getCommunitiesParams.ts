@@ -6,20 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ForceRefreshParameter } from './forceRefreshParameter';
-import type { OwtEndDateParameter } from './owtEndDateParameter';
-import type { OwtStartDateParameter } from './owtStartDateParameter';
-import type { OwtTargetParameter } from './owtTargetParameter';
 
-export type GetEhiGoalsParams = {
-target?: OwtTargetParameter;
-/**
- * YYYY-MM-DD; defaults to start of the current quarter
- */
-startDate?: OwtStartDateParameter;
-/**
- * YYYY-MM-DD; defaults to end of the current quarter
- */
-endDate?: OwtEndDateParameter;
+export type GetCommunitiesParams = {
 /**
  * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
  */

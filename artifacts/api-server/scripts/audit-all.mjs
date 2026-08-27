@@ -101,6 +101,21 @@ for (const [raw, want] of [
 }
 const SERVER_LOG = "/tmp/audit-all-server.log";
 
+// The Snowflake connector proxy allows ~10 req/s for the WHOLE repl, and an
+// audit run drives it from TWO processes at once: the private API server
+// (cold-cache loader fan-out — a single leasing load fires 14 queries — plus
+// statement polling) and the audit script itself (baseline queries + polling).
+// The shared transport paces each process (src/lib/snowflake.ts), but two
+// processes at the default ~5 req/s still sum to the entire repl budget and
+// sustained 429 storms can outlast the audits' bounded retries. Audit runs
+// are batch work, so run BOTH processes at roughly half pace instead — the
+// pair then fits the budget with headroom for the dev server. Explicit env
+// wins so the knobs stay tunable per run.
+const AUDIT_SNOWFLAKE_PACING = {
+  SNOWFLAKE_MIN_START_SPACING_MS: process.env.SNOWFLAKE_MIN_START_SPACING_MS ?? "450",
+  SNOWFLAKE_MAX_IN_FLIGHT: process.env.SNOWFLAKE_MAX_IN_FLIGHT ?? "3",
+};
+
 let server = null;
 let currentAudit = null;
 
@@ -162,7 +177,13 @@ if (!apiBase) {
     // suite — and their background refresh waves starve the audits' own
     // baseline queries. Each audit's first fetch warms exactly what it
     // checks, so keep boot quiet.
-    env: { ...process.env, PORT: port, NODE_ENV: "development", WARM_DASHBOARD_CACHE: "0" },
+    env: {
+      ...process.env,
+      ...AUDIT_SNOWFLAKE_PACING,
+      PORT: port,
+      NODE_ENV: "development",
+      WARM_DASHBOARD_CACHE: "0",
+    },
     stdio: ["ignore", logFd, logFd],
   });
 
@@ -213,7 +234,7 @@ function runAudit(name) {
     const child = spawn("pnpm", ["run", name], {
       cwd: pkgDir,
       stdio: "inherit",
-      env: { ...process.env, AUDIT_API_BASE: apiBase },
+      env: { ...process.env, ...AUDIT_SNOWFLAKE_PACING, AUDIT_API_BASE: apiBase },
       detached: true, // own process group → a timeout kill reaps ALL descendants
     });
     currentAudit = child;

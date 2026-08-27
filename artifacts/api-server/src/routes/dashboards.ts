@@ -18,7 +18,7 @@ import {
   getCommunityList,
   type FunnelMetric,
 } from "../lib/marketing-dashboards";
-import { withDataFreshness } from "../lib/query-cache";
+import { withDataFreshness, withForcedRefresh } from "../lib/query-cache";
 
 const router: IRouter = Router();
 
@@ -36,6 +36,18 @@ function str(v: unknown): string | undefined {
 }
 
 class BadRequestError extends Error {}
+
+/**
+ * Explicit refresh signal (?refresh=true or ?refresh=1): the handler wraps
+ * its data-layer call in withForcedRefresh so the shared query cache skips
+ * stale serving for exactly this request and waits for live Snowflake data
+ * (still stored for every other visitor). Forced loads keep the cache's
+ * single-flight dedupe, so a mashed refresh button cannot burst past the
+ * connector proxy's ~10 req/s per-repl limit.
+ */
+function wantsLiveData(query: Record<string, unknown>): boolean {
+  return query.refresh === "true" || query.refresh === "1";
+}
 
 /** Validate a YYYY-MM-DD string as a real calendar date; 400 on garbage. */
 function parseDateOrDefault(
@@ -102,49 +114,34 @@ function sendSnowflakeError(res: import("express").Response, err: unknown) {
   res.status(502).json({ error: "Upstream data query failed" });
 }
 
-router.get("/dashboards/overview-with-targets/filters", async (_req, res) => {
+router.get("/dashboards/overview-with-targets/filters", async (req, res) => {
   try {
-    res.json(await getFilterOptions());
+    const query = req.query as Record<string, unknown>;
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getLeasingFilterOptions()));
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/overview-with-targets", async (req, res) => {
+router.get("/dashboards/leasing", async (req, res) => {
   try {
-    const filters = buildFilters(req.query as Record<string, unknown>);
-    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
-      getOverviewWithTargets(filters),
+    const query = req.query as Record<string, unknown>;
+    const filters = buildFilters(query);
+    const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
+      wantsLiveData(query),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
-    res.json({
-      appliedRange: {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        toDate: filters.toDate,
-        target: filters.target,
-      },
-      dataAsOf,
-      refreshing,
-      kpis: data.kpis,
-      trafficMatrix: data.trafficMatrix,
-      // Record-level lists behind the unknown buckets ride in the same
-      // response as the counts they explain, from the same cached bundle —
-      // a background cache refresh can never make a drill-down dialog
-      // disagree with the matrix row the user clicked.
-      unknownRecords: data.unknownRecords,
-      divisions: data.divisions,
-      developments: data.developments,
-      ratios: data.ratios,
-    });
+    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/overview-with-targets/yoy", async (req, res) => {
+router.get("/dashboards/communities", async (req, res) => {
   try {
-    const filters = buildFilters(req.query as Record<string, unknown>);
-    res.json(await getYearOverYear(filters));
+    const query = req.query as Record<string, unknown>;
+    const filters = buildFilters(query);
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getYearOverYear(filters)));
   } catch (err) {
     sendSnowflakeError(res, err);
   }
@@ -173,9 +170,10 @@ function buildLeasingFilters(query: Record<string, unknown>): LeasingFilters {
   };
 }
 
-router.get("/dashboards/leasing/filters", async (_req, res) => {
+router.get("/dashboards/leasing/filters", async (req, res) => {
   try {
-    res.json(await getLeasingFilterOptions());
+    const query = req.query as Record<string, unknown>;
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getLeasingFilterOptions()));
   } catch (err) {
     sendSnowflakeError(res, err);
   }
@@ -183,35 +181,25 @@ router.get("/dashboards/leasing/filters", async (_req, res) => {
 
 router.get("/dashboards/leasing", async (req, res) => {
   try {
-    const filters = buildLeasingFilters(req.query as Record<string, unknown>);
-    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
-      getLeasingDashboard(filters),
+    const query = req.query as Record<string, unknown>;
+    const filters = buildFilters(query);
+    const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
+      wantsLiveData(query),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
-    res.json({
-      appliedRange: {
-        startDate: filters.startDate,
-        endDate: filters.endDate,
-        toDate: filters.toDate,
-      },
-      dataAsOf,
-      refreshing,
-      fiscalYear: data.fiscalYear,
-      kpis: data.kpis,
-      funnel: data.funnel,
-      matrix: data.matrix,
-      communities: data.communities,
-      monthly: data.monthly,
-    });
+    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
 });
 
-router.get("/dashboards/website-traffic", async (req, res) => {
+router.get("/dashboards/communities", async (req, res) => {
   try {
-    const filters = buildFilters(req.query as Record<string, unknown>);
-    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
-      getWebsiteTraffic(filters),
+    const query = req.query as Record<string, unknown>;
+    const filters = buildFilters(query);
+    const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
+      wantsLiveData(query),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
@@ -228,9 +216,11 @@ router.get("/dashboards/funnel", async (req, res) => {
       res.status(400).json({ error: "metric must be one of leads, tours, gross-sales" });
       return;
     }
-    const filters = buildFilters(req.query as Record<string, unknown>);
-    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
-      getFunnelMetric(metric, filters),
+    const query = req.query as Record<string, unknown>;
+    const filters = buildFilters(query);
+    const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
+      wantsLiveData(query),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
     res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
@@ -246,9 +236,11 @@ function ehiGoalsYearFilters(filters: DashboardFilters): DashboardFilters {
 
 router.get("/dashboards/ehi-goals", async (req, res) => {
   try {
-    const yearFilters = ehiGoalsYearFilters(buildFilters(req.query as Record<string, unknown>));
-    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
-      getEhiGoals(yearFilters),
+    const query = req.query as Record<string, unknown>;
+    const yearFilters = ehiGoalsYearFilters(buildFilters(query));
+    const { value: data, dataAsOf, refreshing } = await withForcedRefresh(
+      wantsLiveData(query),
+      () => withDataFreshness(() => getEhiGoals(yearFilters)),
     );
     res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
@@ -256,9 +248,10 @@ router.get("/dashboards/ehi-goals", async (req, res) => {
   }
 });
 
-router.get("/dashboards/communities", async (_req, res) => {
+router.get("/dashboards/communities", async (req, res) => {
   try {
-    res.json(await getCommunityList());
+    const query = req.query as Record<string, unknown>;
+    res.json(await withForcedRefresh(wantsLiveData(query), () => getCommunityList()));
   } catch (err) {
     sendSnowflakeError(res, err);
   }

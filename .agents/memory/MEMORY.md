@@ -1,5 +1,3 @@
-// hint: Logic changed on both sides. Requires understanding intent of each change.
-// hint: Logic changed on both sides. Requires understanding intent of each change.
 # Memory Index
 
 - [Snowflake connection quirks](snowflake-connection.md) — connector proxy: ~10 RPS/repl limit (429s) + transient 5xx, heavy-tailed latency (benchmark via interleaved medians), SELECT grants gotcha.
@@ -11,7 +9,7 @@
 - [Managed rebase hazards](managed-rebase-hazards.md) — conflict-free auto-rebases can drop imports or misplace hunks; re-typecheck, diff touched files vs main, restart workflows before re-completing.
 - [Audit scripts bypass tsc](audit-scripts-not-typechecked.md) — scripts/ is outside tsconfig include; esbuild won't catch renamed helpers after rebases — grep grafted call sites, smoke-run before completing.
 - [Chart-vs-table & label-drift nets](audit-consistency-nets.md) — Σ monthly==totals same-response checks, float-only tolerance, vacuity+label guards; drill-downs ship in the same statement+response as their counts; combined-filter scenarios need NESTED picks (busiest value inside the other pick).
-- [Dashboard query cache](dashboard-query-cache.md) — shared SWR cache; traffic-triggered refreshes only (warehouse credits), global 2-wide gate (proxy 10 RPS); ALS-tracked dataAsOf/refreshing stamps (oldest entry wins).
+- [Dashboard query cache](dashboard-query-cache.md) — shared SWR cache; traffic-triggered refreshes only (warehouse credits), global 2-wide gate (proxy 10 RPS); ALS-tracked dataAsOf/refreshing stamps (oldest entry wins); forced-refresh path for new endpoints.
 - [Audit tolerance conventions](audit-conventions.md) — same-day-cached endpoints: bound by today-stamped activity + slack, never exact/flat; "today" = America/Chicago, never UTC; prove checks can fail via doctoring proxy.
 - [Audit timeout layering](audit-conventions.md) — request deadline ×(retries+1)+backoffs must fit the per-audit budget; kill stuck audits via detached process group (killing pnpm orphans them).
 - [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium; UI audits: page's own XHR, param-multiset wiring, route-hold lifecycle proof vs vacuous equality, retry-tolerant 5xx.

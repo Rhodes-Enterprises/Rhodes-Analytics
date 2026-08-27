@@ -20,10 +20,13 @@ import type {
   EhiGoals,
   ErrorMessage,
   FunnelMetricDashboard,
+  GetCommunitiesParams,
   GetEhiGoalsParams,
   GetFunnelMetricParams,
   GetLeasingDashboardParams,
+  GetLeasingFiltersParams,
   GetOwtDashboardParams,
+  GetOwtFiltersParams,
   GetOwtYoyParams,
   GetWebsiteTrafficParams,
   HealthStatus,
@@ -63,20 +66,27 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export const getGetOwtFiltersUrl = () => {
+export const getGetOwtFiltersUrl = (params?: GetOwtFiltersParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/dashboards/overview-with-targets/filters`
+  return stringifiedParams.length > 0 ? `/api/dashboards/overview-with-targets/filters?${stringifiedParams}` : `/api/dashboards/overview-with-targets/filters`
 }
 
 /**
  * @summary Filter options for the Overview with Targets dashboard
  */
-export const getOwtFilters = async ( options?: Parameters<typeof customFetch>[1]): Promise<OwtFilterOptions> => {
+export const getOwtFilters = async (params?: GetOwtFiltersParams, options?: Parameters<typeof customFetch>[1]): Promise<OwtFilterOptions> => {
 
-  return customFetch<OwtFilterOptions>(getGetOwtFiltersUrl(),
+  return customFetch<OwtFilterOptions>(getGetOwtFiltersUrl(params),
   {
     ...options,
     method: 'GET'
@@ -89,23 +99,23 @@ export const getOwtFilters = async ( options?: Parameters<typeof customFetch>[1]
 
 
 
-export const getGetOwtFiltersQueryKey = () => {
+export const getGetOwtFiltersQueryKey = (params?: GetOwtFiltersParams,) => {
     return [
-    `/api/dashboards/overview-with-targets/filters`
+    `/api/dashboards/overview-with-targets/filters`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetOwtFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getOwtFilters>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetOwtFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getOwtFilters>>, TError = ErrorType<ErrorMessage>>(params?: GetOwtFiltersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetOwtFiltersQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetOwtFiltersQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOwtFilters>>> = ({ signal }) => getOwtFilters({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getOwtFilters>>> = ({ signal }) => getOwtFilters(params, { signal, ...requestOptions });
 
 
 
@@ -123,11 +133,11 @@ export type GetOwtFiltersQueryError = ErrorType<ErrorMessage>
  */
 
 export function useGetOwtFilters<TData = Awaited<ReturnType<typeof getOwtFilters>>, TError = ErrorType<ErrorMessage>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetOwtFiltersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getOwtFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetOwtFiltersQueryOptions(options)
+  const queryOptions = getGetOwtFiltersQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -560,20 +570,27 @@ export function useGetEhiGoals<TData = Awaited<ReturnType<typeof getEhiGoals>>, 
 
 
 
-export const getGetCommunitiesUrl = () => {
+export const getGetCommunitiesUrl = (params?: GetCommunitiesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/dashboards/communities`
+  return stringifiedParams.length > 0 ? `/api/dashboards/communities?${stringifiedParams}` : `/api/dashboards/communities`
 }
 
 /**
  * @summary Community List directory with YTD funnel counts
  */
-export const getCommunities = async ( options?: Parameters<typeof customFetch>[1]): Promise<CommunityList> => {
+export const getCommunities = async (params?: GetCommunitiesParams, options?: Parameters<typeof customFetch>[1]): Promise<CommunityList> => {
 
-  return customFetch<CommunityList>(getGetCommunitiesUrl(),
+  return customFetch<CommunityList>(getGetCommunitiesUrl(params),
   {
     ...options,
     method: 'GET'
@@ -586,23 +603,23 @@ export const getCommunities = async ( options?: Parameters<typeof customFetch>[1
 
 
 
-export const getGetCommunitiesQueryKey = () => {
+export const getGetCommunitiesQueryKey = (params?: GetCommunitiesParams,) => {
     return [
-    `/api/dashboards/communities`
+    `/api/dashboards/communities`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetCommunitiesQueryOptions = <TData = Awaited<ReturnType<typeof getCommunities>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetCommunitiesQueryOptions = <TData = Awaited<ReturnType<typeof getCommunities>>, TError = ErrorType<ErrorMessage>>(params?: GetCommunitiesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetCommunitiesQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetCommunitiesQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunities>>> = ({ signal }) => getCommunities({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCommunities>>> = ({ signal }) => getCommunities(params, { signal, ...requestOptions });
 
 
 
@@ -620,11 +637,11 @@ export type GetCommunitiesQueryError = ErrorType<ErrorMessage>
  */
 
 export function useGetCommunities<TData = Awaited<ReturnType<typeof getCommunities>>, TError = ErrorType<ErrorMessage>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetCommunitiesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCommunities>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetCommunitiesQueryOptions(options)
+  const queryOptions = getGetCommunitiesQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -715,20 +732,27 @@ export function useGetSnowflakeStatus<TData = Awaited<ReturnType<typeof getSnowf
 
 
 
-export const getGetLeasingFiltersUrl = () => {
+export const getGetLeasingFiltersUrl = (params?: GetLeasingFiltersParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/dashboards/leasing/filters`
+  return stringifiedParams.length > 0 ? `/api/dashboards/leasing/filters?${stringifiedParams}` : `/api/dashboards/leasing/filters`
 }
 
 /**
  * @summary Filter options for the Rhodes Living Leasing dashboard
  */
-export const getLeasingFilters = async ( options?: Parameters<typeof customFetch>[1]): Promise<LeasingFilterOptions> => {
+export const getLeasingFilters = async (params?: GetLeasingFiltersParams, options?: Parameters<typeof customFetch>[1]): Promise<LeasingFilterOptions> => {
 
-  return customFetch<LeasingFilterOptions>(getGetLeasingFiltersUrl(),
+  return customFetch<LeasingFilterOptions>(getGetLeasingFiltersUrl(params),
   {
     ...options,
     method: 'GET'
@@ -741,23 +765,23 @@ export const getLeasingFilters = async ( options?: Parameters<typeof customFetch
 
 
 
-export const getGetLeasingFiltersQueryKey = () => {
+export const getGetLeasingFiltersQueryKey = (params?: GetLeasingFiltersParams,) => {
     return [
-    `/api/dashboards/leasing/filters`
+    `/api/dashboards/leasing/filters`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetLeasingFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getLeasingFilters>>, TError = ErrorType<ErrorMessage>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetLeasingFiltersQueryOptions = <TData = Awaited<ReturnType<typeof getLeasingFilters>>, TError = ErrorType<ErrorMessage>>(params?: GetLeasingFiltersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetLeasingFiltersQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetLeasingFiltersQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLeasingFilters>>> = ({ signal }) => getLeasingFilters({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLeasingFilters>>> = ({ signal }) => getLeasingFilters(params, { signal, ...requestOptions });
 
 
 
@@ -775,11 +799,11 @@ export type GetLeasingFiltersQueryError = ErrorType<ErrorMessage>
  */
 
 export function useGetLeasingFilters<TData = Awaited<ReturnType<typeof getLeasingFilters>>, TError = ErrorType<ErrorMessage>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetLeasingFiltersParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLeasingFilters>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetLeasingFiltersQueryOptions(options)
+  const queryOptions = getGetLeasingFiltersQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

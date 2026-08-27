@@ -12,10 +12,13 @@ import {
   Tooltip as RTooltip,
   Legend,
 } from "recharts";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useGetFunnelMetric,
   useGetOwtFilters,
   useGetSnowflakeStatus,
+  getFunnelMetric,
+  getGetFunnelMetricQueryKey,
   type GetFunnelMetricParams,
   type GetFunnelMetricMetric,
 } from "@workspace/api-client-react";
@@ -36,6 +39,7 @@ import {
   InvertedRangeHint,
   LoneDateHint,
   LiveStatusBadge,
+  RefreshDataButton,
   TargetToggle,
   fmt,
   fmtPct,
@@ -83,6 +87,15 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
   const filters = useGetOwtFilters();
   const dash = useGetFunnelMetric(params);
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getFunnelMetric({ ...params, refresh: true });
+    queryClient.setQueryData(getGetFunnelMetricQueryKey(params), live);
+  };
 
   const developments = useMemo(() => {
     const list = filters.data?.developments ?? [];
@@ -137,7 +150,10 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               refreshing={dash.data?.refreshing}
             />
           </div>
-          <TargetToggle target={target} onChange={setTarget} />
+          <div className="flex flex-wrap items-center gap-2">
+            <RefreshDataButton onRefresh={refreshNow} />
+            <TargetToggle target={target} onChange={setTarget} />
+          </div>
         </div>
 
         <Card>

@@ -20,6 +20,8 @@ paths:
       operationId: getOwtFilters
       tags: [dashboards]
       summary: Filter options for the Overview with Targets dashboard
+      parameters:
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Filter options
@@ -48,6 +50,7 @@ paths:
         - $ref: "#/components/parameters/OwtDealChannel"
         - $ref: "#/components/parameters/OwtStartDate"
         - $ref: "#/components/parameters/OwtEndDate"
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Dashboard payload
@@ -75,6 +78,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/OwtCompany"
         - $ref: "#/components/parameters/OwtDevelopment"
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: YOY series
@@ -99,6 +103,7 @@ paths:
         - $ref: "#/components/parameters/OwtDevelopment"
         - $ref: "#/components/parameters/OwtStartDate"
         - $ref: "#/components/parameters/OwtEndDate"
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Website traffic payload
@@ -135,6 +140,7 @@ paths:
         - $ref: "#/components/parameters/OwtDevelopment"
         - $ref: "#/components/parameters/OwtStartDate"
         - $ref: "#/components/parameters/OwtEndDate"
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Funnel metric payload
@@ -163,6 +169,7 @@ paths:
         - $ref: "#/components/parameters/OwtTarget"
         - $ref: "#/components/parameters/OwtStartDate"
         - $ref: "#/components/parameters/OwtEndDate"
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: EHI goals payload
@@ -187,6 +194,8 @@ paths:
       operationId: getCommunities
       tags: [dashboards]
       summary: Community List directory with YTD funnel counts
+      parameters:
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Community list payload
@@ -218,6 +227,8 @@ paths:
       operationId: getLeasingFilters
       tags: [dashboards]
       summary: Filter options for the Rhodes Living Leasing dashboard
+      parameters:
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Filter options
@@ -259,6 +270,7 @@ paths:
           schema:
             type: string
             description: YYYY-MM-DD; defaults to Dec 31 of the current year
+        - $ref: "#/components/parameters/ForceRefresh"
       responses:
         "200":
           description: Dashboard payload
@@ -293,6 +305,17 @@ paths:
                 $ref: "#/components/schemas/HealthStatus"
 components:
   parameters:
+    ForceRefresh:
+      name: refresh
+      in: query
+      required: false
+      description: >-
+        When true, this request bypasses the cache's stale-serve path and
+        waits for live Snowflake data. The forced load still shares the
+        cache's single-flight dedupe, and its result is stored for all other
+        visitors.
+      schema:
+        type: boolean
     OwtTarget:
       name: target
       in: query

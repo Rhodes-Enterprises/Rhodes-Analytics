@@ -5,15 +5,8 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
-import type { ForceRefreshParameter } from './forceRefreshParameter';
-import type { OwtCompanyParameter } from './owtCompanyParameter';
-import type { OwtDevelopmentParameter } from './owtDevelopmentParameter';
 
-export type GetOwtYoyParams = {
-company?: OwtCompanyParameter;
-development?: OwtDevelopmentParameter;
 /**
  * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
  */
-refresh?: ForceRefreshParameter;
-};
+export type ForceRefreshParameter = boolean;

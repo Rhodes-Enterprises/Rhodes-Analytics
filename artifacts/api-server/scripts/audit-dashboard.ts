@@ -235,8 +235,7 @@ import {
 } from "../src/lib/business-defs";
 
 // Default to the API server's own local port (same PORT contract the server
-// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.const API_BASE =
-  process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
+// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
 const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
 // The Snowflake proxy enforces ~10 requests/second per REPL — a budget
@@ -3038,3 +3037,6 @@ function expectedGoalType(
   }
   return null;
 }
+
+const API_BASE =
+  process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;

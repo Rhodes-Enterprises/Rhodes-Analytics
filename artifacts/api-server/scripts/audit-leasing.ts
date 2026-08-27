@@ -1719,3 +1719,8 @@ function gaMappedDomain(): Promise<Set<string>> {
   ).then((rows) => new Set(rows.filter((r) => r.C).map((r) => r.C as string)));
   return gaMappedDomainCache;
 }
+
+main().catch((err) => {
+  console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
+  process.exit(1);
+});

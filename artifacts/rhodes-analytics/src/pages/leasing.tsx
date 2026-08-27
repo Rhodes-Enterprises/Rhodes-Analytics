@@ -12,10 +12,13 @@ import {
   Tooltip as RTooltip,
   Legend,
 } from "recharts";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useGetLeasingDashboard,
   useGetLeasingFilters,
   useGetSnowflakeStatus,
+  getLeasingDashboard,
+  getGetLeasingDashboardQueryKey,
   type LeasingDashboard,
   type GetLeasingDashboardParams,
 } from "@workspace/api-client-react";
@@ -28,6 +31,7 @@ import {
   InvertedRangeHint,
   LiveStatusBadge,
   LoneDateHint,
+  RefreshDataButton,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -110,6 +114,15 @@ export default function LeasingPage() {
 
   const filters = useGetLeasingFilters();
   const dash = useGetLeasingDashboard(params);
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getLeasingDashboard({ ...params, refresh: true });
+    queryClient.setQueryData(getGetLeasingDashboardQueryKey(params), live);
+  };
   const status = useGetSnowflakeStatus();
 
   const setQuarter = () => {
@@ -160,6 +173,7 @@ export default function LeasingPage() {
               refreshing={dash.data?.refreshing}
             />
           </div>
+          <RefreshDataButton onRefresh={refreshNow} />
         </div>
 
         {/* Filter bar */}

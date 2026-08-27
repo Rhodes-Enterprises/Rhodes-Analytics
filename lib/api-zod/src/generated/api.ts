@@ -8,9 +8,6 @@
 import * as zod from 'zod';
 
 
-/**
- * @summary Filter options for the Overview with Targets dashboard
- */
 export const GetOwtFiltersResponse = zod.object({
   "companies": zod.array(zod.string()),
   "developments": zod.array(zod.object({
@@ -37,7 +34,8 @@ export const GetOwtDashboardQueryParams = zod.object({
   "contactChannel": zod.coerce.string().optional(),
   "dealChannel": zod.coerce.string().optional(),
   "startDate": zod.coerce.string().optional(),
-  "endDate": zod.coerce.string().optional()
+  "endDate": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetOwtDashboardResponse = zod.object({
@@ -230,7 +228,8 @@ export const GetOwtDashboardResponse = zod.object({
  */
 export const GetOwtYoyQueryParams = zod.object({
   "company": zod.coerce.string().optional(),
-  "development": zod.coerce.string().optional()
+  "development": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetOwtYoyResponse = zod.object({
@@ -258,7 +257,8 @@ export const GetWebsiteTrafficQueryParams = zod.object({
   "company": zod.coerce.string().optional(),
   "development": zod.coerce.string().optional(),
   "startDate": zod.coerce.string().optional(),
-  "endDate": zod.coerce.string().optional()
+  "endDate": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetWebsiteTrafficResponse = zod.object({
@@ -317,7 +317,8 @@ export const GetFunnelMetricQueryParams = zod.object({
   "company": zod.coerce.string().optional(),
   "development": zod.coerce.string().optional(),
   "startDate": zod.coerce.string().optional(),
-  "endDate": zod.coerce.string().optional()
+  "endDate": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetFunnelMetricResponse = zod.object({
@@ -382,7 +383,8 @@ export const getEhiGoalsQueryTargetDefault = `goal`;
 export const GetEhiGoalsQueryParams = zod.object({
   "target": zod.enum(['proforma', 'business_plan', 'goal', 'waterfall']).default(getEhiGoalsQueryTargetDefault),
   "startDate": zod.coerce.string().optional(),
-  "endDate": zod.coerce.string().optional()
+  "endDate": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetEhiGoalsResponse = zod.object({
@@ -414,10 +416,12 @@ export const GetEhiGoalsResponse = zod.object({
   "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
-
 /**
  * @summary Community List directory with YTD funnel counts
  */
+export const GetCommunitiesQueryParams = zod.object({
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
+})
 export const GetCommunitiesResponse = zod.object({
   "communities": zod.array(zod.object({
   "development": zod.string(),
@@ -450,10 +454,12 @@ export const GetSnowflakeStatusResponse = zod.object({
   "error": zod.string().optional()
 })
 
-
 /**
  * @summary Filter options for the Rhodes Living Leasing dashboard
  */
+export const GetLeasingFiltersQueryParams = zod.object({
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
+})
 export const GetLeasingFiltersResponse = zod.object({
   "communities": zod.array(zod.string()),
   "channels": zod.array(zod.string())
@@ -467,7 +473,8 @@ export const GetLeasingDashboardQueryParams = zod.object({
   "community": zod.coerce.string().optional(),
   "channel": zod.coerce.string().optional(),
   "startDate": zod.coerce.string().optional(),
-  "endDate": zod.coerce.string().optional()
+  "endDate": zod.coerce.string().optional(),
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
 })
 
 export const GetLeasingDashboardResponse = zod.object({
@@ -625,4 +632,10 @@ export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
 
+/**
+ * @summary Filter options for the Overview with Targets dashboard
+ */
+export const GetOwtFiltersQueryParams = zod.object({
+  "refresh": zod.coerce.boolean().optional().describe('When true, this request bypasses the cache\'s stale-serve path and waits for live Snowflake data. The forced load still shares the cache\'s single-flight dedupe, and its result is stored for all other visitors.')
+})
 

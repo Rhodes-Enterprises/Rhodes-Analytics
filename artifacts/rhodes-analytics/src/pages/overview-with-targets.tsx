@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ChevronRight, RefreshCw, ExternalLink } from "lucide-react";
+import { ChevronRight, RefreshCw, Database, ExternalLink } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ResponsiveContainer,
   BarChart,
@@ -20,10 +21,15 @@ import {
   useGetOwtFilters,
   useGetOwtYoy,
   useGetSnowflakeStatus,
+  getOwtDashboard,
+  getGetOwtDashboardQueryKey,
+  getOwtYoy,
+  getGetOwtYoyQueryKey,
   type OwtDashboard,
   type OwtRatioRow,
   type OwtYoy,
   type GetOwtDashboardParams,
+  type GetOwtYoyParams,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { useCommittedDateRange } from "@/hooks/use-committed-date";
@@ -33,6 +39,7 @@ import {
   InvertedRangeHint,
   LiveStatusBadge,
   LoneDateHint,
+  RefreshDataButton,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -133,11 +140,25 @@ export default function OverviewWithTargetsPage() {
 
   const filters = useGetOwtFilters();
   const dash = useGetOwtDashboard(params);
-  const yoy = useGetOwtYoy({
+  const yoyParams: GetOwtYoyParams = {
     ...(company !== ALL && { company }),
     ...(development !== ALL && { development }),
-  });
+  };
+  const yoy = useGetOwtYoy(yoyParams);
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data for both queries this page renders, then swap the fresh
+  // payloads in under the same query keys so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const [liveDash, liveYoy] = await Promise.all([
+      getOwtDashboard({ ...params, refresh: true }),
+      getOwtYoy({ ...yoyParams, refresh: true }),
+    ]);
+    queryClient.setQueryData(getGetOwtDashboardQueryKey(params), liveDash);
+    queryClient.setQueryData(getGetOwtYoyQueryKey(yoyParams), liveYoy);
+  };
 
   const setYtd = () => {
     const year = new Date().getFullYear();
@@ -195,23 +216,26 @@ export default function OverviewWithTargetsPage() {
               refreshing={dash.data?.refreshing}
             />
           </div>
-          {/* Target selector */}
-          <div className="flex rounded-lg border p-0.5 bg-muted/40">
-            {TARGETS.map((t) => (
-              <button
-                key={t.value}
-                onClick={() => setTarget(t.value)}
-                data-testid={`button-target-${t.value}`}
-                className={cn(
-                  "px-3 py-1.5 text-sm rounded-md transition-colors",
-                  target === t.value
-                    ? "bg-background shadow font-semibold"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2">
+            <RefreshDataButton onRefresh={refreshNow} />
+            {/* Target selector */}
+            <div className="flex rounded-lg border p-0.5 bg-muted/40">
+              {TARGETS.map((t) => (
+                <button
+                  key={t.value}
+                  onClick={() => setTarget(t.value)}
+                  data-testid={`button-target-${t.value}`}
+                  className={cn(
+                    "px-3 py-1.5 text-sm rounded-md transition-colors",
+                    target === t.value
+                      ? "bg-background shadow font-semibold"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 

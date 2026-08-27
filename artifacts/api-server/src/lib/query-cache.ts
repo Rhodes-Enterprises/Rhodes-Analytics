@@ -33,6 +33,7 @@ const DEFAULT_KEEP_MS = 24 * 60 * 60 * 1000; // serve stale up to this age
 const REFRESH_FAIL_COOLDOWN_MS = 60 * 1000; // per-key pause after a failed refresh
 const MAX_CONCURRENT_REFRESHES = 2; // global, across all cache instances
 
+const DEFAULT_FORCE_FRESH_MS = 5 * 1000; // forced refresh reuses entries this young
 interface Entry {
   at: number; // when the value was loaded
   value: unknown;
@@ -88,6 +89,11 @@ export interface QueryCacheOptions {
   /** Age below which expired entries are still served (with a background
    *  refresh). Older entries block on a foreground load. Default 24 hours. */
   keepMs?: number;
+  /** Age below which entries are served even under a forced refresh (they
+   *  were just loaded, so they already are "right now"). Keeps a mashed
+   *  refresh button from issuing one upstream fan-out per completed round
+   *  trip. Default 5 seconds. */
+  forceFreshMs?: number;
 }
 
 export type CachedFn = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
@@ -95,6 +101,7 @@ export type CachedFn = <T>(key: string, fn: () => Promise<T>) => Promise<T>;
 export function createQueryCache(opts: QueryCacheOptions): CachedFn {
   const freshMs = opts.freshMs ?? DEFAULT_FRESH_MS;
   const keepMs = opts.keepMs ?? DEFAULT_KEEP_MS;
+  const forceFreshMs = opts.forceFreshMs ?? DEFAULT_FORCE_FRESH_MS;
   const cache = new Map<string, Entry>();
   const inflight = new Map<string, Promise<unknown>>();
   const revalidating = new Set<string>();
@@ -173,6 +180,19 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
   return async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const hit = cache.get(key);
     const age = hit ? Date.now() - hit.at : Infinity;
+    if (forcedRefresh.getStore()) {
+      // Forced refresh: skip fresh/stale serving and wait for live data.
+      // A failure propagates to the caller (explicit error beats silently
+      // handing back the stale numbers the user asked to bypass). Emits
+      // mirror the normal paths: a just-loaded entry counts as a hit, a
+      // live wait as a foreground load.
+      if (hit && age < forceFreshMs) {
+        emitCacheAccess(key, "hit");
+        return hit.value as T;
+      }
+      emitCacheAccess(key, inflight.has(key) ? "inflight-join" : "miss");
+      return load(key, fn);
+    }
     if (hit && age < freshMs) {
       emitCacheAccess(key, "hit");
       reportLookup(hit.at, false);
@@ -201,6 +221,16 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
     reportLookup(cache.get(key)?.at ?? Date.now(), false);
     return value;
   };
+}
+
+/**
+ * Run `fn` with cache lookups forced to load live data (see block comment
+ * above). With `force` false this is a plain passthrough, so route handlers
+ * can wrap their data calls unconditionally.
+ */
+export function withForcedRefresh<T>(force: boolean, fn: () => Promise<T>): Promise<T> {
+  if (!force) return fn();
+  return forcedRefresh.run(true, fn);
 }
 
 function reportLookup(at: number, refreshing: boolean): void {
@@ -233,3 +263,5 @@ export async function withDataFreshness<T>(
 }
 
 const freshnessStorage = new AsyncLocalStorage<FreshnessTracker>();
+
+const forcedRefresh = new AsyncLocalStorage<true>();

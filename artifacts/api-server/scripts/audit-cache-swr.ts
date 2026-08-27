@@ -17,13 +17,18 @@
  *  6. a failed refresh keeps serving the stale value and backs off instead
  *     of hammering a failing upstream
  *  7. the entry-count bound still evicts oldest-first
+ *  8. forced refresh (withForcedRefresh, the ?refresh=1 path) bypasses both
+ *     serve paths and waits for live data, shares the single-flight dedupe
+ *     (mash-safe), stores the result for normal callers, reuses just-loaded
+ *     entries instead of re-querying, and surfaces failures instead of
+ *     silently serving the stale value the caller asked to bypass
  *
  * Pure in-memory test with injected fake loaders — no Snowflake traffic, no
  * API server needed (AUDIT_API_BASE is ignored). Runs in ~10 seconds.
  *
  * Exits 0 when every check passes, 1 otherwise.
  */
-import { createQueryCache } from "../src/lib/query-cache";
+import { createQueryCache, withForcedRefresh } from "../src/lib/query-cache";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -153,6 +158,98 @@ async function testRefreshFailureBackoff() {
   check("failed refresh: entry retained for later retries", v2 === "ok", v2);
 }
 
+async function testForcedRefresh() {
+  // freshMs is huge, so the NORMAL path would serve the seeded value all
+  // test long — every reload observed below is attributable to the forced
+  // path alone. Margins: the just-loaded guard boundary (FORCE_FRESH) is
+  // >=250ms from every sleep target, matching the other tests.
+  const FORCE_FRESH = 600;
+  const cached = createQueryCache({
+    maxEntries: 10,
+    freshMs: 60_000,
+    keepMs: 120_000,
+    forceFreshMs: FORCE_FRESH,
+  });
+  let calls = 0;
+  const fn = async () => {
+    calls++;
+    await sleep(LOAD_MS);
+    return `v${calls}`;
+  };
+
+  await cached("r", fn); // seed v1 (calls = 1)
+
+  // Just-loaded guard: an entry seconds old already IS "right now".
+  const t0 = Date.now();
+  const g = await withForcedRefresh(true, () => cached("r", fn));
+  check("force: just-loaded entry reused, no re-query", g === "v1" && calls === 1, { g, calls });
+  check(`force: just-loaded reuse is instant (<${INSTANT_MS}ms)`, Date.now() - t0 < INSTANT_MS, Date.now() - t0);
+
+  // Past the guard window (entry still fresh by freshMs): forced lookup must
+  // bypass the fresh-serve path and WAIT for live data, while normal callers
+  // keep getting instant cache serves.
+  await sleep(FORCE_FRESH + 250);
+  const t1 = Date.now();
+  const [forced, normal] = await Promise.all([
+    withForcedRefresh(true, () => cached("r", fn)),
+    (async () => {
+      await sleep(50); // arrive while the forced load is in flight
+      return cached("r", fn);
+    })(),
+  ]);
+  const forcedElapsed = Date.now() - t1;
+  check("force: fresh-by-age entry reloaded live", forced === "v2" && calls === 2, { forced, calls });
+  check(`force: forced lookup blocks on the live load (>=${LOAD_MS}ms)`, forcedElapsed >= LOAD_MS - 50, forcedElapsed);
+  check("force: concurrent normal caller still served instantly from cache", normal === "v1", normal);
+
+  // The forced result is stored for everyone else.
+  const after = await cached("r", fn);
+  check("force: live result stored for normal callers", after === "v2" && calls === 2, { after, calls });
+
+  // Mash safety: concurrent forced refreshes share ONE single-flight load,
+  // and a back-to-back forced call right after completion hits the guard.
+  await sleep(FORCE_FRESH + 250);
+  const [m1, m2, m3] = await Promise.all([
+    withForcedRefresh(true, () => cached("r", fn)),
+    withForcedRefresh(true, () => cached("r", fn)),
+    withForcedRefresh(true, () => cached("r", fn)),
+  ]);
+  check(
+    "force: mashed refreshes share one query (single-flight)",
+    calls === 3 && m1 === "v3" && m2 === "v3" && m3 === "v3",
+    { calls, m1, m2, m3 },
+  );
+  const m4 = await withForcedRefresh(true, () => cached("r", fn));
+  check("force: immediate re-mash reuses the just-loaded value", m4 === "v3" && calls === 3, { m4, calls });
+
+  // force=false must be a plain passthrough (normal fresh serve, no reload).
+  const nf = await withForcedRefresh(false, () => cached("r", fn));
+  check("force=false: passthrough serves from cache", nf === "v3" && calls === 3, { nf, calls });
+
+  // A failed forced load surfaces the error — the caller asked to bypass the
+  // stale value, so silently serving it anyway would be lying — and the
+  // entry survives for normal traffic.
+  let fcalls = 0;
+  let fail = false;
+  const ffn = async () => {
+    fcalls++;
+    if (fail) throw new Error("simulated upstream failure");
+    return `f${fcalls}`;
+  };
+  await cached("rf", ffn); // seed f1
+  await sleep(FORCE_FRESH + 250);
+  fail = true;
+  let threw = false;
+  try {
+    await withForcedRefresh(true, () => cached("rf", ffn));
+  } catch {
+    threw = true;
+  }
+  check("force: failed forced load surfaces the error", threw && fcalls === 2, { threw, fcalls });
+  const still = await cached("rf", ffn); // normal path: fresh hit
+  check("force: entry survives a failed forced load for normal traffic", still === "f1" && fcalls === 2, { still, fcalls });
+}
+
 async function testEvictionBound() {
   const cached = createQueryCache({ maxEntries: 3, freshMs: 60_000, keepMs: 120_000 });
   let calls = 0;
@@ -170,6 +267,7 @@ async function main() {
   await testKeepWindowExpiry();
   await testRefreshConcurrencyGate();
   await testRefreshFailureBackoff();
+  await testForcedRefresh();
   await testEvictionBound();
 
   if (failures > 0) {

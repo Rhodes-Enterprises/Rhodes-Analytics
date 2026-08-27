@@ -5,6 +5,7 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+import type { ForceRefreshParameter } from './forceRefreshParameter';
 import type { GetFunnelMetricMetric } from './getFunnelMetricMetric';
 import type { OwtCompanyParameter } from './owtCompanyParameter';
 import type { OwtDevelopmentParameter } from './owtDevelopmentParameter';
@@ -25,4 +26,8 @@ startDate?: OwtStartDateParameter;
  * YYYY-MM-DD; defaults to end of the current quarter
  */
 endDate?: OwtEndDateParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };

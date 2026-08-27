@@ -8,6 +8,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 
 /** Shared pieces for the migrated marketing dashboards. */
 
@@ -137,6 +140,58 @@ export function LiveStatusBadge({
   );
 }
 
+/**
+ * "Pull the numbers as of right now" button. `onRefresh` must fetch the
+ * page's data with `refresh: true` — which makes the API bypass its
+ * stale-serve cache path and wait for live Snowflake data — and store the
+ * result into the react-query cache (setQueryData), so the visible numbers
+ * update in place without a skeleton flash. Server-side single-flight
+ * dedupe makes mashing the button safe: concurrent refreshes share one
+ * upstream query per cache key.
+ */
+export function RefreshDataButton({
+  onRefresh,
+  className,
+}: {
+  onRefresh: () => Promise<unknown>;
+  className?: string;
+}) {
+  const [refreshing, setRefreshing] = useState(false);
+  const { toast } = useToast();
+
+  const run = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: "Refresh failed",
+        description:
+          err instanceof Error && err.message
+            ? err.message
+            : "Could not pull live data. Still showing the last loaded numbers.",
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={run}
+      disabled={refreshing}
+      className={className}
+      data-testid="button-refresh-data"
+    >
+      <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5", refreshing && "animate-spin")} />
+      {refreshing ? "Refreshing…" : "Refresh data"}
+    </Button>
+  );
+}
 export function Breadcrumb({ page }: { page: string }) {
   return (
     <nav className="flex items-center gap-1.5 text-sm text-muted-foreground">

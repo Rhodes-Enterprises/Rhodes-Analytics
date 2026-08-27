@@ -20,12 +20,15 @@
  *      are compared against the exact payload the page bound, not a second
  *      fetch that could disagree.
  *   4. Reads rendered values from the DOM — KPI row, every traffic-matrix
- *      cell, the full ratios table (Goal / Actual / PTG %), every division and
- *      development row, and both table footers — locating each value by its
- *      COLUMN HEADER, so the check verifies "the number under this header is
- *      the API field this header promises". Each table's rendered header set
- *      must equal the audited binding map exactly: a renamed, removed, or
- *      ADDED column fails until it is registered here.
+ *      cell (including the actual-only Unknown-channel rows, which must render
+ *      exactly when the API reports unlabeled leads/tours/sales, with `–` in
+ *      every goal/PTG column and a share-of-total subtitle), the full ratios
+ *      table (Goal / Actual / PTG %), every division and development row, and
+ *      both table footers — locating each value by its COLUMN HEADER, so the
+ *      check verifies "the number under this header is the API field this
+ *      header promises". Each table's rendered header set must equal the
+ *      audited binding map exactly: a renamed, removed, or ADDED column fails
+ *      until it is registered here.
  *   5. Normalizes formatting before comparing: thousands separators and
  *      leading `+` are stripped, `%` suffixes are asserted (percent cells must
  *      have one, count cells must not), fraction-valued API fields (ratio

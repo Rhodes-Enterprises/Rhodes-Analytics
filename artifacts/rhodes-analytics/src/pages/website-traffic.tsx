@@ -12,10 +12,13 @@ import {
   Tooltip as RTooltip,
   Legend,
 } from "recharts";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useGetWebsiteTraffic,
   useGetOwtFilters,
   useGetSnowflakeStatus,
+  getWebsiteTraffic,
+  getGetWebsiteTrafficQueryKey,
   type GetWebsiteTrafficParams,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
@@ -35,6 +38,7 @@ import {
   InvertedRangeHint,
   LoneDateHint,
   LiveStatusBadge,
+  RefreshDataButton,
   TargetToggle,
   fmt,
   fmtPct,
@@ -73,6 +77,15 @@ export default function WebsiteTrafficPage() {
   const filters = useGetOwtFilters();
   const dash = useGetWebsiteTraffic(params);
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getWebsiteTraffic({ ...params, refresh: true });
+    queryClient.setQueryData(getGetWebsiteTrafficQueryKey(params), live);
+  };
 
   const developments = useMemo(() => {
     const list = filters.data?.developments ?? [];
@@ -150,7 +163,10 @@ export default function WebsiteTrafficPage() {
               refreshing={dash.data?.refreshing}
             />
           </div>
-          <TargetToggle target={target} onChange={setTarget} />
+          <div className="flex flex-wrap items-center gap-2">
+            <RefreshDataButton onRefresh={refreshNow} />
+            <TargetToggle target={target} onChange={setTarget} />
+          </div>
         </div>
 
         <Card>

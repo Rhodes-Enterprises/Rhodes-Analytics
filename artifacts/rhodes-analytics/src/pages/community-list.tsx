@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Search } from "lucide-react";
-import { useGetCommunities, useGetSnowflakeStatus } from "@workspace/api-client-react";
+import {
+  useGetCommunities,
+  useGetSnowflakeStatus,
+  getCommunities,
+  getGetCommunitiesQueryKey,
+} from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,9 +15,11 @@ import {
   Breadcrumb,
   DownloadDataButton,
   LiveStatusBadge,
+  RefreshDataButton,
   fmt,
 } from "@/components/dashboard-shared";
 import { downloadCsv, type CsvValue } from "@/lib/utils";
+import { useQueryClient } from "@tanstack/react-query";
 
 type SortKey = "development" | "division" | "leadsYtd" | "toursYtd" | "salesYtd";
 type SortDir = "asc" | "desc";
@@ -67,6 +74,15 @@ export default function CommunityListPage() {
 
   const dash = useGetCommunities();
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getCommunities({ refresh: true });
+    queryClient.setQueryData(getGetCommunitiesQueryKey(), live);
+  };
 
   const total = dash.data?.communities.length ?? 0;
 
@@ -129,16 +145,19 @@ export default function CommunityListPage() {
     <Layout>
       <div className="space-y-6">
         <Breadcrumb page="Community List" />
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Community List</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Esperanza communities with year-to-date funnel activity
-          </p>
-          <LiveStatusBadge
-            status={status.data}
-            checking={status.isLoading}
-            lastRefreshed={dash.dataUpdatedAt}
-          />
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Community List</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Esperanza communities with year-to-date funnel activity
+            </p>
+            <LiveStatusBadge
+              status={status.data}
+              checking={status.isLoading}
+              lastRefreshed={dash.dataUpdatedAt}
+            />
+          </div>
+          <RefreshDataButton onRefresh={refreshNow} />
         </div>
 
         <Card>

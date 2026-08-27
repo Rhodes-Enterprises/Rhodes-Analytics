@@ -10,10 +10,14 @@ import {
   Tooltip as RTooltip,
   Legend,
 } from "recharts";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useGetOwtYoy,
   useGetOwtFilters,
   useGetSnowflakeStatus,
+  getOwtYoy,
+  getGetOwtYoyQueryKey,
+  type GetOwtYoyParams,
   type OwtYoy,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
@@ -27,6 +31,7 @@ import {
   DownloadDataButton,
   FilterSelect,
   LiveStatusBadge,
+  RefreshDataButton,
   fmt,
 } from "@/components/dashboard-shared";
 import { downloadCsv, type CsvValue } from "@/lib/utils";
@@ -43,11 +48,21 @@ export default function YearOverYearPage() {
   const [development, setDevelopment] = useState(ALL);
 
   const filters = useGetOwtFilters();
-  const yoy = useGetOwtYoy({
+  const yoyParams: GetOwtYoyParams = {
     ...(company !== ALL && { company }),
     ...(development !== ALL && { development }),
-  });
+  };
+  const yoy = useGetOwtYoy(yoyParams);
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getOwtYoy({ ...yoyParams, refresh: true });
+    queryClient.setQueryData(getGetOwtYoyQueryKey(yoyParams), live);
+  };
 
   const developments = useMemo(() => {
     const list = filters.data?.developments ?? [];
@@ -75,19 +90,22 @@ export default function YearOverYearPage() {
     <Layout>
       <div className="space-y-6">
         <Breadcrumb page="Year Over Year" />
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Year Over Year</h1>
-          {yoy.data && (
-            <p className="text-sm text-muted-foreground mt-1">
-              {yoy.data.year} vs {yoy.data.priorYear} · monthly funnel metrics with business
-              plan goal
-            </p>
-          )}
-          <LiveStatusBadge
-            status={status.data}
-            checking={status.isLoading}
-            lastRefreshed={yoy.dataUpdatedAt}
-          />
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Year Over Year</h1>
+            {yoy.data && (
+              <p className="text-sm text-muted-foreground mt-1">
+                {yoy.data.year} vs {yoy.data.priorYear} · monthly funnel metrics with business
+                plan goal
+              </p>
+            )}
+            <LiveStatusBadge
+              status={status.data}
+              checking={status.isLoading}
+              lastRefreshed={yoy.dataUpdatedAt}
+            />
+          </div>
+          <RefreshDataButton onRefresh={refreshNow} />
         </div>
 
         <Card>

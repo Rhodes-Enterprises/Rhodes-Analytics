@@ -1,7 +1,10 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useGetEhiGoals,
   useGetSnowflakeStatus,
+  getEhiGoals,
+  getGetEhiGoalsQueryKey,
   type GetEhiGoalsParams,
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
@@ -13,6 +16,7 @@ import {
   Breadcrumb,
   DownloadDataButton,
   LiveStatusBadge,
+  RefreshDataButton,
   TargetToggle,
   fmt,
   fmtPct,
@@ -29,6 +33,15 @@ export default function EhiGoalsPage() {
   const params: GetEhiGoalsParams = { target };
   const dash = useGetEhiGoals(params);
   const status = useGetSnowflakeStatus();
+
+  // Force the API to bypass its stale-serve cache and wait for live
+  // Snowflake data, then swap the fresh payload in under the same query key
+  // so the numbers update in place.
+  const queryClient = useQueryClient();
+  const refreshNow = async () => {
+    const live = await getEhiGoals({ ...params, refresh: true });
+    queryClient.setQueryData(getGetEhiGoalsQueryKey(params), live);
+  };
 
   const downloadGoalAttainment = () => {
     const d = dash.data;
@@ -69,7 +82,10 @@ export default function EhiGoalsPage() {
               refreshing={dash.data?.refreshing}
             />
           </div>
-          <TargetToggle target={target} onChange={setTarget} />
+          <div className="flex flex-wrap items-center gap-2">
+            <RefreshDataButton onRefresh={refreshNow} />
+            <TargetToggle target={target} onChange={setTarget} />
+          </div>
         </div>
 
         {dash.isError && (

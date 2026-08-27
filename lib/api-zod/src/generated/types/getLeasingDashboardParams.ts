@@ -5,6 +5,7 @@
  * Rhodes Analytics API
  * OpenAPI spec version: 0.1.0
  */
+import type { ForceRefreshParameter } from './forceRefreshParameter';
 
 export type GetLeasingDashboardParams = {
 community?: string;
@@ -17,4 +18,8 @@ startDate?: string;
  * YYYY-MM-DD; defaults to Dec 31 of the current year
  */
 endDate?: string;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };

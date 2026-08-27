@@ -520,6 +520,10 @@ export interface HealthStatus {
   status: string;
 }
 
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+export type ForceRefreshParameter = boolean;
 export type OwtTargetParameter = typeof OwtTargetParameter[keyof typeof OwtTargetParameter];
 
 
@@ -546,6 +550,12 @@ export type OwtStartDateParameter = string;
 
 export type OwtEndDateParameter = string;
 
+export type GetOwtFiltersParams = {
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
+};
 export type GetOwtDashboardParams = {
 target?: OwtTargetParameter;
 company?: OwtCompanyParameter;
@@ -562,11 +572,19 @@ startDate?: OwtStartDateParameter;
  * YYYY-MM-DD; defaults to end of the current quarter
  */
 endDate?: OwtEndDateParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
 export type GetOwtYoyParams = {
 company?: OwtCompanyParameter;
 development?: OwtDevelopmentParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
 export type GetWebsiteTrafficParams = {
@@ -581,6 +599,10 @@ startDate?: OwtStartDateParameter;
  * YYYY-MM-DD; defaults to end of the current quarter
  */
 endDate?: OwtEndDateParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
 export type GetFunnelMetricParams = {
@@ -596,6 +618,10 @@ startDate?: OwtStartDateParameter;
  * YYYY-MM-DD; defaults to end of the current quarter
  */
 endDate?: OwtEndDateParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
 export type GetFunnelMetricMetric = typeof GetFunnelMetricMetric[keyof typeof GetFunnelMetricMetric];
@@ -617,8 +643,18 @@ startDate?: OwtStartDateParameter;
  * YYYY-MM-DD; defaults to end of the current quarter
  */
 endDate?: OwtEndDateParameter;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
+export type GetCommunitiesParams = {
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
+};
 export type GetLeasingDashboardParams = {
 community?: string;
 channel?: string;
@@ -630,5 +666,15 @@ startDate?: string;
  * YYYY-MM-DD; defaults to Dec 31 of the current year
  */
 endDate?: string;
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
 };
 
+export type GetLeasingFiltersParams = {
+/**
+ * When true, this request bypasses the cache's stale-serve path and waits for live Snowflake data. The forced load still shares the cache's single-flight dedupe, and its result is stored for all other visitors.
+ */
+refresh?: ForceRefreshParameter;
+};
