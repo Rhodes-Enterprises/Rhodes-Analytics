@@ -42,6 +42,12 @@ const TRANSIENT_NAMES = new Set([
   "HeadersTimeoutError",
   "BodyTimeoutError",
   "SocketError",
+  // AbortSignal.timeout() rejects with a DOMException named "TimeoutError".
+  // The audits' fetch helper uses it as a per-request deadline, and a request
+  // that produced no response within its deadline is exactly the stalled
+  // transport this classifier exists for. Deliberate cancellations reject as
+  // "AbortError" instead and stay non-retryable.
+  "TimeoutError",
 ]);
 
 /**
