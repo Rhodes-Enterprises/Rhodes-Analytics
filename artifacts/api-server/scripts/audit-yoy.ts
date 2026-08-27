@@ -75,18 +75,6 @@ async function fetchYoy(params: Record<string, string>): Promise<YoyResponse> {
   return fetchJsonWithRetry<YoyResponse>(url);
 }
 
-/**
- * Baseline queries run sequentially (the Snowflake proxy rate-limits at
- * ~10 RPS). Transient transport failures — 429s, dropped connections —
- * are retried with backoff inside the shared Snowflake helper
- * (src/lib/snowflake.ts); a query that still fails is a real error and
- * must fail the audit.
- */
-async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
-  const rows = await querySnowflake<{ N: number }>(sql, binds);
-  return Number(rows[0]?.N) || 0;
-}
-
 /** Same business-day convention the API uses. */
 function todayChicago(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(
@@ -189,37 +177,51 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
 
 // ---------- Baseline monthly counts ----------
 
-/** Per-measure baseline SQL, parameterized by year and month. */
-function baselineSql(measure: string, frag: Frag): { sql: string; binds: (string | number)[] } {
+/**
+ * Per-measure baseline SQL, grouped by (year, month) so ONE query returns
+ * every checked point of both years for that measure. Each (year, month)
+ * group holds exactly the COUNT the old one-scalar-per-point query
+ * computed — a group with no matching rows is simply absent, which the
+ * caller reads as 0, exactly like the old scalar COUNT over zero rows.
+ * (DISTINCT-user counts are per group, i.e. per month — same as before.)
+ * Batching matters because the Snowflake proxy rate-limits at ~10 RPS
+ * repl-wide and the audits run their queries sequentially, so round trips
+ * — not warehouse work — dominate audit wall time. Transient transport
+ * failures — 429s, dropped connections — are retried with backoff inside
+ * the shared Snowflake helper (src/lib/snowflake.ts); a query that still
+ * fails is a real error and must fail the audit.
+ */
+function baselineGroupedSql(
+  measure: string,
+  frag: Frag,
+  years: number[],
+  months: number[],
+): { sql: string; binds: (string | number)[] } {
+  const yearsIn = years.map(() => "?").join(", ");
+  const monthsIn = months.map(() => "?").join(", ");
+  const grouped = (dateExpr: string, from: string, where: string, countExpr = "COUNT(*)") => ({
+    sql: `SELECT YEAR(${dateExpr}) AS Y, MONTH(${dateExpr}) AS M, ${countExpr} AS N
+          FROM ${from}
+          WHERE ${where}
+            AND YEAR(${dateExpr}) IN (${yearsIn})
+            AND MONTH(${dateExpr}) IN (${monthsIn})${frag.sql}
+          GROUP BY 1, 2`,
+    binds: [...years, ...months, ...frag.binds] as (string | number)[],
+  });
   switch (measure) {
     case "leads":
-      return {
-        sql: `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-              WHERE ${isLeadSql("C")}
-                AND YEAR(C.CONTACT_CREATE_DATE) = ? AND MONTH(C.CONTACT_CREATE_DATE) = ?${frag.sql}`,
-        binds: frag.binds,
-      };
+      return grouped("C.CONTACT_CREATE_DATE", "DM_CONTACTS C", isLeadSql("C"));
     case "tours":
-      return {
-        sql: `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-              WHERE ${isLeadSql("C")}
-                AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) = ? AND MONTH(C.EHI_MIN_FIRST_TOUR_DATE) = ?${frag.sql}`,
-        binds: frag.binds,
-      };
+      return grouped("C.EHI_MIN_FIRST_TOUR_DATE", "DM_CONTACTS C", isLeadSql("C"));
     case "grossSales":
-      return {
-        sql: `SELECT COUNT(*) AS N FROM DM_DEALS X
-              WHERE ${isSaleSql("X")}
-                AND YEAR(X.CONTRACT_RATIFIED_DATE) = ? AND MONTH(X.CONTRACT_RATIFIED_DATE) = ?${frag.sql}`,
-        binds: frag.binds,
-      };
+      return grouped("X.CONTRACT_RATIFIED_DATE", "DM_DEALS X", isSaleSql("X"));
     case "websiteUsers":
-      return {
-        sql: `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-              WHERE ${isGaTrafficSql()}
-                AND YEAR(GOOGLE_ANALYTICS_DATE) = ? AND MONTH(GOOGLE_ANALYTICS_DATE) = ?${frag.sql}`,
-        binds: frag.binds,
-      };
+      return grouped(
+        "GOOGLE_ANALYTICS_DATE",
+        "FCT_GOOGLE_ANALYTICS_EVENT_LEVEL",
+        isGaTrafficSql(),
+        "COUNT(DISTINCT USER_PSEUDO_ID)",
+      );
     default:
       throw new Error(`Unknown measure ${measure}`);
   }
@@ -285,27 +287,57 @@ async function auditScenario(
     websiteUsers: gaf,
   };
 
-  // Sequential on purpose: the Snowflake proxy rate-limits at 10 RPS.
+  // Sequential on purpose (the Snowflake proxy rate-limits at 10 RPS), but
+  // batched: ONE grouped query per measure covers both years × all checked
+  // months — the same per-point COUNT values as before, in a fraction of
+  // the round trips. A missing (year, month) group reads as 0, exactly
+  // like the old scalar COUNT over zero rows.
   const checks: Check[] = [];
   for (const measure of measures) {
     const points = byMeasure.get(measure)!;
-    const { sql, binds } = baselineSql(measure, fragFor[measure]);
+    const { sql, binds } = baselineGroupedSql(
+      measure,
+      fragFor[measure],
+      [yoy.priorYear, yoy.year],
+      months,
+    );
+    const rows = await querySnowflake<{ Y: number; M: number; N: number }>(sql, binds);
+    const byYearMonth = new Map(
+      rows.map((r) => [`${Number(r.Y)}-${Number(r.M)}`, Number(r.N) || 0]),
+    );
+    const baselineAt = (year: number, month: number) =>
+      byYearMonth.get(`${year}-${month}`) ?? 0;
     for (const month of months) {
       const pt = points.find((p) => p.month === month)!;
       checks.push({
         label: `${measure} ${yoy.year}-${String(month).padStart(2, "0")}`,
         api: pt.currentYear,
-        baseline: await countScalar(sql, [yoy.year, month, ...binds]),
+        baseline: baselineAt(yoy.year, month),
       });
       checks.push({
         label: `${measure} ${yoy.priorYear}-${String(month).padStart(2, "0")}`,
         api: pt.priorYear,
-        baseline: await countScalar(sql, [yoy.priorYear, month, ...binds]),
+        baseline: baselineAt(yoy.priorYear, month),
       });
     }
   }
 
-  // Goal points: business-plan annual goals from DM_GOALS, current year only.
+  // Goal points: business-plan annual goals from DM_GOALS, current year
+  // only. ONE query grouped by (goal type, month) replaces the per-point
+  // SUM scalars — same SUM(GOAL) per cell; a missing group (or an all-NULL
+  // sum) reads as 0, as before.
+  const goalTypes = measures.map((m) => GOAL_TYPE_FOR_MEASURE[m]);
+  const goalRows = await querySnowflake<{ GT: string; M: number; N: number | null }>(
+    `SELECT GOAL_TYPE AS GT, MONTH(BUDGET_DATE) AS M, SUM(GOAL) AS N
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${goalTypes.map(() => "?").join(", ")})
+       AND MONTH(BUDGET_DATE) IN (${months.map(() => "?").join(", ")})${gf.sql}
+     GROUP BY 1, 2`,
+    [yoy.year, ...goalTypes, ...months, ...gf.binds],
+  );
+  const goalAt = new Map(
+    goalRows.map((r) => [`${r.GT}\u0000${Number(r.M)}`, Number(r.N) || 0]),
+  );
   for (const measure of measures) {
     const points = byMeasure.get(measure)!;
     const gt = GOAL_TYPE_FOR_MEASURE[measure];
@@ -314,11 +346,7 @@ async function auditScenario(
       checks.push({
         label: `${measure} goal ${yoy.year}-${String(month).padStart(2, "0")}`,
         api: pt.goal,
-        baseline: await countScalar(
-          `SELECT SUM(GOAL) AS N FROM DM_GOALS
-           WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ? AND MONTH(BUDGET_DATE) = ?${gf.sql}`,
-          [yoy.year, gt, month, ...gf.binds],
-        ),
+        baseline: goalAt.get(`${gt}\u0000${month}`) ?? 0,
       });
     }
   }

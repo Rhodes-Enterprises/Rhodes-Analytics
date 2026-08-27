@@ -242,36 +242,76 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
 
 // ---------- Independent baselines ----------
 
-async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
-  const rows = await querySnowflake<{ N: number }>(sql, binds);
-  return Number(rows[0]?.N) || 0;
+interface LeaseCounts {
+  ratified: number;
+  onlineRatified: number;
+  onsiteRatified: number;
+  cancelled: number;
 }
 
-/** Deal-count baseline over a date column, honoring community/channel filters. */
-async function baselineDealCount(
-  dateCol: "LEASE_RATIFIED_DATE" | "CANCELLATION_DATE",
+/**
+ * Headline lease-count baselines, honoring community/channel filters.
+ *
+ * ONE conditional-aggregation scan replaces the old four scalar COUNT
+ * queries (ratified / online / onsite / cancelled): each COUNT_IF counts
+ * exactly the rows the corresponding COUNT(*) query matched — the window
+ * flags are the old BETWEEN predicates, the channel conditions the old
+ * `DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?` extras. The outer WHERE only
+ * drops rows in neither window, which contributed to no count anyway
+ * (BETWEEN over a NULL date is NULL, and TRUE OR NULL is TRUE, so no
+ * in-window row is lost). When the scenario's channel filter contradicts a
+ * channel column (e.g. channel=Onsite makes CH='Online' impossible), that
+ * COUNT_IF is structurally zero — matching the old skip-the-query-return-0
+ * behavior. Batching matters because the Snowflake proxy rate-limits at
+ * ~10 RPS repl-wide, so round trips — not warehouse work — dominate audit
+ * wall time. Transient transport failures are retried inside the shared
+ * helper (src/lib/snowflake.ts), unchanged.
+ */
+async function baselineLeaseCounts(
   startDate: string,
   toDate: string,
   f: ScenarioFilters,
-  channelOverride?: string,
-): Promise<number> {
-  const binds: (string | number)[] = [startDate, toDate];
+): Promise<LeaseCounts> {
+  // Bind order follows text order: the subquery SELECT-list window binds
+  // come before the WHERE extras.
+  const binds: (string | number)[] = [startDate, toDate, startDate, toDate];
   const parts: string[] = [];
   if (f.community) {
     parts.push("TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
     binds.push(f.community);
   }
-  const channel = channelOverride ?? f.channel;
-  if (channel) {
+  if (f.channel) {
     parts.push("DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-    binds.push(channel);
+    binds.push(f.channel);
   }
   const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-  return countScalar(
-    `SELECT COUNT(*) AS N FROM DM_DEALS
-     WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND ${dateCol} BETWEEN ? AND ?${extra}`,
+  const rows = await querySnowflake<{
+    RATIFIED: number;
+    ONLINE_RATIFIED: number;
+    ONSITE_RATIFIED: number;
+    CANCELLED: number;
+  }>(
+    `SELECT COUNT_IF(IN_RAT_WINDOW) AS RATIFIED,
+            COUNT_IF(IN_RAT_WINDOW AND CH = 'Online') AS ONLINE_RATIFIED,
+            COUNT_IF(IN_RAT_WINDOW AND CH = 'Onsite') AS ONSITE_RATIFIED,
+            COUNT_IF(IN_CAN_WINDOW) AS CANCELLED
+     FROM (
+       SELECT LEASE_RATIFIED_DATE BETWEEN ? AND ? AS IN_RAT_WINDOW,
+              CANCELLATION_DATE BETWEEN ? AND ? AS IN_CAN_WINDOW,
+              DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CH
+       FROM DM_DEALS
+       WHERE PIPELINE_NAME = '${RL_PIPELINE}'${extra}
+     )
+     WHERE IN_RAT_WINDOW OR IN_CAN_WINDOW`,
     binds,
   );
+  const r = rows[0];
+  return {
+    ratified: Number(r?.RATIFIED) || 0,
+    onlineRatified: Number(r?.ONLINE_RATIFIED) || 0,
+    onsiteRatified: Number(r?.ONSITE_RATIFIED) || 0,
+    cancelled: Number(r?.CANCELLED) || 0,
+  };
 }
 
 /**
@@ -297,32 +337,89 @@ async function resolveGoalTypes(fiscalYear: number): Promise<{
   };
 }
 
-/** Goal sums (full span + to-date) for one goal type, honoring community filter. */
-async function baselineGoal(
-  goalType: string | undefined,
+/** Goal sums for one goal type, plus the per-month and per-community rollups. */
+interface GoalSums {
+  fullSpan: number;
+  toDate: number;
+  /** SUM(GOAL) per MONTH(BUDGET_DATE) over start..end — the monthly-series goal baseline. */
+  byMonth: Map<number, number>;
+  /** SUM(GOAL)/to-date per DEVELOPMENT_NAME — the community-summary goal baseline. */
+  byCommunity: Map<string, { fullSpan: number; toDate: number }>;
+}
+
+const EMPTY_GOAL_SUMS: GoalSums = {
+  fullSpan: 0,
+  toDate: 0,
+  byMonth: new Map(),
+  byCommunity: new Map(),
+};
+
+/**
+ * Goal baselines for every needed goal type in ONE grouped query, honoring
+ * the community filter. Grouping DM_GOALS by (type, development, month)
+ * lets the same round trip serve the KPI/matrix sums, the monthly-series
+ * goal points, and the per-community goal columns — each is an exact
+ * rollup of the (type, dev, month) partition, so the values equal what the
+ * old one-query-per-consumer scalars computed (goals are fractional
+ * daily-distributed values; rolling groups up in JS only reorders float
+ * additions, dust far inside the audit tolerance). An undefined goal type
+ * (e.g. the opposite channel under a channel filter, or a split that
+ * doesn't exist for the fiscal year) never touches the query and reads as
+ * zeros/empty, exactly like the old early-return.
+ */
+async function baselineGoalsByType(
+  goalTypes: (string | undefined)[],
   fiscalYear: number,
   startDate: string,
   endDate: string,
   toDate: string,
   community?: string,
-): Promise<{ fullSpan: number; toDate: number }> {
-  if (!goalType) return { fullSpan: 0, toDate: 0 };
-  const binds: (string | number)[] = [toDate, fiscalYear, goalType, startDate, endDate];
-  let extra = "";
-  if (community) {
-    extra = " AND DEVELOPMENT_NAME = ?";
-    binds.push(community);
+): Promise<(goalType: string | undefined) => GoalSums> {
+  const types = [...new Set(goalTypes.filter((t): t is string => !!t))];
+  const byType = new Map<string, GoalSums>();
+  if (types.length) {
+    const binds: (string | number)[] = [toDate, fiscalYear, ...types, startDate, endDate];
+    let extra = "";
+    if (community) {
+      extra = " AND DEVELOPMENT_NAME = ?";
+      binds.push(community);
+    }
+    const rows = await querySnowflake<{
+      GT: string;
+      DEV: string | null;
+      M: number;
+      FULL_SPAN: number | null;
+      TO_DATE: number | null;
+    }>(
+      `SELECT GOAL_TYPE AS GT, DEVELOPMENT_NAME AS DEV, MONTH(BUDGET_DATE) AS M,
+              SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+       FROM DM_GOALS
+       WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(", ")})
+         AND BUDGET_DATE BETWEEN ? AND ?${extra}
+       GROUP BY 1, 2, 3`,
+      binds,
+    );
+    for (const row of rows) {
+      let g = byType.get(row.GT);
+      if (!g) {
+        g = { fullSpan: 0, toDate: 0, byMonth: new Map(), byCommunity: new Map() };
+        byType.set(row.GT, g);
+      }
+      const full = Number(row.FULL_SPAN) || 0;
+      const td = Number(row.TO_DATE) || 0;
+      const month = Number(row.M);
+      g.fullSpan += full;
+      g.toDate += td;
+      g.byMonth.set(month, (g.byMonth.get(month) ?? 0) + full);
+      if (row.DEV) {
+        const c = g.byCommunity.get(row.DEV) ?? { fullSpan: 0, toDate: 0 };
+        c.fullSpan += full;
+        c.toDate += td;
+        g.byCommunity.set(row.DEV, c);
+      }
+    }
   }
-  const rows = await querySnowflake<{ FULL_SPAN: number; TO_DATE: number }>(
-    `SELECT SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-     FROM DM_GOALS
-     WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ? AND BUDGET_DATE BETWEEN ? AND ?${extra}`,
-    binds,
-  );
-  return {
-    fullSpan: Number(rows[0]?.FULL_SPAN) || 0,
-    toDate: Number(rows[0]?.TO_DATE) || 0,
-  };
+  return (goalType) => (goalType && byType.get(goalType)) || EMPTY_GOAL_SUMS;
 }
 
 // ---------- Comparison helpers ----------
@@ -422,23 +519,24 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   };
 
   // ---- Actual counts (bound to the expected range) ----
-  const [ratified, cancelled, onlineRatified, onsiteRatified] = await Promise.all([
-    baselineDealCount("LEASE_RATIFIED_DATE", expStart, expTo, f),
-    baselineDealCount("CANCELLATION_DATE", expStart, expTo, f),
-    f.channel && f.channel !== "Online"
-      ? Promise.resolve(0)
-      : baselineDealCount("LEASE_RATIFIED_DATE", expStart, expTo, f, "Online"),
-    f.channel && f.channel !== "Onsite"
-      ? Promise.resolve(0)
-      : baselineDealCount("LEASE_RATIFIED_DATE", expStart, expTo, f, "Onsite"),
-  ]);
+  const { ratified, cancelled, onlineRatified, onsiteRatified } = await baselineLeaseCounts(
+    expStart,
+    expTo,
+    f,
+  );
 
-  // ---- Goals ----
-  const [gTotal, gOnline, gOnsite] = await Promise.all([
-    baselineGoal(effGoalType("total"), fiscalYear, expStart, expEnd, expTo, f.community),
-    baselineGoal(effGoalType("online"), fiscalYear, expStart, expEnd, expTo, f.community),
-    baselineGoal(effGoalType("onsite"), fiscalYear, expStart, expEnd, expTo, f.community),
-  ]);
+  // ---- Goals (one grouped query also feeds communities + monthly below) ----
+  const goalFor = await baselineGoalsByType(
+    [effGoalType("total"), effGoalType("online"), effGoalType("onsite")],
+    fiscalYear,
+    expStart,
+    expEnd,
+    expTo,
+    f.community,
+  );
+  const gTotal = goalFor(effGoalType("total"));
+  const gOnline = goalFor(effGoalType("online"));
+  const gOnsite = goalFor(effGoalType("onsite"));
 
   // Scenarios that exist to pin goal behavior (the prior-year fallback)
   // must not "pass" by comparing zeros against zeros.
@@ -487,11 +585,11 @@ async function auditScenario(scenario: Scenario): Promise<void> {
 
   // ---- Community summary ----
   console.log("-- communities");
-  await auditCommunities(resp, f, fiscalYear, expStart, expEnd, expTo, effGoalType("total"));
+  await auditCommunities(resp, f, expStart, expTo, gTotal.byCommunity);
 
   // ---- Monthly series ----
   console.log("-- monthly");
-  await auditMonthly(resp, f, fiscalYear, expStart, expEnd, expTo, effGoalType("total"));
+  await auditMonthly(resp, f, expStart, expTo, gTotal.byMonth);
 
   // ---- Funnel trend vs totals (chart-vs-table consistency) ----
   console.log("-- funnel trend vs totals");
@@ -504,8 +602,8 @@ async function auditScenario(scenario: Scenario): Promise<void> {
  *
  * The online/onsite baselines and the API's channel split hardcode the
  * same 'Online'/'Onsite' literals (r.CHANNEL === "Online"/"Onsite" in
- * src/lib/leasing.ts; the baselineDealCount / dealByCommunity channel
- * overrides here). If upstream data relabels the channel values in
+ * src/lib/leasing.ts; the channel COUNT_IFs in baselineLeaseCounts /
+ * auditCommunities here). If upstream data relabels the channel values in
  * DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL (e.g. dbt renames 'Online' to
  * 'Digital'), BOTH sides compute 0, every per-cell check passes 0=0, and
  * the leasing dashboard ships zeroed online/onsite lease columns with no
@@ -558,100 +656,83 @@ async function auditChannelLabels(
       `'Online' and ZERO match 'Onsite' on DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL — ` +
       `the expected channel labels are missing from the data; labels present: ${present}. ` +
       `The leasing dashboard's channel split AND this audit's baselines both hardcode ` +
-      `'Online'/'Onsite' (r.CHANNEL === ... in src/lib/leasing.ts; baselineDealCount/` +
-      `dealByCommunity here), so every online/onsite lease cell reads 0 and the per-cell ` +
-      `checks pass 0=0. If upstream renamed the channel values, update those literals to ` +
-      `the new labels.`,
+      `'Online'/'Onsite' (r.CHANNEL === ... in src/lib/leasing.ts; the channel COUNT_IFs ` +
+      `in baselineLeaseCounts/auditCommunities here), so every online/onsite lease cell ` +
+      `reads 0 and the per-cell checks pass 0=0. If upstream renamed the channel values, ` +
+      `update those literals to the new labels.`,
   );
 }
 
 /**
- * Community summary baseline: one grouped query per source, then row-by-row
- * comparison against the response. The union of communities (goals ∪
- * ratified ∪ cancelled, excluding "(No Value)") must match exactly — a
- * missing or extra community row is a failure, not just a value mismatch.
+ * Community summary baseline: ONE grouped conditional-aggregation scan
+ * replaces the old four per-source dealByCommunity queries (ratified /
+ * cancelled / online / onsite). Each COUNT_IF counts exactly the rows the
+ * corresponding COUNT(*) GROUP BY query matched, and a community appears
+ * as a group IFF it has a ratified or cancelled deal in range — the same
+ * membership the old bRat ∪ bCan union produced (COUNT_IFs over channels
+ * the scenario filter contradicts are structurally zero, matching the old
+ * skip-to-empty-map). Goals arrive precomputed from the shared DM_GOALS
+ * grouped query. The union of communities (goals ∪ ratified ∪ cancelled,
+ * excluding "(No Value)") must match exactly — a missing or extra
+ * community row is a failure, not just a value mismatch.
  */
 async function auditCommunities(
   resp: LeasingResponse,
   f: ScenarioFilters,
-  fiscalYear: number,
   startDate: string,
-  endDate: string,
   toDate: string,
-  totalGoalType: string | undefined,
+  bGoals: Map<string, { fullSpan: number; toDate: number }>,
 ): Promise<void> {
-  const dealBinds = (extraChannel?: string) => {
-    const binds: (string | number)[] = [startDate, toDate];
-    const parts: string[] = [];
-    if (f.community) {
-      parts.push("TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
-      binds.push(f.community);
-    }
-    const channel = extraChannel ?? f.channel;
-    if (channel) {
-      parts.push("DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-      binds.push(channel);
-    }
-    return { extra: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
-  };
-
-  const dealByCommunity = async (
-    dateCol: string,
-    channel?: string,
-  ): Promise<Map<string, number>> => {
-    if (channel && f.channel && f.channel !== channel) return new Map();
-    const { extra, binds } = dealBinds(channel);
-    const rows = await querySnowflake<{ C: string | null; N: number }>(
-      `SELECT TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) AS C, COUNT(*) AS N
+  // Bind order follows text order: subquery SELECT-list window binds, then
+  // the WHERE extras.
+  const binds: (string | number)[] = [startDate, toDate, startDate, toDate];
+  const parts: string[] = [];
+  if (f.community) {
+    parts.push("TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const rows = await querySnowflake<{
+    C: string | null;
+    RAT: number;
+    RAT_ONLINE: number;
+    RAT_ONSITE: number;
+    CAN: number;
+  }>(
+    `SELECT C,
+            COUNT_IF(IN_RAT_WINDOW) AS RAT,
+            COUNT_IF(IN_RAT_WINDOW AND CH = 'Online') AS RAT_ONLINE,
+            COUNT_IF(IN_RAT_WINDOW AND CH = 'Onsite') AS RAT_ONSITE,
+            COUNT_IF(IN_CAN_WINDOW) AS CAN
+     FROM (
+       SELECT TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) AS C,
+              LEASE_RATIFIED_DATE BETWEEN ? AND ? AS IN_RAT_WINDOW,
+              CANCELLATION_DATE BETWEEN ? AND ? AS IN_CAN_WINDOW,
+              DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CH
        FROM DM_DEALS
-       WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND ${dateCol} BETWEEN ? AND ?${extra}
-       GROUP BY 1`,
-      binds,
-    );
-    return new Map(rows.filter((r) => r.C).map((r) => [r.C as string, Number(r.N) || 0]));
-  };
+       WHERE PIPELINE_NAME = '${RL_PIPELINE}'${extra}
+     )
+     WHERE IN_RAT_WINDOW OR IN_CAN_WINDOW
+     GROUP BY 1`,
+    binds,
+  );
+  const bRat = new Map<string, number>();
+  const bCan = new Map<string, number>();
+  const bOnline = new Map<string, number>();
+  const bOnsite = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.C) continue;
+    bRat.set(r.C, Number(r.RAT) || 0);
+    bCan.set(r.C, Number(r.CAN) || 0);
+    bOnline.set(r.C, Number(r.RAT_ONLINE) || 0);
+    bOnsite.set(r.C, Number(r.RAT_ONSITE) || 0);
+  }
 
-  const goalByCommunity = async (): Promise<
-    Map<string, { fullSpan: number; toDate: number }>
-  > => {
-    if (!totalGoalType) return new Map();
-    const binds: (string | number)[] = [toDate, fiscalYear, totalGoalType, startDate, endDate];
-    let extra = "";
-    if (f.community) {
-      extra = " AND DEVELOPMENT_NAME = ?";
-      binds.push(f.community);
-    }
-    const rows = await querySnowflake<{
-      C: string | null;
-      FULL_SPAN: number;
-      TO_DATE: number;
-    }>(
-      `SELECT DEVELOPMENT_NAME AS C, SUM(GOAL) AS FULL_SPAN,
-              SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-       FROM DM_GOALS
-       WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ? AND BUDGET_DATE BETWEEN ? AND ?${extra}
-       GROUP BY 1`,
-      binds,
-    );
-    return new Map(
-      rows
-        .filter((r) => r.C)
-        .map((r) => [
-          r.C as string,
-          { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
-        ]),
-    );
-  };
-
-  const [bRat, bCan, bOnline, bOnsite, bGoals] = await Promise.all([
-    dealByCommunity("LEASE_RATIFIED_DATE"),
-    dealByCommunity("CANCELLATION_DATE"),
-    dealByCommunity("LEASE_RATIFIED_DATE", "Online"),
-    dealByCommunity("LEASE_RATIFIED_DATE", "Onsite"),
-    goalByCommunity(),
-  ]);
-
-  const expected = new Set<string>([...bRat.keys(), ...bCan.keys(), ...bGoals.keys()]);
+  const expected = new Set<string>([...bRat.keys(), ...bGoals.keys()]);
   expected.delete("(No Value)");
 
   const apiByName = new Map(resp.communities.map((c) => [c.community, c]));
@@ -684,61 +765,49 @@ async function auditCommunities(
   }
 }
 
-/** Monthly series baseline: actuals over start..toDate, goals over start..end. */
+/**
+ * Monthly series baseline: actuals over start..toDate, goals over
+ * start..end. The ratified and cancelled series group by DIFFERENT date
+ * columns (a deal ratified in March and cancelled in May belongs to both
+ * series in different months), so they can't share one GROUP BY — instead
+ * ONE round trip runs both legs via UNION ALL, each leg literally the old
+ * per-column query tagged with its KIND. Goals arrive precomputed
+ * (per-month sums from the shared DM_GOALS grouped query).
+ */
 async function auditMonthly(
   resp: LeasingResponse,
   f: ScenarioFilters,
-  fiscalYear: number,
   startDate: string,
-  endDate: string,
   toDate: string,
-  trendGoalType: string | undefined,
+  mGoal: Map<number, number>,
 ): Promise<void> {
-  const monthly = async (dateCol: string): Promise<Map<number, number>> => {
-    const binds: (string | number)[] = [startDate, toDate];
-    const parts: string[] = [];
-    if (f.community) {
-      parts.push("TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
-      binds.push(f.community);
-    }
-    if (f.channel) {
-      parts.push("DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-      binds.push(f.channel);
-    }
-    const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-    const rows = await querySnowflake<{ M: number; N: number }>(
-      `SELECT MONTH(${dateCol}) AS M, COUNT(*) AS N
-       FROM DM_DEALS
-       WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND ${dateCol} BETWEEN ? AND ?${extra}
-       GROUP BY 1`,
-      binds,
-    );
-    return new Map(rows.map((r) => [Number(r.M), Number(r.N) || 0]));
-  };
-
-  const monthlyGoal = async (): Promise<Map<number, number>> => {
-    if (!trendGoalType) return new Map();
-    const binds: (string | number)[] = [fiscalYear, trendGoalType, startDate, endDate];
-    let extra = "";
-    if (f.community) {
-      extra = " AND DEVELOPMENT_NAME = ?";
-      binds.push(f.community);
-    }
-    const rows = await querySnowflake<{ M: number; N: number }>(
-      `SELECT MONTH(BUDGET_DATE) AS M, SUM(GOAL) AS N
-       FROM DM_GOALS
-       WHERE FISCAL_YEAR = ? AND GOAL_TYPE = ? AND BUDGET_DATE BETWEEN ? AND ?${extra}
-       GROUP BY 1`,
-      binds,
-    );
-    return new Map(rows.map((r) => [Number(r.M), Number(r.N) || 0]));
-  };
-
-  const [mRat, mCan, mGoal] = await Promise.all([
-    monthly("LEASE_RATIFIED_DATE"),
-    monthly("CANCELLATION_DATE"),
-    monthlyGoal(),
-  ]);
+  const legBinds: (string | number)[] = [startDate, toDate];
+  const parts: string[] = [];
+  if (f.community) {
+    parts.push("TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
+    legBinds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    legBinds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const leg = (kind: string, dateCol: string) =>
+    `SELECT '${kind}' AS KIND, MONTH(${dateCol}) AS M, COUNT(*) AS N
+     FROM DM_DEALS
+     WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND ${dateCol} BETWEEN ? AND ?${extra}
+     GROUP BY 1, 2`;
+  const rows = await querySnowflake<{ KIND: string; M: number; N: number }>(
+    `${leg("RAT", "LEASE_RATIFIED_DATE")}
+     UNION ALL
+     ${leg("CAN", "CANCELLATION_DATE")}`,
+    [...legBinds, ...legBinds],
+  );
+  const mRat = new Map<number, number>();
+  const mCan = new Map<number, number>();
+  for (const r of rows) {
+    (r.KIND === "RAT" ? mRat : mCan).set(Number(r.M), Number(r.N) || 0);
+  }
 
   if (resp.monthly.length !== 12) {
     failures++;

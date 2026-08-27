@@ -78,8 +78,9 @@ const uiDist = join(uiDir, "dist", "public");
 // ---------- payload shape (the audited API contract this page binds) ----------
 
 interface MatrixCell {
-  fullSpanGoal: number;
-  toDateGoal: number;
+  /** null only for the unknown-bucket rows, which have no goals — the UI renders dashes. */
+  fullSpanGoal: number | null;
+  toDateGoal: number | null;
   actual: number;
   ptgPercent: number | null;
 }
@@ -117,6 +118,8 @@ interface OverviewPayload {
   trafficMatrix: {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
+    /** Rows with neither 'Online' nor 'Onsite' label — no goals exist for the bucket. */
+    unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
     unknown: { leads: number; tours: number; sales: number };
     newWebsiteUsers: number;
@@ -537,6 +540,16 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     return;
   }
   const m = p.trafficMatrix;
+  // The unknown-bucket rows (rows carrying neither channel label) bind their
+  // Actual to trafficMatrix.unknown.* — plain numbers with no goals, so the
+  // UI renders dashes in both goal columns and PTG %, and checkCell's
+  // null-handling asserts the dashes stay dashes.
+  const unknownCell = (actual: number): MatrixCell => ({
+    fullSpanGoal: null,
+    toDateGoal: null,
+    actual,
+    ptgPercent: null,
+  });
   const bindings: Record<string, MatrixCell> = {
     "Website Users": m.online.websiteUsers,
     "Online Leads": m.online.leads,
@@ -545,6 +558,9 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Onsite Leads": m.onsite.leads,
     "Onsite Tours": m.onsite.tours,
     "Onsite Sales": m.onsite.sales,
+    "Unknown Leads": unknownCell(m.unknown.leads),
+    "Unknown Tours": unknownCell(m.unknown.tours),
+    "Unknown Sales": unknownCell(m.unknown.sales),
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };

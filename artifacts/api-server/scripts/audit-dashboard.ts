@@ -45,7 +45,8 @@
  * total website users, and NEW website users (trafficMatrix.newWebsiteUsers).
  * The two user counts come from the API's overall () grouping-set row —
  * picked via G_COMPANY=1 — which can regress independently of the per-row
- * values, so both get their own scalar GA baselines.
+ * values, so both get their own GA baseline aggregates (one scan computes
+ * both).
  *
  * The nine channel-split cells (trafficMatrix.online/onsite/unknown ×
  * leads, tours, sales) are audited in every scenario too, each against a
@@ -155,10 +156,11 @@ const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
 // The Snowflake proxy enforces ~10 requests/second per REPL — a budget
 // shared with the API server's own parallel query fan-out and anything
-// else running in the workspace. Bursts from this script's Promise.all
-// batches (11 headline baselines per scenario after the channel-split
-// checks, 6 representative-filter picks, 3 per breakdown metric) have
-// died mid-run with transient fetch failures / 502s, and even fully
+// else running in the workspace. Baselines are batched into grouped /
+// conditional-aggregation queries (one scan per source instead of a
+// scalar COUNT per cell) so round trips stay few, but bursts from this
+// script's Promise.all batches have died mid-run with transient fetch
+// failures / 502s, and even fully
 // serialized queries can catch a 429 when the rest of the repl is busy —
 // leaving later scenarios unexecuted, which is a false "safety net ran"
 // signal. Two defenses, both scoped to this script's baseline queries:
@@ -424,6 +426,25 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
   return params;
 }
 
+/**
+ * The headline baseline counts a scenario computed, reused by the ratios
+ * audit so it doesn't re-run identical queries: the ratios table's actuals
+ * are defined over exactly the default view's headline populations
+ * (unfiltered leads/tours/sales/users and their channel splits).
+ */
+interface HeadlineBaselines {
+  users: number;
+  leads: number;
+  onlineLeads: number;
+  onsiteLeads: number;
+  tours: number;
+  onlineTours: number;
+  onsiteTours: number;
+  sales: number;
+  onlineSales: number;
+  onsiteSales: number;
+}
+
 interface ScenarioResult {
   ok: boolean;
   /** false when the API did not honor the requested/default dates */
@@ -431,6 +452,8 @@ interface ScenarioResult {
   overview: OverviewResponse;
   expStart: string;
   expTo: string;
+  /** set on every range-honoring scenario result */
+  headline?: HeadlineBaselines;
 }
 async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   const f = scenario.filters;
@@ -470,100 +493,87 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   // cutoff), same window the API applies to actuals, no attribution join
   // that could fan out counts.
   //
-  // The channel variants re-count the same rows restricted to the hardcoded
-  // 'Online' / 'Onsite' labels on the channel column the dashboard keys on.
-  // 'unlabeled' recounts rows carrying NEITHER literal ('Unknown', NULL, or
-  // any other value) — the bucket behind trafficMatrix.unknown. It is a
-  // direct recount of source rows, never total − online − onsite, so the
-  // audit keeps per-cell baselines with no sum-to-total assumption.
-  // Composing with a scenario channel filter (already in cf/df) is correct by
-  // construction: a matching label is redundant, a contradicting one yields 0
-  // — exactly what the API's cell must show under that filter.
-  const unlabeledFrag = (col: string) =>
-    ` AND (${col} IS NULL OR ${col} NOT IN ('Online','Onsite'))`;
-  type ChannelBucket = "Online" | "Onsite" | "unlabeled";
-  const countContacts = (
-    dateCol: "CONTACT_CREATE_DATE" | "EHI_MIN_FIRST_TOUR_DATE",
-    channel?: ChannelBucket,
-  ) =>
-    countScalar(
-      `SELECT COUNT(*) AS N FROM DM_CONTACTS C
-       WHERE ${isLeadSql("C")} AND C.${dateCol} BETWEEN ? AND ?${cf.sql}${
-         channel === "unlabeled"
-           ? unlabeledFrag("C.ONSITE_ONLINE_SOURCE_CHANNEL")
-           : channel
-             ? " AND C.ONSITE_ONLINE_SOURCE_CHANNEL = ?"
-             : ""
-       }`,
-      [
-        expStart,
-        expTo,
-        ...cf.binds,
-        ...(channel && channel !== "unlabeled" ? [channel] : []),
-      ],
-    );
-  const countDeals = (channel?: ChannelBucket) =>
-    countScalar(
-      `SELECT COUNT(*) AS N FROM DM_DEALS X
-       WHERE ${isSaleSql("X")}
-         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}${
-           channel === "unlabeled"
-             ? unlabeledFrag("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL")
-             : channel
-               ? " AND X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?"
-               : ""
-         }`,
-      [
-        expStart,
-        expTo,
-        ...df.binds,
-        ...(channel && channel !== "unlabeled" ? [channel] : []),
-      ],
-    );
-
-  const [
-    leads,
-    tours,
-    sales,
-    users,
-    newUsers,
-    onlineLeads,
-    onsiteLeads,
-    onlineTours,
-    onsiteTours,
-    onlineSales,
-    onsiteSales,
-    unlabeledLeads,
-    unlabeledTours,
-    unlabeledSales,
-  ] = await Promise.all([
-    countContacts("CONTACT_CREATE_DATE"),
-    countContacts("EHI_MIN_FIRST_TOUR_DATE"),
-    countDeals(),
-    countScalar(
-      `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
-      [expStart, expTo, ...gf.binds],
+  // BATCHED on purpose: the Snowflake proxy rate-limits at ~10 RPS
+  // repl-wide, so round trips — not warehouse work — dominate audit wall
+  // time. ONE conditional-aggregation scan per source (contacts / deals /
+  // GA) computes all 14 headline baselines; each COUNT_IF counts exactly
+  // the rows the old one-scalar-COUNT-per-cell queries matched:
+  //  - the window flags are the old BETWEEN predicates; a row in neither
+  //    window is dropped by the outer WHERE and contributed to no count
+  //    anyway (BETWEEN over a NULL date is NULL, and TRUE OR NULL is TRUE,
+  //    so no in-window row is lost);
+  //  - channel cells restrict on the hardcoded 'Online'/'Onsite' literals
+  //    on the channel column the dashboard keys on; the unlabeled bucket
+  //    (behind trafficMatrix.unknown) recounts rows carrying NEITHER
+  //    literal ('Unknown', NULL, or any other value) — still a direct
+  //    recount of source rows, never total − online − onsite, so the audit
+  //    keeps per-cell baselines with no sum-to-total assumption;
+  //  - composing with a scenario channel filter (already in cf/df) is
+  //    correct by construction: a matching label is redundant, a
+  //    contradicting one makes that COUNT_IF structurally zero — exactly
+  //    what the API's cell must show under that filter.
+  const UNLABELED = "(CH IS NULL OR CH NOT IN ('Online','Onsite'))";
+  // Bind order follows text order: subquery SELECT-list window binds come
+  // before the WHERE fragment binds.
+  const [contactRows, dealRows, gaRows] = await Promise.all([
+    sfQuery<Record<string, number>>(
+      `SELECT COUNT_IF(IN_LEAD_WINDOW) AS LEADS,
+              COUNT_IF(IN_LEAD_WINDOW AND CH = 'Online') AS ONLINE_LEADS,
+              COUNT_IF(IN_LEAD_WINDOW AND CH = 'Onsite') AS ONSITE_LEADS,
+              COUNT_IF(IN_LEAD_WINDOW AND ${UNLABELED}) AS UNLABELED_LEADS,
+              COUNT_IF(IN_TOUR_WINDOW) AS TOURS,
+              COUNT_IF(IN_TOUR_WINDOW AND CH = 'Online') AS ONLINE_TOURS,
+              COUNT_IF(IN_TOUR_WINDOW AND CH = 'Onsite') AS ONSITE_TOURS,
+              COUNT_IF(IN_TOUR_WINDOW AND ${UNLABELED}) AS UNLABELED_TOURS
+       FROM (
+         SELECT C.CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
+                C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ? AS IN_TOUR_WINDOW,
+                C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")}${cf.sql}
+       )
+       WHERE IN_LEAD_WINDOW OR IN_TOUR_WINDOW`,
+      [expStart, expTo, expStart, expTo, ...cf.binds],
     ),
-    // NEW-users headline: same GA source and filters, restricted to first-time
-    // users. The API takes this from the overall () grouping-set row (picked
-    // via G_COMPANY=1), which can regress independently of the per-row values.
-    countScalar(
-      `SELECT COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS N
+    sfQuery<Record<string, number>>(
+      `SELECT COUNT(*) AS SALES,
+              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = 'Online') AS ONLINE_SALES,
+              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = 'Onsite') AS ONSITE_SALES,
+              COUNT_IF(X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL IS NULL
+                       OR X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL NOT IN ('Online','Onsite')) AS UNLABELED_SALES
+       FROM DM_DEALS X
+       WHERE ${isSaleSql("X")}
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}`,
+      [expStart, expTo, ...df.binds],
+    ),
+    // Users + NEW users from the same scan: the API takes both from the
+    // overall () grouping-set row (picked via G_COMPANY=1), which can
+    // regress independently of the per-row values, so each total gets its
+    // own independent GA baseline aggregate here.
+    sfQuery<Record<string, number>>(
+      `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS USERS,
+              COUNT(DISTINCT IFF(IS_NEW_USER = 'Yes', USER_PSEUDO_ID, NULL)) AS NEW_USERS
        FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
        WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${gf.sql}`,
       [expStart, expTo, ...gf.binds],
     ),
-    countContacts("CONTACT_CREATE_DATE", "Online"),
-    countContacts("CONTACT_CREATE_DATE", "Onsite"),
-    countContacts("EHI_MIN_FIRST_TOUR_DATE", "Online"),
-    countContacts("EHI_MIN_FIRST_TOUR_DATE", "Onsite"),
-    countDeals("Online"),
-    countDeals("Onsite"),
-    countContacts("CONTACT_CREATE_DATE", "unlabeled"),
-    countContacts("EHI_MIN_FIRST_TOUR_DATE", "unlabeled"),
-    countDeals("unlabeled"),
   ]);
+
+  const val = (rows: Record<string, number>[], col: string) => Number(rows[0]?.[col]) || 0;
+  const leads = val(contactRows, "LEADS");
+  const tours = val(contactRows, "TOURS");
+  const sales = val(dealRows, "SALES");
+  const users = val(gaRows, "USERS");
+  const newUsers = val(gaRows, "NEW_USERS");
+  const onlineLeads = val(contactRows, "ONLINE_LEADS");
+  const onsiteLeads = val(contactRows, "ONSITE_LEADS");
+  const onlineTours = val(contactRows, "ONLINE_TOURS");
+  const onsiteTours = val(contactRows, "ONSITE_TOURS");
+  const onlineSales = val(dealRows, "ONLINE_SALES");
+  const onsiteSales = val(dealRows, "ONSITE_SALES");
+  const unlabeledLeads = val(contactRows, "UNLABELED_LEADS");
+  const unlabeledTours = val(contactRows, "UNLABELED_TOURS");
+  const unlabeledSales = val(dealRows, "UNLABELED_SALES");
 
   const tm = overview.trafficMatrix;
   const checks: { name: string; api: number; baseline: number }[] = [
@@ -683,7 +693,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
         `FAIL ${name} ${g.total} ${g.metric} in ${expStart}..${expTo} but ZERO match 'Online' and ZERO match 'Onsite' ` +
           `on ${g.column} — the expected channel labels are missing from the data; labels present: ${present}. ` +
           `The dashboard's channel split AND this audit's baselines both hardcode 'Online'/'Onsite' ` +
-          `(chan() in src/lib/overview-targets.ts; countContacts/countDeals here), so every online/onsite ` +
+          `(chan() in src/lib/overview-targets.ts; the channel COUNT_IFs here), so every online/onsite ` +
           `cell reads 0 and the per-cell checks pass 0=0. If upstream renamed the channel values, update ` +
           `those literals to the new labels.`,
       );
@@ -702,16 +712,28 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     if (!(await auditGaPropertyLabels(expStart, expTo))) failed = true;
   }
 
-  return { ok: !failed, rangeOk: true, overview, expStart, expTo };
+  return {
+    ok: !failed,
+    rangeOk: true,
+    overview,
+    expStart,
+    expTo,
+    headline: {
+      users,
+      leads,
+      onlineLeads,
+      onsiteLeads,
+      tours,
+      onlineTours,
+      onsiteTours,
+      sales,
+      onlineSales,
+      onsiteSales,
+    },
+  };
 }
 
 // ---------- Breakdown table audit (divisions / developments) ----------
-
-interface BreakdownBaselineRow {
-  COMPANY_NAME: string;
-  DEVELOPMENT_NAME?: string;
-  N: number;
-}
 
 function divergedPct(api: number, baseline: number): number {
   return baseline === 0
@@ -755,83 +777,121 @@ async function auditBreakdowns(
   const cf = contactFrag(scenario.filters);
   const df = dealFrag(scenario.filters);
 
+  // BATCHED baselines (the Snowflake proxy rate-limits at ~10 RPS, so round
+  // trips dominate audit wall time):
+  //  - leads and tours group the same contact rows through the same
+  //    dimension join, differing only in date column, so ONE grouped
+  //    conditional-aggregation scan yields both metrics' per-(company,
+  //    development) baselines. Each COUNT_IF counts exactly the rows the
+  //    old per-metric COUNT(*) matched; a row in neither window is dropped
+  //    by the outer WHERE and contributed to no group anyway (BETWEEN over
+  //    a NULL date is NULL, TRUE OR NULL is TRUE — no in-window row lost).
+  //    Ditto for the two unattributed remainders.
+  //  - per-company baselines are exact JS rollups of the per-development
+  //    groups: every joined row matches EXACTLY ONE dimension row (the
+  //    dedup DEV_DIM subquery is one row per DEVELOPMENT_NAME), so summing
+  //    a company's development groups reproduces the old GROUP BY
+  //    COMPANY_NAME counts integer-for-integer. A group whose COUNT_IF is
+  //    0 behaves like the absent group the old per-metric query produced —
+  //    the comparison loops skip 0==0 rows.
+  interface ContactDevRow {
+    COMPANY_NAME: string;
+    DEVELOPMENT_NAME: string;
+    N_LEADS: number;
+    N_TOURS: number;
+  }
+  interface DealDevRow {
+    COMPANY_NAME: string;
+    DEVELOPMENT_NAME: string;
+    N: number;
+  }
+  // Bind order follows text order: subquery SELECT-list window binds come
+  // before the WHERE fragment binds.
+  const [contactByDev, dealByDev, contactUnattrRows, salesUnattributed] = await Promise.all([
+    sfQuery<ContactDevRow>(
+      `SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME,
+              COUNT_IF(C.IN_LEAD_WINDOW) AS N_LEADS,
+              COUNT_IF(C.IN_TOUR_WINDOW) AS N_TOURS
+       FROM (
+         SELECT C.CONTACT_EHI_COMMUNITY_OF_INTEREST AS COI,
+                C.CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
+                C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ? AS IN_TOUR_WINDOW
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")}${cf.sql}
+       ) C
+       JOIN ${DEV_DIM} D ON C.COI = D.DEVELOPMENT_NAME
+       WHERE C.IN_LEAD_WINDOW OR C.IN_TOUR_WINDOW
+       GROUP BY 1, 2`,
+      [expStart, expTo, expStart, expTo, ...cf.binds],
+    ),
+    sfQuery<DealDevRow>(
+      `SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
+       FROM DM_DEALS X
+       JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+       WHERE ${isSaleSql("X")}
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
+       GROUP BY 1, 2`,
+      [expStart, expTo, ...df.binds],
+    ),
+    sfQuery<{ N_LEADS: number; N_TOURS: number }>(
+      `SELECT COUNT_IF(C.CONTACT_CREATE_DATE BETWEEN ? AND ?) AS N_LEADS,
+              COUNT_IF(C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?) AS N_TOURS
+       FROM DM_CONTACTS C
+       WHERE ${isLeadSql("C")}
+         AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
+              OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
+                 (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
+      [expStart, expTo, expStart, expTo, ...cf.binds],
+    ),
+    countScalar(
+      `SELECT COUNT(*) AS N
+       FROM DM_DEALS X
+       WHERE ${isSaleSql("X")}
+         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+         AND (X.DEAL_EHI_COMMUNITY_OF_INTEREST IS NULL
+              OR X.DEAL_EHI_COMMUNITY_OF_INTEREST NOT IN
+                 (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${df.sql}`,
+      [expStart, expTo, ...df.binds],
+    ),
+  ]);
+
+  const bdDevKey = (c: string, dv: string) => `${c}\u0000${dv}`;
+  const toDevMap = <T extends { COMPANY_NAME: string; DEVELOPMENT_NAME: string }>(
+    rows: T[],
+    pick: (r: T) => number,
+  ) => new Map(rows.map((r) => [bdDevKey(r.COMPANY_NAME, r.DEVELOPMENT_NAME), pick(r)]));
+  const rollupCompany = <T extends { COMPANY_NAME: string }>(
+    rows: T[],
+    pick: (r: T) => number,
+  ) => {
+    const m = new Map<string, number>();
+    for (const r of rows) m.set(r.COMPANY_NAME, (m.get(r.COMPANY_NAME) ?? 0) + pick(r));
+    return m;
+  };
+
   const metrics = [
     {
       name: "leads",
       headline: overview.trafficMatrix.total.leads.actual,
-      binds: [expStart, expTo, ...cf.binds] as (string | number)[],
-      byCompanySql: `
-        SELECT D.COMPANY_NAME, COUNT(*) AS N
-        FROM DM_CONTACTS C
-        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
-        GROUP BY 1`,
-      byDevSql: `
-        SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
-        FROM DM_CONTACTS C
-        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?${cf.sql}
-        GROUP BY 1, 2`,
-      unattributedSql: `
-        SELECT COUNT(*) AS N
-        FROM DM_CONTACTS C
-        WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
-          AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
-               OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
+      baseByCompany: rollupCompany(contactByDev, (r) => Number(r.N_LEADS) || 0),
+      baseByDev: toDevMap(contactByDev, (r) => Number(r.N_LEADS) || 0),
+      unattributed: Number(contactUnattrRows[0]?.N_LEADS) || 0,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.leads) || 0,
     },
     {
       name: "tours",
       headline: overview.trafficMatrix.total.tours.actual,
-      binds: [expStart, expTo, ...cf.binds] as (string | number)[],
-      byCompanySql: `
-        SELECT D.COMPANY_NAME, COUNT(*) AS N
-        FROM DM_CONTACTS C
-        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
-        GROUP BY 1`,
-      byDevSql: `
-        SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
-        FROM DM_CONTACTS C
-        JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?${cf.sql}
-        GROUP BY 1, 2`,
-      unattributedSql: `
-        SELECT COUNT(*) AS N
-        FROM DM_CONTACTS C
-        WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
-          AND (C.CONTACT_EHI_COMMUNITY_OF_INTEREST IS NULL
-               OR C.CONTACT_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${cf.sql}`,
+      baseByCompany: rollupCompany(contactByDev, (r) => Number(r.N_TOURS) || 0),
+      baseByDev: toDevMap(contactByDev, (r) => Number(r.N_TOURS) || 0),
+      unattributed: Number(contactUnattrRows[0]?.N_TOURS) || 0,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.tours) || 0,
     },
     {
       name: "sales",
       headline: overview.kpis.grossSales,
-      binds: [expStart, expTo, ...df.binds] as (string | number)[],
-      byCompanySql: `
-        SELECT D.COMPANY_NAME, COUNT(*) AS N
-        FROM DM_DEALS X
-        JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isSaleSql("X")}
-          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
-        GROUP BY 1`,
-      byDevSql: `
-        SELECT D.COMPANY_NAME, D.DEVELOPMENT_NAME, COUNT(*) AS N
-        FROM DM_DEALS X
-        JOIN ${DEV_DIM} D ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-        WHERE ${isSaleSql("X")}
-          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
-        GROUP BY 1, 2`,
-      unattributedSql: `
-        SELECT COUNT(*) AS N
-        FROM DM_DEALS X
-        WHERE ${isSaleSql("X")}
-          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
-          AND (X.DEAL_EHI_COMMUNITY_OF_INTEREST IS NULL
-               OR X.DEAL_EHI_COMMUNITY_OF_INTEREST NOT IN
-                  (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM}))${df.sql}`,
+      baseByCompany: rollupCompany(dealByDev, (r) => Number(r.N) || 0),
+      baseByDev: toDevMap(dealByDev, (r) => Number(r.N) || 0),
+      unattributed: salesUnattributed,
       pick: (r: DivisionRow | DevelopmentRow) => Number(r.sales) || 0,
     },
   ];
@@ -839,14 +899,9 @@ async function auditBreakdowns(
   let failed = false;
 
   for (const m of metrics) {
-    const [byCompany, byDev, unattributed] = await Promise.all([
-      sfQuery<BreakdownBaselineRow>(m.byCompanySql, m.binds),
-      sfQuery<BreakdownBaselineRow>(m.byDevSql, m.binds),
-      countScalar(m.unattributedSql, m.binds),
-    ]);
+    const { baseByCompany, baseByDev, unattributed } = m;
 
     // --- 1. Division rows vs per-company baseline (both directions) ---
-    const baseByCompany = new Map(byCompany.map((r) => [r.COMPANY_NAME, Number(r.N) || 0]));
     const apiByCompany = new Map(overview.divisions.map((r) => [r.division, m.pick(r)]));
     const companyNames = new Set([...baseByCompany.keys(), ...apiByCompany.keys()]);
     for (const company of [...companyNames].sort()) {
@@ -862,12 +917,8 @@ async function auditBreakdowns(
     }
 
     // --- 2. Development rows vs per-(company, development) baseline ---
-    const devKey = (c: string, dv: string) => `${c}\u0000${dv}`;
-    const baseByDev = new Map(
-      byDev.map((r) => [devKey(r.COMPANY_NAME, r.DEVELOPMENT_NAME!), Number(r.N) || 0]),
-    );
     const apiByDev = new Map(
-      overview.developments.map((r) => [devKey(r.division, r.development), m.pick(r)]),
+      overview.developments.map((r) => [bdDevKey(r.division, r.development), m.pick(r)]),
     );
     const devKeys = new Set([...baseByDev.keys(), ...apiByDev.keys()]);
     for (const key of [...devKeys].sort()) {
@@ -1065,10 +1116,6 @@ interface CommunityRow {
   salesYtd: number;
 }
 
-interface ChannelCountRow {
-  CHANNEL: string | null;
-  N: number;
-}
 /**
  * Pick representative filter values dynamically: the Esperanza company,
  * development, channel, lead source, and contact cohort quarter with the
@@ -1275,10 +1322,12 @@ async function main() {
       );
       if (!gaBreakdownsOk) anyFailed = true;
     }
-    // Funnel ratios table — actuals recomputed from baseline counts, goals
-    // cross-checked against the ratio-goal input table.
+    // Funnel ratios table — actuals recomputed from the scenario's already-
+    // validated headline baseline counts (no extra Snowflake round trips),
+    // goals cross-checked against the ratio-goal input table. headline is
+    // always set when rangeOk is true (checked above).
     if (scenario.withRatios) {
-      const ratiosOk = await auditRatios(result.overview, result.expStart, result.expTo);
+      const ratiosOk = await auditRatios(result.overview, result.expStart, result.headline!);
       if (!ratiosOk) anyFailed = true;
     }
   }
@@ -1321,15 +1370,19 @@ interface RatioGoalBaselineRow {
 /**
  * Audits the funnel ratios table of the DEFAULT view.
  *
- * Actuals: every ratio is recomputed from independent baseline counts — the
- * same no-fan-out query shapes the headline checks validate, grouped by
- * ONSITE_ONLINE_SOURCE_CHANNEL so the online/onsite variants come from the
- * data rather than from the API's own channel splits. The expected
- * numerator/denominator wiring below is the dashboard's contract (validated
- * against Qlik during migration); a swapped pair or a ratio fed by the wrong
- * actual diverges by orders of magnitude, far beyond any drift tolerance.
- * Division-by-zero mirrors the API's convention (ratio = 0), so both sides
- * agree when a denominator is legitimately empty.
+ * Actuals: every ratio is recomputed from the independent baseline counts
+ * the default view's headline checks already computed and validated (one
+ * conditional-aggregation scan per source; the channel variants come from
+ * COUNT_IFs on ONSITE_ONLINE_SOURCE_CHANNEL / the deal channel column, not
+ * from the API's own channel splits — and the default view binds no filter
+ * fragments, so those counts cover exactly the rows the old per-ratio
+ * group-bys counted). Reusing them checks the same values while saving four
+ * Snowflake round trips per run. The expected numerator/denominator wiring
+ * below is the dashboard's contract (validated against Qlik during
+ * migration); a swapped pair or a ratio fed by the wrong actual diverges by
+ * orders of magnitude, far beyond any drift tolerance. Division-by-zero
+ * mirrors the API's convention (ratio = 0), so both sides agree when a
+ * denominator is legitimately empty.
  *
  * Goals: each ratio's goal must resolve by MARKETING_GOAL_NAME_RATIOS in
  * DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS for the audited fiscal year
@@ -1345,64 +1398,34 @@ interface RatioGoalBaselineRow {
 async function auditRatios(
   overview: OverviewResponse,
   expStart: string,
-  expTo: string,
+  base: HeadlineBaselines,
 ): Promise<boolean> {
   console.log(`\n=== Funnel ratios table (default view) ===`);
 
   // Fiscal year the API sources ratio goals from: year of the range start.
   const goalYear = Number(expStart.slice(0, 4));
-  const binds = [expStart, expTo];
 
-  const [leadRows, tourRows, salesRows, users, goalRows] = await Promise.all([
-    sfQuery<ChannelCountRow>(
-      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
-       FROM DM_CONTACTS C
-       WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
-       GROUP BY 1`,
-      binds,
-    ),
-    sfQuery<ChannelCountRow>(
-      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
-       FROM DM_CONTACTS C
-       WHERE ${isLeadSql("C")} AND C.EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
-       GROUP BY 1`,
-      binds,
-    ),
-    sfQuery<ChannelCountRow>(
-      `SELECT X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL, COUNT(*) AS N
-       FROM DM_DEALS X
-       WHERE ${isSaleSql("X")}
-         AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
-       GROUP BY 1`,
-      binds,
-    ),
-    countScalar(
-      `SELECT COUNT(DISTINCT USER_PSEUDO_ID) AS N FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-       WHERE ${isGaTrafficSql()} AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?`,
-      binds,
-    ),
-    sfQuery<RatioGoalBaselineRow>(
-      `SELECT MARKETING_GOAL_NAME_RATIOS AS NAME, MARKETING_GOAL_RATIOS AS VAL
-       FROM DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS
-       WHERE MARKETING_GOAL_YEAR = ?`,
-      [goalYear],
-    ),
-  ]);
+  const goalRows = await sfQuery<RatioGoalBaselineRow>(
+    `SELECT MARKETING_GOAL_NAME_RATIOS AS NAME, MARKETING_GOAL_RATIOS AS VAL
+     FROM DM_MARKETING_DASHBOARD_INPUT_GOAL_RATIOS
+     WHERE MARKETING_GOAL_YEAR = ?`,
+    [goalYear],
+  );
 
-  // Totals include rows with a NULL/other channel, same as the API's chan().
-  const chanSum = (rows: ChannelCountRow[], channel?: string) =>
-    sumRows(rows, (r) => (!channel || r.CHANNEL === channel ? Number(r.N) || 0 : 0));
+  // Totals include rows with a NULL/other channel, same as the API's chan()
+  // (the headline COUNT_IFs put every in-window row in the total and only
+  // channel-labeled rows in the online/onsite variants).
   const counts = {
-    users,
-    leads: chanSum(leadRows),
-    onlineLeads: chanSum(leadRows, "Online"),
-    onsiteLeads: chanSum(leadRows, "Onsite"),
-    tours: chanSum(tourRows),
-    onlineTours: chanSum(tourRows, "Online"),
-    onsiteTours: chanSum(tourRows, "Onsite"),
-    sales: chanSum(salesRows),
-    onlineSales: chanSum(salesRows, "Online"),
-    onsiteSales: chanSum(salesRows, "Onsite"),
+    users: base.users,
+    leads: base.leads,
+    onlineLeads: base.onlineLeads,
+    onsiteLeads: base.onsiteLeads,
+    tours: base.tours,
+    onlineTours: base.onlineTours,
+    onsiteTours: base.onsiteTours,
+    sales: base.sales,
+    onlineSales: base.onlineSales,
+    onsiteSales: base.onsiteSales,
   };
   console.log(`Baseline counts: ${JSON.stringify(counts)}`);
 
@@ -1590,32 +1613,50 @@ async function auditCommunities(): Promise<boolean> {
   }
   const apiRows = body.communities;
 
-  const [dimRows, leadRows, tourRows, saleRows] = await Promise.all([
+  // Each YTD baseline also splits out how much of the count is stamped with
+  // today's UTC date (the only slice the endpoint's per-UTC-day cache can
+  // legitimately lag behind). Leads and tours scan the same contact rows and
+  // differ only in date column, so ONE grouped conditional-aggregation scan
+  // computes both YTD baselines and their today-dated slices. A contact in
+  // neither window is dropped by the outer WHERE and lands in no COUNT_IF;
+  // a group present for only one metric reads 0 for the other, exactly like
+  // the absent group the old per-metric GROUP BYs produced (every consumer
+  // does .get(dev) ?? 0). A today-dated row is always inside its own YTD
+  // window, so the today COUNT_IFs count the same rows the old windowed
+  // queries' COUNT_IFs did. Bind order follows SQL text order through the
+  // subquery SELECT list.
+  interface CommunityContactRow {
+    DEV: string | null;
+    LEADS_N: number;
+    LEADS_TODAY: number;
+    TOURS_N: number;
+    TOURS_TODAY: number;
+  }
+  const [dimRows, contactRows, saleRows] = await Promise.all([
     sfQuery<DimRawRow>(
       `SELECT DEVELOPMENT_NAME, COMPANY_NAME,
               DEVELOPMENT_HAS_GOALS_FLAG, RENTAL_COMMUNITY_FLAG
        FROM DM_COMPANY_DEVELOPMENT
        WHERE COMPANY_NAME ILIKE '%esperanza%'`,
     ),
-    // Each YTD baseline also splits out how much of the count is stamped with
-    // today's UTC date (N_TODAY) — the only slice the endpoint's per-UTC-day
-    // cache can legitimately lag behind. Bind order: COUNT_IF's ? precedes
-    // the WHERE BETWEEN binds in SQL text order.
-    sfQuery<YtdBaselineRow>(
-      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
-              COUNT_IF(CONTACT_CREATE_DATE = ?) AS N_TODAY
-       FROM DM_CONTACTS
-       WHERE ${isLeadSql()} AND CONTACT_CREATE_DATE BETWEEN ? AND ?
+    sfQuery<CommunityContactRow>(
+      `SELECT C.DEV,
+              COUNT_IF(C.IN_LEAD_WINDOW) AS LEADS_N,
+              COUNT_IF(C.LEAD_TODAY) AS LEADS_TODAY,
+              COUNT_IF(C.IN_TOUR_WINDOW) AS TOURS_N,
+              COUNT_IF(C.TOUR_TODAY) AS TOURS_TODAY
+       FROM (
+         SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV,
+                CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
+                CONTACT_CREATE_DATE = ? AS LEAD_TODAY,
+                EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ? AS IN_TOUR_WINDOW,
+                EHI_MIN_FIRST_TOUR_DATE = ? AS TOUR_TODAY
+         FROM DM_CONTACTS
+         WHERE ${isLeadSql()}
+       ) C
+       WHERE C.IN_LEAD_WINDOW OR C.IN_TOUR_WINDOW
        GROUP BY 1`,
-      [todayUtc, ytdStart, todayUtc],
-    ),
-    sfQuery<YtdBaselineRow>(
-      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
-              COUNT_IF(EHI_MIN_FIRST_TOUR_DATE = ?) AS N_TODAY
-       FROM DM_CONTACTS
-       WHERE ${isLeadSql()} AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
-       GROUP BY 1`,
-      [todayUtc, ytdStart, todayUtc],
+      [ytdStart, todayUtc, todayUtc, ytdStart, todayUtc, todayUtc],
     ),
     sfQuery<YtdBaselineRow>(
       `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
@@ -1674,8 +1715,17 @@ async function auditCommunities(): Promise<boolean> {
     }
     return { total, today };
   };
-  const { total: leadsBy, today: leadsToday } = toCountMaps(leadRows);
-  const { total: toursBy, today: toursToday } = toCountMaps(tourRows);
+  const leadsBy = new Map<string, number>();
+  const leadsToday = new Map<string, number>();
+  const toursBy = new Map<string, number>();
+  const toursToday = new Map<string, number>();
+  for (const r of contactRows) {
+    if (!r.DEV) continue;
+    leadsBy.set(r.DEV, Number(r.LEADS_N) || 0);
+    leadsToday.set(r.DEV, Number(r.LEADS_TODAY) || 0);
+    toursBy.set(r.DEV, Number(r.TOURS_N) || 0);
+    toursToday.set(r.DEV, Number(r.TOURS_TODAY) || 0);
+  }
   const { total: salesBy, today: salesToday } = toCountMaps(saleRows);
 
   const rowsByDev = new Map<string, DimRawRow[]>();
