@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
 
+import {
+  chicagoToday,
+  loneDateConflict as detectLoneDateConflict,
+  serverDefaultRange,
+  type ServerDefaultRange,
+} from "@/lib/date-defaults";
+
 /**
  * Native `<input type="date">` fires a change event on every keystroke, so
  * while someone types a year the value passes through complete-looking but
@@ -69,6 +76,25 @@ export interface CommittedDateRange {
    * so they are never queried.
    */
   crossYearRange: boolean;
+  /**
+   * "start" while the start date is the only one set and it falls after the
+   * page's default end (the API fills a missing end from the page's default
+   * range — e.g. the current quarter's Sep 30 — so the resolved pair would be
+   * inverted and rejected with a 400 before the user ever picks the end
+   * date); "end" for the mirrored case (lone end before the default start).
+   * Null while there is no such conflict.
+   */
+  loneDateConflict: "start" | "end" | null;
+}
+
+export interface CommittedDateRangeOptions {
+  /**
+   * Which range the page's API endpoint substitutes for missing dates — must
+   * match the server (see {@link ServerDefaultRange}), or lone dates will be
+   * held back needlessly / allowed through to a 400.
+   */
+  defaultRange: ServerDefaultRange;
+  clearDelayMs?: number;
 }
 
 /**
@@ -82,17 +108,22 @@ export interface CommittedDateRange {
  * - a *cross-year* pair (start and end in different calendar years) is
  *   rejected by the API with a 400 — goals are issued per fiscal year — which
  *   would flash the destructive "failed to load" banner at a sensible-looking
- *   range.
+ *   range;
+ * - a *lone* date the server's default would invert: the API fills a missing
+ *   start/end from the page's default range (`options.defaultRange`), so a
+ *   start after that default's end (e.g. Nov 15 while the quarter default
+ *   ends Sep 30) or an end before its start is guaranteed a 400 before the
+ *   user has even picked the second date.
  *
  * While the pair is invalid, the previous valid pair stays applied (the same
  * latching behavior as half-typed dates) and the matching flag
- * (`invertedRange` / `crossYearRange`) is true so the page can show an inline
- * hint. Fixing either date applies immediately.
+ * (`invertedRange` / `crossYearRange` / `loneDateConflict`) is set so the
+ * page can show an inline hint. Fixing either date applies immediately.
  */
 export function useCommittedDateRange(
   rawStart: string,
   rawEnd: string,
-  clearDelayMs = 600,
+  { defaultRange, clearDelayMs = 600 }: CommittedDateRangeOptions,
 ): CommittedDateRange {
   const committedStart = useCommittedDate(rawStart, clearDelayMs);
   const committedEnd = useCommittedDate(rawEnd, clearDelayMs);
@@ -117,17 +148,39 @@ export function useCommittedDateRange(
     committedStart !== "" &&
     committedEnd !== "" &&
     committedStart.slice(0, 4) !== committedEnd.slice(0, 4);
+  // "Today" is the server's America/Chicago calendar date (same tz-database
+  // rule as the API's todayChicago), NOT the viewer's local clock — so a
+  // viewer in another timezone can never disagree with the server about the
+  // current year or quarter around a boundary. Only a request in flight
+  // across the instant of Chicago midnight remains approximate.
+  const todayChicagoDate = chicagoToday();
   const loneDate =
     (committedStart === "") !== (committedEnd === "")
       ? committedStart || committedEnd
       : "";
   const loneDateOutsideCurrentYear =
-    loneDate !== "" &&
-    loneDate.slice(0, 4) !== String(new Date().getFullYear());
+    loneDate !== "" && loneDate.slice(0, 4) !== todayChicagoDate.slice(0, 4);
   const crossYearRange =
     !invertedRange && (bothSetCrossYear || loneDateOutsideCurrentYear);
 
-  const holdPrevious = invertedRange || crossYearRange;
+  // A *same-year* lone date can still resolve inverted: the server fills the
+  // missing side from the page's default range (current quarter or current
+  // year — see serverDefaultRange), so a lone start after that default's end
+  // (e.g. Nov 15 while the quarter default ends Sep 30) or a lone end before
+  // its start would 400 before the user picks the second date. Held back with
+  // a hint instead, mirroring the cross-year lone-date guard above. (When the
+  // lone date is outside the current year, crossYearRange already holds it.)
+  const loneDateConflict =
+    !invertedRange && !crossYearRange
+      ? detectLoneDateConflict(
+          committedStart,
+          committedEnd,
+          serverDefaultRange(defaultRange, todayChicagoDate),
+        )
+      : null;
+
+  const holdPrevious =
+    invertedRange || crossYearRange || loneDateConflict !== null;
 
   const [applied, setApplied] = useState(() => ({
     startDate: holdPrevious ? "" : committedStart,
@@ -143,5 +196,5 @@ export function useCommittedDateRange(
     );
   }, [committedStart, committedEnd, holdPrevious]);
 
-  return { ...applied, invertedRange, crossYearRange };
+  return { ...applied, invertedRange, crossYearRange, loneDateConflict };
 }

@@ -10,6 +10,6 @@
 - [Dashboard query cache](dashboard-query-cache.md) — all dashboard libs use the shared SWR cache; refreshes traffic-triggered only (warehouse credits), one global 2-wide refresh gate (proxy 10 RPS).
 - [Audit tolerance conventions](audit-conventions.md) — same-day-cached endpoints: bound by today-stamped activity + small slack, never exact/flat tolerance; prove new checks can fail via a doctoring proxy.
 - [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium via executablePath (downloaded browsers fail on NixOS); UI-binding audits: page's own XHR, exact header multisets, mutation-test.
-- [Client date-range guards](date-range-guards.md) — guard lone (single-set) dates too: the API fills the missing side from today, so a lone out-of-year date 400s before the pair is complete.
+- [Client date-range guards](date-range-guards.md) — guard lone (single-set) dates too, and anchor client "today" to America/Chicago like the server: viewer-clock guards fail at quarter/year boundaries.
 - [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter filter no-ops leads; tours carry signal); pick lead sources that also have deals in range.
 - [Batched audit baselines](batched-audit-baselines.md) — collapse scalar counts into COUNT_IF/GROUP BY scans (0==missing, bind order: subquery SELECT binds first); UNION ALL for different date axes.

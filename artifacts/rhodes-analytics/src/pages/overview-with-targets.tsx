@@ -31,6 +31,7 @@ import {
   CrossYearRangeHint,
   DownloadDataButton,
   InvertedRangeHint,
+  LoneDateHint,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -97,16 +98,18 @@ export default function OverviewWithTargetsPage() {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   // Only complete, plausible dates reach the API; while a date is half-typed,
-  // the end date is before the start date, or the range crosses calendar
-  // years (the API rejects mixed-year ranges — goals are set per year), the
-  // previously applied range stays in effect (no 400 flashes or misleading
-  // all-zero metrics mid-edit).
+  // the end date is before the start date, the range crosses calendar years
+  // (the API rejects mixed-year ranges — goals are set per year), or a lone
+  // date would invert against this page's default range (the current
+  // quarter), the previously applied range stays in effect (no 400 flashes or
+  // misleading all-zero metrics mid-edit).
   const {
     startDate: appliedStartDate,
     endDate: appliedEndDate,
     invertedRange,
     crossYearRange,
-  } = useCommittedDateRange(startDate, endDate);
+    loneDateConflict,
+  } = useCommittedDateRange(startDate, endDate, { defaultRange: "quarter" });
 
   const params: GetOwtDashboardParams = {
     target,
@@ -271,6 +274,7 @@ export default function OverviewWithTargetsPage() {
             </div>
             <InvertedRangeHint show={invertedRange} />
             <CrossYearRangeHint show={crossYearRange} />
+            <LoneDateHint conflict={loneDateConflict} />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={setYtd} data-testid="button-ytd">
                 Current Year

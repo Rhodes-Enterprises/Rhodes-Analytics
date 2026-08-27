@@ -247,3 +247,30 @@ export function CrossYearRangeHint({ show }: { show: boolean }) {
     </p>
   );
 }
+
+/**
+ * Gentle inline hint shown under the date inputs while only one date is set
+ * and it conflicts with the page's default range (a start after the default
+ * period's end, or an end before its start). Querying that lone date would be
+ * rejected by the API — it fills the missing side from the default range and
+ * the result would be inverted — so the dashboards hold the query until the
+ * pair is completed (see useCommittedDateRange) instead of flashing the error
+ * banner mid-pick.
+ */
+export function LoneDateHint({
+  conflict,
+}: {
+  conflict: "start" | "end" | null;
+}) {
+  if (!conflict) return null;
+  return (
+    <p
+      className="mt-2 text-xs text-amber-600 dark:text-amber-500"
+      data-testid="hint-lone-date-range"
+    >
+      {conflict === "start"
+        ? "Pick an end date on or after this start date to apply the range — still showing the last valid range."
+        : "Pick a start date on or before this end date to apply the range — still showing the last valid range."}
+    </p>
+  );
+}

@@ -21,10 +21,12 @@ import {
 } from "@workspace/api-client-react";
 import { Layout } from "@/components/layout";
 import { useCommittedDateRange } from "@/hooks/use-committed-date";
+import { serverDefaultRange } from "@/lib/date-defaults";
 import {
   CrossYearRangeHint,
   DownloadDataButton,
   InvertedRangeHint,
+  LoneDateHint,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -84,16 +86,19 @@ export default function LeasingPage() {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   // Only complete, plausible dates reach the API; while a date is half-typed,
-  // the end date is before the start date, or the range crosses calendar
-  // years (the API rejects mixed-year ranges — goals are set per year), the
-  // previously applied range stays in effect (no 400 flashes or misleading
-  // all-zero metrics mid-edit).
+  // the end date is before the start date, the range crosses calendar years
+  // (the API rejects mixed-year ranges — goals are set per year), or a lone
+  // date would invert against this page's default range (the current year —
+  // which a same-year lone date never does; passed for parity with the
+  // quarter-defaulted pages), the previously applied range stays in effect
+  // (no 400 flashes or misleading all-zero metrics mid-edit).
   const {
     startDate: appliedStartDate,
     endDate: appliedEndDate,
     invertedRange,
     crossYearRange,
-  } = useCommittedDateRange(startDate, endDate);
+    loneDateConflict,
+  } = useCommittedDateRange(startDate, endDate, { defaultRange: "year" });
 
   const params: GetLeasingDashboardParams = {
     ...(community !== ALL && { community }),
@@ -107,14 +112,11 @@ export default function LeasingPage() {
   const status = useGetSnowflakeStatus();
 
   const setQuarter = () => {
-    const now = new Date();
-    const q = Math.floor(now.getMonth() / 3);
-    const start = new Date(now.getFullYear(), q * 3, 1);
-    const end = new Date(now.getFullYear(), q * 3 + 3, 0);
-    const iso = (d: Date) =>
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-    setStartDate(iso(start));
-    setEndDate(iso(end));
+    // Same quarter math as the API's buildFilters default (shared helper —
+    // keeps this button and the lone-date guard in lockstep).
+    const { start, end } = serverDefaultRange("quarter");
+    setStartDate(start);
+    setEndDate(end);
   };
   const resetRange = () => {
     setStartDate("");
@@ -198,6 +200,7 @@ export default function LeasingPage() {
             </div>
             <InvertedRangeHint show={invertedRange} />
             <CrossYearRangeHint show={crossYearRange} />
+            <LoneDateHint conflict={loneDateConflict} />
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="ghost" onClick={resetRange} data-testid="button-ytd">
                 Current Year (default)

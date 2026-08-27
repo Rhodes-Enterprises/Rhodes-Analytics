@@ -7,8 +7,9 @@
     "dev": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:csv": "esbuild scripts/test-csv.ts --bundle --platform=node --format=esm --outfile=dist-test/test-csv.mjs --log-level=warning && node dist-test/test-csv.mjs"
+    "test": "node --test src/lib/*.test.ts",
+    "test:csv": "esbuild scripts/test-csv.ts --bundle --platform=node --format=esm --outfile=dist-test/test-csv.mjs --log-level=warning && node dist-test/test-csv.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "esbuild": "0.27.3",

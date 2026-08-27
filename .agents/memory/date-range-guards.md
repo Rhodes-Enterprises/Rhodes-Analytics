@@ -1,27 +1,31 @@
 ---
 name: Client-side date-range guards
-description: Why dashboard date guards must cover lone (single-set) dates, not just complete pairs — the API fills missing dates from today.
+description: Dashboard date guards must cover lone (single-set) dates AND derive "today" from America/Chicago like the server — viewer-clock guards fail at boundaries.
 ---
 
-# Client-side date-range guards must cover lone dates
+# Client-side date-range guards
 
-The dashboards' committed-date hook refuses to apply ranges the API would 400 on
-(inverted, or spanning two calendar years — goals are issued per fiscal year),
-showing a gentle inline hint and keeping the last valid range applied instead.
+**Rule 1 — guard lone dates, not just complete pairs.** The API fills a
+missing start/end from a server-side default range, so a single committed
+date can already form a range the server will reject (cross-year, or
+inverted against the default) before the user picks the second date. Every
+client-side range-validity rule needs a lone-date arm, or the destructive
+error banner flashes mid-pick.
 
-**Rule:** when adding a new range validity rule client-side, also handle the
-*single-set-date* state. The API defaults a missing start/end from today
-(current quarter for overview/website/funnel, current year for leasing), so a
-lone date can already violate the rule before the user picks the second date.
+**Rule 2 — client guards must use the company calendar, not the viewer's
+clock.** The server computes "today" in America/Chicago. Any client-side
+mirror of a server default must anchor to that same tz-database date
+(Intl.DateTimeFormat en-CA with timeZone America/Chicago) instead of the
+local clock, or viewers in other timezones disagree with the server around
+quarter/year boundaries — over-holding valid picks or letting a
+guaranteed-400 through. A code review rejected a viewer-clock version for
+exactly this; "approximate within hours of midnight" is not acceptable for
+a guard whose whole job is making the 400 impossible.
 
-**Why:** a user picking "Dec 2025 → Feb 2026" sets the start first; with only
-start=2025-12-01 committed, the server resolves end to a 2026 default and 400s
-— flashing the destructive banner mid-flow, and leaving a stale error visible
-even after the hint appears (the "last valid pair" latched by the hook was
-itself a failing query). Guarding a lone date outside the current year fixes
-this without replicating server defaults exactly.
-
-**How to apply:** extend `useCommittedDateRange` (rhodes-analytics hooks) and
-mirror the rules in `buildFilters`/`buildLeasingFilters` (api-server dashboards
-routes). Known remaining gap: a lone *same-year* start after the current
-quarter's end still 400s as inverted on quarter-defaulted pages.
+**How to apply:** keep the client's default-range math (quarter/year
+bounds) in one pure helper with an injectable YYYY-MM-DD "today" (string
+arithmetic only — calendar-quarter bounds are fixed dates, so no Date/tz
+math), shared by the guards and any "current quarter/year" buttons, with
+`node --test` boundary tests injecting dates on both sides of each
+transition. If the server's default-filling rules ever change, that helper
+and the pages' default-range arguments must change in lockstep.

@@ -78,9 +78,8 @@ const uiDist = join(uiDir, "dist", "public");
 // ---------- payload shape (the audited API contract this page binds) ----------
 
 interface MatrixCell {
-  /** null only for the unknown-bucket rows, which have no goals — the UI renders dashes. */
-  fullSpanGoal: number | null;
-  toDateGoal: number | null;
+  fullSpanGoal: number;
+  toDateGoal: number;
   actual: number;
   ptgPercent: number | null;
 }
@@ -118,10 +117,9 @@ interface OverviewPayload {
   trafficMatrix: {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
-    /** Rows with neither 'Online' nor 'Onsite' label — no goals exist for the bucket. */
+    /** Actual-only bucket for rows with no Online/Onsite label (no goals exist for it). */
     unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
-    unknown: { leads: number; tours: number; sales: number };
     newWebsiteUsers: number;
   };
   divisions: BreakdownRow[];
@@ -540,17 +538,17 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     return;
   }
   const m = p.trafficMatrix;
-  // The unknown-bucket rows (rows carrying neither channel label) bind their
-  // Actual to trafficMatrix.unknown.* — plain numbers with no goals, so the
-  // UI renders dashes in both goal columns and PTG %, and checkCell's
-  // null-handling asserts the dashes stay dashes.
-  const unknownCell = (actual: number): MatrixCell => ({
-    fullSpanGoal: null,
-    toDateGoal: null,
-    actual,
-    ptgPercent: null,
-  });
-  const bindings: Record<string, MatrixCell> = {
+  // Goal/PTG columns may be null for actual-only rows (rendered as a dash) —
+  // the unknown-channel rows below have no goals by design.
+  const bindings: Record<
+    string,
+    {
+      fullSpanGoal: number | null;
+      toDateGoal: number | null;
+      actual: number;
+      ptgPercent: number | null;
+    }
+  > = {
     "Website Users": m.online.websiteUsers,
     "Online Leads": m.online.leads,
     "Online Tours": m.online.tours,
@@ -558,16 +556,14 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Onsite Leads": m.onsite.leads,
     "Onsite Tours": m.onsite.tours,
     "Onsite Sales": m.onsite.sales,
-    "Unknown Leads": unknownCell(m.unknown.leads),
-    "Unknown Tours": unknownCell(m.unknown.tours),
-    "Unknown Sales": unknownCell(m.unknown.sales),
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };
-  // The unknown-channel section renders only when the bucket is non-empty
-  // (mirrors the page's hasUnknown logic). Its rows are actual-only: the
-  // goal and PTG cells render the "–" placeholder, which checkCell requires
-  // to correspond to null API values.
+  // The page renders the unknown-channel section only when the bucket has
+  // activity (TrafficMatrix's hasUnknown) — mirror that exactly: bind the
+  // rows when they must render, omit them when they must not (an "Unknown …"
+  // row that renders for an empty bucket then fails as an unmatched label,
+  // and a missing row for a busy bucket fails the completeness pass).
   const u = m.unknown;
   if (u && (u.leads > 0 || u.tours > 0 || u.sales > 0)) {
     bindings["Unknown Leads"] = { fullSpanGoal: null, toDateGoal: null, actual: u.leads, ptgPercent: null };
