@@ -526,6 +526,7 @@ function checkKpis(dom: DomSnapshot, p: OverviewPayload): void {
   }
 }
 
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
   if (!dom.matrix) {
     fail("traffic matrix", 'table [data-testid="table-traffic-matrix"] not found on page');

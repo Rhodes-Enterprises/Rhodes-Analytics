@@ -133,7 +133,7 @@
  * on both sides and still "match" without that guard. Each row's displayed
  * leadsYtd/toursYtd/salesYtd values are also compared against those
  * independent no-join baselines, inside a window that tolerates the
- * endpoint's per-UTC-day cache lagging today's activity — so a broken join
+ * endpoint's per-Chicago-day cache lagging today's activity — so a broken join
  * in the endpoint's L/T/S CTEs fails the audit even when zero-vs-nonzero
  * selling status survives.
  *
@@ -1701,7 +1701,7 @@ function cmp(a: string, b: string): number {
  *     that inflates or zeroes a community's numbers fails even when the
  *     zero-vs-nonzero selling status survives.
  *
- * The endpoint caches per UTC day, so a community whose first-ever YTD
+ * The endpoint caches per Chicago day, so a community whose first-ever YTD
  * activity lands between the cache fill and this audit could transiently
  * flip isSelling; that is vanishingly rare and a rerun clears it. The
  * numeric YTD check tolerates that same cache lag deliberately (today-dated
@@ -1710,11 +1710,12 @@ function cmp(a: string, b: string): number {
 async function auditCommunities(): Promise<boolean> {
   console.log(`\n=== Community List (/dashboards/communities) ===`);
 
-  // The endpoint defines YTD in UTC (Jan 1 of the current UTC year through
-  // the current UTC date); the baseline mirrors that window exactly.
-  const todayUtc = new Date().toISOString().slice(0, 10);
-  const ytdStart = `${todayUtc.slice(0, 4)}-01-01`;
-  console.log(`YTD window: ${ytdStart}..${todayUtc}`);
+  // The endpoint defines YTD on the America/Chicago business calendar (Jan 1
+  // of the current Chicago year through the current Chicago date), like every
+  // other dashboard; the baseline mirrors that window exactly.
+  const todayChi = todayChicago();
+  const ytdStart = `${todayChi.slice(0, 4)}-01-01`;
+  console.log(`YTD window: ${ytdStart}..${todayChi}`);
 
   const url = `${API_BASE}/dashboards/communities`;
   let body: { communities: CommunityRow[] };
@@ -1732,50 +1733,33 @@ async function auditCommunities(): Promise<boolean> {
   }
   const apiRows = body.communities;
 
-  // Each YTD baseline also splits out how much of the count is stamped with
-  // today's UTC date (the only slice the endpoint's per-UTC-day cache can
-  // legitimately lag behind). Leads and tours scan the same contact rows and
-  // differ only in date column, so ONE grouped conditional-aggregation scan
-  // computes both YTD baselines and their today-dated slices. A contact in
-  // neither window is dropped by the outer WHERE and lands in no COUNT_IF;
-  // a group present for only one metric reads 0 for the other, exactly like
-  // the absent group the old per-metric GROUP BYs produced (every consumer
-  // does .get(dev) ?? 0). A today-dated row is always inside its own YTD
-  // window, so the today COUNT_IFs count the same rows the old windowed
-  // queries' COUNT_IFs did. Bind order follows SQL text order through the
-  // subquery SELECT list.
-  interface CommunityContactRow {
-    DEV: string | null;
-    LEADS_N: number;
-    LEADS_TODAY: number;
-    TOURS_N: number;
-    TOURS_TODAY: number;
-  }
-  const [dimRows, contactRows, saleRows] = await Promise.all([
+  const [dimRows, leadRows, tourRows, saleRows] = await Promise.all([
     sfQuery<DimRawRow>(
       `SELECT DEVELOPMENT_NAME, COMPANY_NAME,
               DEVELOPMENT_HAS_GOALS_FLAG, RENTAL_COMMUNITY_FLAG
        FROM DM_COMPANY_DEVELOPMENT
        WHERE COMPANY_NAME ILIKE '%esperanza%'`,
     ),
-    sfQuery<CommunityContactRow>(
-      `SELECT C.DEV,
-              COUNT_IF(C.IN_LEAD_WINDOW) AS LEADS_N,
-              COUNT_IF(C.LEAD_TODAY) AS LEADS_TODAY,
-              COUNT_IF(C.IN_TOUR_WINDOW) AS TOURS_N,
-              COUNT_IF(C.TOUR_TODAY) AS TOURS_TODAY
-       FROM (
-         SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV,
-                CONTACT_CREATE_DATE BETWEEN ? AND ? AS IN_LEAD_WINDOW,
-                CONTACT_CREATE_DATE = ? AS LEAD_TODAY,
-                EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ? AS IN_TOUR_WINDOW,
-                EHI_MIN_FIRST_TOUR_DATE = ? AS TOUR_TODAY
-         FROM DM_CONTACTS
-         WHERE ${isLeadSql()}
-       ) C
-       WHERE C.IN_LEAD_WINDOW OR C.IN_TOUR_WINDOW
+    // Each YTD baseline also splits out how much of the count is stamped with
+    // today's Chicago date (N_TODAY) — the only slice the endpoint's
+    // per-Chicago-day cache can legitimately lag behind; it must use the SAME
+    // "today" as the endpoint's window or the drift check breaks. Bind order:
+    // COUNT_IF's ? precedes the WHERE BETWEEN binds in SQL text order.
+    sfQuery<YtdBaselineRow>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
+              COUNT_IF(CONTACT_CREATE_DATE = ?) AS N_TODAY
+       FROM DM_CONTACTS
+       WHERE ${isLeadSql()} AND CONTACT_CREATE_DATE BETWEEN ? AND ?
        GROUP BY 1`,
-      [ytdStart, todayUtc, todayUtc, ytdStart, todayUtc, todayUtc],
+      [todayChi, ytdStart, todayChi],
+    ),
+    sfQuery<YtdBaselineRow>(
+      `SELECT CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
+              COUNT_IF(EHI_MIN_FIRST_TOUR_DATE = ?) AS N_TODAY
+       FROM DM_CONTACTS
+       WHERE ${isLeadSql()} AND EHI_MIN_FIRST_TOUR_DATE BETWEEN ? AND ?
+       GROUP BY 1`,
+      [todayChi, ytdStart, todayChi],
     ),
     sfQuery<YtdBaselineRow>(
       `SELECT DEAL_EHI_COMMUNITY_OF_INTEREST AS DEV, COUNT(*) AS N,
@@ -1784,7 +1768,7 @@ async function auditCommunities(): Promise<boolean> {
        WHERE ${isSaleSql()}
          AND CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
        GROUP BY 1`,
-      [todayUtc, ytdStart, todayUtc],
+      [todayChi, ytdStart, todayChi],
     ),
   ]);
 
@@ -1834,17 +1818,8 @@ async function auditCommunities(): Promise<boolean> {
     }
     return { total, today };
   };
-  const leadsBy = new Map<string, number>();
-  const leadsToday = new Map<string, number>();
-  const toursBy = new Map<string, number>();
-  const toursToday = new Map<string, number>();
-  for (const r of contactRows) {
-    if (!r.DEV) continue;
-    leadsBy.set(r.DEV, Number(r.LEADS_N) || 0);
-    leadsToday.set(r.DEV, Number(r.LEADS_TODAY) || 0);
-    toursBy.set(r.DEV, Number(r.TOURS_N) || 0);
-    toursToday.set(r.DEV, Number(r.TOURS_TODAY) || 0);
-  }
+  const { total: leadsBy, today: leadsToday } = toCountMaps(leadRows);
+  const { total: toursBy, today: toursToday } = toCountMaps(tourRows);
   const { total: salesBy, today: salesToday } = toCountMaps(saleRows);
 
   const rowsByDev = new Map<string, DimRawRow[]>();
@@ -1993,7 +1968,7 @@ async function auditCommunities(): Promise<boolean> {
   }
 
   // --- 5. Displayed YTD numbers vs independent per-community baselines ---
-  // The endpoint caches per UTC day, so its L/T/S counts reflect Snowflake as
+  // The endpoint caches per Chicago day, so its L/T/S counts reflect Snowflake as
   // of some earlier moment TODAY, while the baselines above are fresh. In
   // between, new rows stamped with today's date can land (and, rarely,
   // past-dated rows get restated). Exact equality would flake on every busy

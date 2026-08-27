@@ -27,6 +27,18 @@ function ptg(actual: number, goal: number): number | null {
 
 const n = (v: unknown) => Number(v) || 0;
 
+/**
+ * Business "today" (YYYY-MM-DD) on the America/Chicago calendar — the same
+ * day convention the API routes use for default ranges (see todayChicago in
+ * routes/dashboards.ts). Dashboards must never derive day windows from UTC:
+ * a UTC "today" flips at 6-7pm Chicago, which would roll YTD windows to the
+ * new year hours early on New Year's Eve.
+ */
+function todayChicago(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+  }).format(new Date());
+}
 async function goalTypeFor(
   fiscalYear: number,
   target: TargetKind,
@@ -644,8 +656,11 @@ export async function getEhiGoals(f: DashboardFilters) {
 // ---------- Community List ----------
 
 export async function getCommunityList() {
-  const yearStart = `${new Date().getFullYear()}-01-01`;
-  const today = new Date().toISOString().slice(0, 10);
+  // YTD window and cache key follow the America/Chicago business calendar,
+  // like every other dashboard — not UTC, which would reset the list's YTD
+  // numbers ~6 hours early on Dec 31 evening (Chicago).
+  const today = todayChicago();
+  const yearStart = `${today.slice(0, 4)}-01-01`;
   return cached(`communities:v2:${today}`, async () => {
     const rows = await querySnowflake<{
       DEVELOPMENT_NAME: string;
