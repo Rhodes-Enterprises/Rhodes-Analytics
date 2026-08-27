@@ -68,6 +68,18 @@
  *   and the labels actually present. Quiet windows (total below
  *   AUDIT_CHANNEL_GUARD_MIN_TOTAL) are exempt so day one of a year cannot
  *   false-positive. Mirrors the chLabels guards in audit-dashboard.ts.
+ * - GA Yes/No flag label-drift guard (default view): the funnel's
+ *   webTraffic column counts FCT_GOOGLE_ANALYTICS_EVENT_LEVEL rows with
+ *   IS_SESSION_START = 'Yes' (fetchTrafficCount/fetchMonthlyTraffic in
+ *   src/lib/leasing.ts), and this audit has no independent GA baseline for
+ *   it — the funnel trend-vs-totals net compares the API against itself.
+ *   If upstream relabels the Yes/No values ('Yes' -> 'TRUE'/'true'/1), the
+ *   dashboard ships zeroed web traffic with every check passing 0=0. The
+ *   shared guard (ga-property-guard.ts, also run by audit-dashboard.ts)
+ *   FAILS when a property's GA rows exist for the audited range but zero
+ *   carry an expected flag value, naming the values actually present;
+ *   properties below AUDIT_GA_FLAG_GUARD_MIN_TOTAL distinct users are too
+ *   quiet to judge and exempt.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:leasing
@@ -81,13 +93,17 @@
  *                        leases, funnel leads, funnel first tours) for the
  *                        channel label-drift guards to judge a window
  *                        (default 10, same knob as audit-dashboard.ts)
+ *   AUDIT_GA_FLAG_GUARD_MIN_TOTAL
+ *                        minimum GA users on a flag's own property for the
+ *                        GA Yes/No flag guard to judge the window
+ *                        (default 10, same knob as audit-dashboard.ts)
  *
  * Exits 0 when all values match within tolerance, 1 otherwise.
  */
 
 import { querySnowflake as rawQuerySnowflake } from "../src/lib/snowflake";
+import { auditGaFlagLabels } from "./ga-property-guard";
 import { fetchJsonWithRetry } from "./lib/fetch-retry";
-
 /**
  * The Snowflake proxy rate-limits per repl (~10 RPS). The audit fires
  * bursts of parallel baseline queries, so serialize them through a small
@@ -269,6 +285,14 @@ interface Scenario {
    * zeroes the opposite channel.
    */
   withChannelLabelGuard?: boolean;
+  /**
+   * Run the shared GA Yes/No flag label-drift guard: fail when a property's
+   * GA rows exist for the audited range but zero carry an expected flag
+   * value (IS_SESSION_START = 'Yes' feeds this dashboard's webTraffic;
+   * IS_NEW_USER = 'Yes' feeds the Overview's NEW-users columns). Set on the
+   * default view — one pass per run is coverage enough.
+   */
+  withGaFlagGuard?: boolean;
 }
 
 function toQueryParams(f: ScenarioFilters): Record<string, string> {
@@ -432,7 +456,6 @@ const EMPTY_GOAL_SUMS: GoalSums = {
   byMonth: new Map(),
   byCommunity: new Map(),
 };
-
 /**
  * Full-span + to-date goal sums for several goal types in ONE query (the
  * funnel needs up to 6 types per scenario; grouping keeps the audit under
@@ -669,6 +692,18 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     console.log("-- channel label-drift guards");
     await auditChannelLabels(ratified, onlineRatified, onsiteRatified, expStart, expTo, f);
     await auditFunnelChannelLabels(expStart, expTo, f);
+  }
+
+  // ---- GA Yes/No flag label-drift guard ----
+  // The funnel's webTraffic column keys on IS_SESSION_START = 'Yes', and
+  // this audit has no independent GA baseline for it (the funnel
+  // trend-vs-totals net compares the API against itself), so a relabeled
+  // Yes/No value would ship zeroed web traffic with every check passing.
+  // The shared guard fails when GA rows exist for the audited range but
+  // zero carry the expected flag value.
+  if (scenario.withGaFlagGuard) {
+    console.log("-- GA Yes/No flag label-drift guard");
+    if (!(await auditGaFlagLabels(expStart, expTo))) failures++;
   }
 
   // ---- Community summary ----
@@ -1371,6 +1406,7 @@ async function main() {
       filters: {},
       requireFunnelData: true,
       withChannelLabelGuard: true,
+      withGaFlagGuard: true,
     },
     { name: `community filter (${community})`, filters: { community } },
     { name: `channel filter (${channel})`, filters: { channel } },
@@ -1414,7 +1450,9 @@ async function main() {
         "baselines or internal consistency. Likely causes: a filter bound to " +
         "the wrong column, missing TRIM on community, wrong goal-type " +
         "resolution, ignored date parameters, stale cached data, relabeled " +
-        "channel values (see any chLabels failure above), the monthly " +
+        "channel values (see any chLabels failure above), relabeled analytics " +
+        "Yes/No flag values zeroing web traffic (see any gaFlag failure " +
+        "above), the monthly " +
         "trend queries drifting from the funnel totals queries, or a funnel " +
         "stage query drifting from its GA/DM_CONTACTS/DM_GOALS definition " +
         "(wrong stage date column, dropped lead definition, or broken " +
@@ -1426,15 +1464,6 @@ async function main() {
   process.exit(0);
 }
 
-
-/**
- * GA mapping domain — communities with any matched development row at all,
- * independent of the scenario's date range. Distinguishes "mapped but zero
- * sessions in range" (cell with actual 0) from "no GA mapping" (null).
- * Memoized: the domain is range-independent by construction, so one query
- * serves every scenario.
- */
-let gaMappedDomainCache: Promise<Set<string>> | undefined;
 
 /**
  * Contact-stage actual baseline from DM_CONTACTS, split by channel:

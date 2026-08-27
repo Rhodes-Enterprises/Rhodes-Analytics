@@ -1,7 +1,7 @@
 /**
- * GA data guards — shared by audit-dashboard.ts and audit-yoy.ts.
+ * GA data guards — shared by audit-dashboard.ts, audit-yoy.ts, and audit-leasing.ts.
  *
- * Two upstream failure classes on FCT_GOOGLE_ANALYTICS_EVENT_LEVEL can zero
+ * Three upstream failure classes on FCT_GOOGLE_ANALYTICS_EVENT_LEVEL can zero
  * the dashboards' website-traffic numbers while every value check keeps
  * passing, so each gets its own alarm here:
  *
@@ -35,11 +35,25 @@
  *    falls more than AUDIT_GA_MAX_LAG_DAYS days behind today (default 14,
  *    comfortably above the normal lag), reporting the max date found per
  *    property.
+ *
+ * 3. Yes/No flag guard (auditGaFlagLabels), one layer deeper. Within a
+ *    property's rows, the Overview NEW-users numbers key on IS_NEW_USER =
+ *    'Yes' and the Leasing web-traffic counts key on IS_SESSION_START =
+ *    'Yes' — on both the API and audit sides. If upstream relabels those
+ *    values ('Yes' -> 'TRUE'/'true'/1), the affected columns zero out while
+ *    their neighbors (total users) stay correct, which makes the drift easy
+ *    to miss on screen. When a property's GA rows exist for the range but
+ *    ZERO carry the expected flag value, the audit fails, naming the flag
+ *    column and the values actually present. Properties whose activity is
+ *    below AUDIT_GA_FLAG_GUARD_MIN_TOTAL distinct users are exempt the same
+ *    way — which also keeps a missing property from double-failing here on
+ *    top of the property guard's own finding. The guard's decision logic
+ *    (including that dedup-vs-sum distinction) is pinned by the mocked
+ *    self-test in audit-flag-guard.ts, run as part of audit:all.
  */
 
 import { querySnowflake } from "../src/lib/snowflake";
 import { GA_PROPERTY_NAME } from "../src/lib/business-defs";
-
 export const GA_PROPERTY_GUARD_MIN_TOTAL = Number(
   process.env.AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL ?? "10",
 );
@@ -136,6 +150,10 @@ export async function auditGaPropertyLabels(
   }
   return !failed;
 }
+
+export const GA_FLAG_GUARD_MIN_TOTAL = Number(
+  process.env.AUDIT_GA_FLAG_GUARD_MIN_TOTAL ?? "10",
+);
 
 /** Same business-day convention the audit scripts use for "today". */
 function todayChicago(): string {
@@ -258,4 +276,136 @@ interface PropertyMaxRow {
   LABEL: string;
   /** DATE column, converted to 'YYYY-MM-DD'; null if the group has no dates. */
   MAX_DATE: string | null;
+}
+
+export interface FlagRow {
+  LABEL: string;
+  /** 1 on the () grouping-set row — the whole-property aggregate — else 0. */
+  G: number;
+  N: number;
+  USERS: number;
+}
+
+/**
+ * Query runner used by auditGaFlagLabels, injectable so the mocked
+ * self-test (audit-flag-guard.ts) can drive the real decision logic with
+ * fabricated rows and no Snowflake. Production call sites always use the
+ * default (querySnowflake).
+ */
+export type FlagGuardQuery = (
+  sql: string,
+  binds: string[],
+) => Promise<FlagRow[]>;
+/**
+ * Runs the Yes/No flag guard over one inclusive GOOGLE_ANALYTICS_DATE range
+ * (one aggregate query per expected flag, scoped to the property whose
+ * dashboard depends on it, run sequentially to stay under the proxy rate
+ * limit). Returns false when any expected flag value is entirely absent
+ * from a materially non-quiet property window.
+ *
+ * The quiet-window threshold comes from the query's () grouping-set row,
+ * which counts DISTINCT users across ALL of the property's rows. Summing
+ * the per-label distinct counts instead would tally a user once per flag
+ * value they appear under (e.g. IS_NEW_USER = 'Yes' on their first visit,
+ * 'No' afterwards) and overstate activity, so a genuinely quiet window
+ * could fail the guard instead of being exempt.
+ */
+export async function auditGaFlagLabels(
+  expStart: string,
+  expTo: string,
+  runQuery: FlagGuardQuery = (sql, binds) => querySnowflake<FlagRow>(sql, binds),
+): Promise<boolean> {
+  let failed = false;
+  for (const exp of EXPECTED_GA_FLAGS) {
+    const name = `gaFlag:${exp.column}`;
+    const rows = await runQuery(
+      `SELECT COALESCE(${exp.column}, '(null)') AS LABEL,
+              GROUPING(${exp.column}) AS G,
+              COUNT(*) AS N,
+              COUNT(DISTINCT USER_PSEUDO_ID) AS USERS
+       FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+       WHERE PROPERTY = ? AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?
+       GROUP BY GROUPING SETS ((${exp.column}), ())
+       ORDER BY G, N DESC`,
+      [exp.property, expStart, expTo],
+    );
+
+    const labelRows = rows.filter((r) => Number(r.G) !== 1);
+    const totalRow = rows.find((r) => Number(r.G) === 1);
+    const totalUsers = Number(totalRow?.USERS) || 0;
+    if (totalUsers < GA_FLAG_GUARD_MIN_TOTAL) {
+      console.log(
+        `OK   ${name}   '${exp.property}' GA users=${totalUsers} < ${GA_FLAG_GUARD_MIN_TOTAL} in ` +
+          `${expStart}..${expTo} — window too quiet to judge flag drift`,
+      );
+      continue;
+    }
+
+    const match = labelRows.find((r) => r.LABEL === exp.value);
+    if (match) {
+      console.log(
+        `OK   ${name} = '${exp.value}' present on '${exp.property}' rows ` +
+          `(${Number(match.N) || 0} rows, ${Number(match.USERS) || 0} users in ${expStart}..${expTo})`,
+      );
+      continue;
+    }
+
+    const present =
+      labelRows
+        .map((r) => `'${r.LABEL}' (${Number(r.N) || 0} rows, ${Number(r.USERS) || 0} users)`)
+        .join(", ") || "(no rows)";
+    console.error(
+      `FAIL ${name} '${exp.property}' GA rows exist in ${expStart}..${expTo} (${totalUsers} users) ` +
+        `but ZERO carry ${exp.column} = '${exp.value}' on FCT_GOOGLE_ANALYTICS_EVENT_LEVEL — the ` +
+        `expected flag value is missing from the data; values present: ${present}. ${exp.usedBy} ` +
+        `hardcode this literal, so every affected number computes 0 while neighboring totals stay ` +
+        `correct, and its checks pass 0=0. If the flag values were relabeled upstream, update ` +
+        `those literals to the new value.`,
+    );
+    failed = true;
+  }
+  return !failed;
+}
+
+/**
+ * Every Yes/No-style flag literal a dashboard metric keys on. A relabel of
+ * ANY of these silently zeroes that metric on both the API and audit sides
+ * while neighboring columns stay correct, so the guard checks them all
+ * wherever it runs.
+ */
+export const EXPECTED_GA_FLAGS: ExpectedGaFlag[] = [
+  {
+    column: "IS_NEW_USER",
+    value: "Yes",
+    property: GA_PROPERTY_NAME,
+    usedBy:
+      "The Overview dashboard's NEW-users columns (fetchWebsiteUsers in src/lib/overview-targets.ts), " +
+      "the marketing website-traffic dashboard (src/lib/marketing-dashboards.ts), AND the GA " +
+      "baselines in audit-dashboard.ts",
+  },
+  {
+    column: "IS_SESSION_START",
+    value: "Yes",
+    property: "Rhodes Living",
+    usedBy:
+      "The Leasing dashboard's web-traffic counts (fetchTrafficCount/fetchMonthlyTraffic in " +
+      "src/lib/leasing.ts — the funnel's webTraffic column and its monthly trend)",
+  },
+];
+
+interface ExpectedGaFlag {
+  /** Flag column on FCT_GOOGLE_ANALYTICS_EVENT_LEVEL the queries filter on. */
+  column: string;
+  /** Literal flag value the dashboard queries and baselines hardcode. */
+  value: string;
+  /**
+   * PROPERTY the consuming queries scope to. The guard judges the flag
+   * inside that property's rows only, so the failure points at the
+   * dashboard actually affected — and a property that is missing entirely
+   * stays the property guard's finding (this guard's quiet-window exemption
+   * skips it instead of piling on a second failure).
+   */
+  property: string;
+  /** Where the literal lives, so a failure names the exact fix. */
+  usedBy: string;
 }

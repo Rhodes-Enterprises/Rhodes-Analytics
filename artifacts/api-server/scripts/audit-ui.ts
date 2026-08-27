@@ -103,8 +103,11 @@ const uiDist = join(uiDir, "dist", "public");
 
 interface MatrixCell {
   fullSpanGoal: number;
+
   toDateGoal: number;
+
   actual: number;
+
   ptgPercent: number | null;
 }
 interface BreakdownRow {

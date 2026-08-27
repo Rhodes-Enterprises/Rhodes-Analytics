@@ -106,6 +106,19 @@
  * GA users across all properties below AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL)
  * are exempt so they cannot false-positive.
  *
+ * One layer deeper, the NEW-users columns key on IS_NEW_USER = 'Yes' on
+ * both sides (and the Leasing pages key their web traffic on
+ * IS_SESSION_START = 'Yes' the same way), so an upstream relabel of the
+ * Yes/No values ('Yes' -> 'TRUE'/'true'/1) would zero those columns while
+ * the total-users columns stayed correct — every check passing 0=0 with
+ * nothing visibly wrong on screen. The default view therefore also runs
+ * the shared GA Yes/No flag label-drift guard (same module, also run by
+ * audit-leasing.ts): a property's GA rows existing in the range with ZERO
+ * carrying an expected flag value fail the audit, naming the flag column
+ * and the values actually present. Properties below
+ * AUDIT_GA_FLAG_GUARD_MIN_TOTAL distinct users in the range are exempt the
+ * same way.
+ *
  * That exemption leaves one hole: if the GA export DIES outright (zero rows
  * loaded for days or weeks), the traffic numbers shrink toward zero and
  * every check still passes — 0=0 comparisons, or the quiet-window
@@ -178,6 +191,10 @@
  *                        minimum total GA users (across all properties) for
  *                        the GA property label-drift guard to judge the
  *                        window (default 10)
+ *   AUDIT_GA_FLAG_GUARD_MIN_TOTAL
+ *                        minimum GA users on a flag's own property for the
+ *                        GA Yes/No flag guard to judge the window
+ *                        (default 10)
  *   AUDIT_GA_MAX_LAG_DAYS
  *                        maximum days MAX(GOOGLE_ANALYTICS_DATE) may trail
  *                        today before the GA freshness guard fails the
@@ -194,13 +211,12 @@
 
 import { querySnowflake as querySnowflakeRaw } from "../src/lib/snowflake";
 import { DEV_DIM } from "../src/lib/dev-dim";
-import { auditGaPropertyLabels } from "./ga-property-guard";
+import { auditGaFlagLabels, auditGaFreshness, auditGaPropertyLabels } from "./ga-property-guard";
 import { fetchJsonWithRetry } from "./lib/fetch-retry";
 import { isGaTrafficSql, isLeadSql, isSaleSql } from "../src/lib/business-defs";
 
 // Default to the API server's own local port (same PORT contract the server
-// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
-const API_BASE =
+// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
 const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
@@ -454,6 +470,16 @@ interface Scenario {
    * Range-independent, so default view only: once per audit pass.
    */
   withGaFreshnessGuard?: boolean;
+
+  /**
+   * Run the shared GA Yes/No flag label-drift guard: fail when a property's
+   * GA rows exist for the range but zero carry an expected flag value
+   * (IS_NEW_USER / IS_SESSION_START = 'Yes') — the all-zero signature of
+   * relabeled Yes/No values upstream, which zeroes the dependent columns
+   * while total users stay correct. Default view only, like the property
+   * guard.
+   */
+  withGaFlagGuard?: boolean;
 }
 
 interface Frag {
@@ -593,6 +619,7 @@ interface ScenarioResult {
   /** set on every range-honoring scenario result */
   headline?: HeadlineBaselines;
 }
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 // hint: Logic changed on both sides. Requires understanding intent of each change.
 async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   const f = scenario.filters;
@@ -849,6 +876,20 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
   // property, naming the property values actually present.
   if (scenario.withGaPropertyGuard) {
     if (!(await auditGaPropertyLabels(expStart, expTo))) failed = true;
+  }
+
+  // ---- GA Yes/No flag label-drift guard ----
+  // One layer deeper than the property guard: the NEW-users headline and
+  // breakdown columns key on IS_NEW_USER = 'Yes' on BOTH sides (the API's
+  // fetchWebsiteUsers and this audit's GA baselines), and the Leasing web
+  // traffic keys on IS_SESSION_START = 'Yes' the same way. A relabel of the
+  // Yes/No values zeroes those columns on both sides while the total-users
+  // columns stay correct, so every check passes 0=0 and nothing looks wrong
+  // on screen. The shared guard (ga-property-guard.ts) fails when a
+  // property's GA rows exist for the range but zero carry the expected flag
+  // value, naming the values actually present.
+  if (scenario.withGaFlagGuard) {
+    if (!(await auditGaFlagLabels(expStart, expTo))) failed = true;
   }
 
   if (scenario.pinTargets) {
@@ -1534,6 +1575,7 @@ async function main() {
       withChannelLabelGuard: true,
       withGaPropertyGuard: true,
       withGaFreshnessGuard: true,
+      withGaFlagGuard: true,
     },
     { name: `company filter (${company})`, filters: { company }, withBreakdowns: true },
     { name: `development filter (${development})`, filters: { development } },
@@ -1664,7 +1706,8 @@ async function main() {
         "an online/onsite split keyed to the wrong channel column or with swapped " +
         "labels, upstream renaming of the 'Online'/'Onsite' channel values (see any " +
         "chLabels guard failure above), upstream renaming of the GA PROPERTY values " +
-        "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
+        "(see any gaProperty guard failure above), upstream relabeling of the GA Yes/No " +
+        "flag values like IS_NEW_USER (see any gaFlag guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
         "name, a goal-type walk-back/target-resolution regression, a wrong " +
         "GOAL_TYPE resolution or broken goal to-date cutoff, ignored date " +
         "parameters, changed filters, stale cached data, " +
@@ -1677,7 +1720,6 @@ async function main() {
   console.log("\nAudit passed: all totals within tolerance across all scenarios.");
   process.exit(0);
 }
-
 /**
  * Audits every goal-derived number in one scenario's response: the KPI
  * row's salesGoal / salesTdGoal, each traffic-matrix cell's fullSpanGoal /
