@@ -43,7 +43,8 @@ const TRANSIENT_NAMES = new Set([
   "BodyTimeoutError",
   "SocketError",
   // AbortSignal.timeout() rejects with a DOMException named "TimeoutError".
-  // The audits' fetch helper uses it as a per-request deadline, and a request
+  // The audits' fetch helper and the live server's Snowflake proxy calls
+  // (src/lib/snowflake.ts) use it as a per-request deadline, and a request
   // that produced no response within its deadline is exactly the stalled
   // transport this classifier exists for. Deliberate cancellations reject as
   // "AbortError" instead and stay non-retryable.
@@ -96,6 +97,19 @@ export function isTransientNetworkError(err: unknown): boolean {
     current = cause;
   }
   return false;
+}
+
+/**
+ * True when the error is the "TimeoutError" DOMException that
+ * AbortSignal.timeout() rejects with — a request that hit its per-request
+ * stall deadline (already transient per the classifier above). Callers use
+ * it to swap the bare DOMException ("The operation was aborted due to
+ * timeout") for an error that names the stalled request.
+ */
+export function isRequestTimeoutError(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TimeoutError"
+  );
 }
 
 /**
