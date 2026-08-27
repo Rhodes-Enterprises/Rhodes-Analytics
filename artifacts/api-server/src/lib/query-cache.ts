@@ -1,5 +1,6 @@
 import { logger } from "./logger";
 import { emitCacheAccess } from "./cache-observer";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
  * Shared per-process query cache with stale-while-revalidate.
@@ -38,8 +39,24 @@ interface Entry {
   refreshFailedAt?: number; // last failed background refresh, if any
 }
 
-// ---------- Global background-refresh gate (all caches share it) ----------
+/**
+ * Lets a route report how old the numbers it just served actually are.
+ *
+ * withDataFreshness(fn) runs fn under an AsyncLocalStorage tracker; every
+ * cached() lookup fn (transitively) performs records when its entry was
+ * loaded from the upstream source. The OLDEST entry wins — the honest
+ * "data as of" stamp for a payload assembled from many cached queries —
+ * and `refreshing` reports whether any entry was served stale with a
+ * background refresh underway (newer numbers are moments away).
+ *
+ * Code that never wraps (cache warm-up, audit scripts) pays nothing:
+ * reporting is a no-op when no tracker is active.
+ */
 
+interface FreshnessTracker {
+  oldestAt: number; // Infinity until the first lookup reports
+  refreshing: boolean;
+}
 let activeRefreshes = 0;
 const refreshWaiters: (() => void)[] = [];
 
@@ -125,7 +142,10 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
       return; // upstream just failed for this key; don't hammer it
     }
     revalidating.add(key);
-    void (async () => {
+    // freshnessStorage.exit: the refresh runs detached from any
+    // request-scoped freshness tracking — lookups made by the refresh
+    // loader must not stamp the response of the request that triggered it.
+    void freshnessStorage.exit(() => (async () => {
       try {
         await acquireRefreshSlot();
         try {
@@ -147,7 +167,7 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
       } finally {
         revalidating.delete(key);
       }
-    })();
+    })());
   }
 
   return async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -155,6 +175,7 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
     const age = hit ? Date.now() - hit.at : Infinity;
     if (hit && age < freshMs) {
       emitCacheAccess(key, "hit");
+      reportLookup(hit.at, false);
       return hit.value as T;
     }
     if (hit && age < keepMs) {
@@ -164,12 +185,51 @@ export function createQueryCache(opts: QueryCacheOptions): CachedFn {
       // foreground waits, not freshness.
       emitCacheAccess(key, "hit");
       scheduleRevalidate(key, fn);
+      // A refresh is underway if one was just scheduled or already running
+      // (or a foreground load is in flight); the cooldown after a failed
+      // refresh is the one stale serve with no refresh behind it.
+      reportLookup(hit.at, revalidating.has(key) || inflight.has(key));
       return hit.value as T;
     }
     // Foreground load. Emit here rather than inside load() so that ONLY
     // request-path accesses reach the observer — load() also serves
     // background revalidation, which must stay invisible to it.
     emitCacheAccess(key, inflight.has(key) ? "inflight-join" : "miss");
-    return load(key, fn);
+    const value = await load(key, fn);
+    // Freshly loaded (or joined an in-flight load): stamp with the entry's
+    // stored time; fall back to now if it was evicted immediately.
+    reportLookup(cache.get(key)?.at ?? Date.now(), false);
+    return value;
   };
 }
+
+function reportLookup(at: number, refreshing: boolean): void {
+  const t = freshnessStorage.getStore();
+  if (!t) return;
+  if (at < t.oldestAt) t.oldestAt = at;
+  if (refreshing) t.refreshing = true;
+}
+
+export interface DataFreshness {
+  /** ISO 8601 time the oldest cache entry feeding the result was loaded. */
+  dataAsOf: string;
+  /** True when any entry was served stale with a refresh in flight. */
+  refreshing: boolean;
+}
+
+export async function withDataFreshness<T>(
+  fn: () => Promise<T>,
+): Promise<{ value: T } & DataFreshness> {
+  const tracker: FreshnessTracker = { oldestAt: Infinity, refreshing: false };
+  const value = await freshnessStorage.run(tracker, fn);
+  return {
+    value,
+    // No cached() lookups at all means everything was computed just now.
+    dataAsOf: new Date(
+      Number.isFinite(tracker.oldestAt) ? tracker.oldestAt : Date.now(),
+    ).toISOString(),
+    refreshing: tracker.refreshing,
+  };
+}
+
+const freshnessStorage = new AsyncLocalStorage<FreshnessTracker>();

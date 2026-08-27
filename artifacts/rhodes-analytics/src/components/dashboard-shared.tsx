@@ -1,5 +1,5 @@
 import { Link } from "wouter";
-import { ChevronRight, Database, Download } from "lucide-react";
+import { ChevronRight, Database, Download, RefreshCw } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -55,15 +55,35 @@ export function ptgBg(ptg: number | null | undefined): string {
   return "bg-red-500/10";
 }
 
+/**
+ * "8:02 AM" if the data was loaded today, otherwise "Aug 25, 8:02 PM" — an
+ * early-morning viewer must be able to tell yesterday-evening numbers at a
+ * glance (the server serves cached data while it refreshes in background).
+ */
+function formatDataAsOf(iso: string): string | null {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return time;
+  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${time}`;
+}
 export function LiveStatusBadge({
   status,
   checking,
   lastRefreshed,
+  dataAsOf,
+  refreshing,
 }: {
   status: { connected: boolean; database?: string; error?: string } | undefined;
   checking: boolean;
   lastRefreshed: number;
+  /** Server stamp: when the oldest cache entry behind the numbers was loaded.
+   *  Preferred over lastRefreshed (which is only when the browser fetched). */
+  dataAsOf?: string;
+  /** True while the server refreshes stale numbers in the background. */
+  refreshing?: boolean;
 }) {
+  const asOf = dataAsOf ? formatDataAsOf(dataAsOf) : null;
   const time =
     lastRefreshed > 0
       ? new Date(lastRefreshed).toLocaleTimeString("en-US", {
@@ -88,7 +108,22 @@ export function LiveStatusBadge({
             Live · Snowflake
           </span>
           <Database className="h-3 w-3 text-muted-foreground" />
-          {time && <span className="text-muted-foreground">refreshed {time}</span>}
+          {asOf ? (
+            <span className="text-muted-foreground" data-testid="text-data-as-of">
+              data as of {asOf}
+            </span>
+          ) : (
+            time && <span className="text-muted-foreground">refreshed {time}</span>
+          )}
+          {refreshing && (
+            <span
+              className="flex items-center gap-1 text-muted-foreground"
+              data-testid="status-refreshing"
+            >
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              refreshing…
+            </span>
+          )}
         </>
       ) : (
         <>

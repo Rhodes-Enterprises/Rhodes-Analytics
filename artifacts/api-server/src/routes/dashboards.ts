@@ -18,6 +18,7 @@ import {
   getCommunityList,
   type FunnelMetric,
 } from "../lib/marketing-dashboards";
+import { withDataFreshness } from "../lib/query-cache";
 
 const router: IRouter = Router();
 
@@ -112,7 +113,9 @@ router.get("/dashboards/overview-with-targets/filters", async (_req, res) => {
 router.get("/dashboards/overview-with-targets", async (req, res) => {
   try {
     const filters = buildFilters(req.query as Record<string, unknown>);
-    const data = await getOverviewWithTargets(filters);
+    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
+      getOverviewWithTargets(filters),
+    );
     res.json({
       appliedRange: {
         startDate: filters.startDate,
@@ -120,6 +123,8 @@ router.get("/dashboards/overview-with-targets", async (req, res) => {
         toDate: filters.toDate,
         target: filters.target,
       },
+      dataAsOf,
+      refreshing,
       kpis: data.kpis,
       trafficMatrix: data.trafficMatrix,
       // Record-level lists behind the unknown buckets ride in the same
@@ -179,13 +184,17 @@ router.get("/dashboards/leasing/filters", async (_req, res) => {
 router.get("/dashboards/leasing", async (req, res) => {
   try {
     const filters = buildLeasingFilters(req.query as Record<string, unknown>);
-    const data = await getLeasingDashboard(filters);
+    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
+      getLeasingDashboard(filters),
+    );
     res.json({
       appliedRange: {
         startDate: filters.startDate,
         endDate: filters.endDate,
         toDate: filters.toDate,
       },
+      dataAsOf,
+      refreshing,
       fiscalYear: data.fiscalYear,
       kpis: data.kpis,
       funnel: data.funnel,
@@ -201,8 +210,10 @@ router.get("/dashboards/leasing", async (req, res) => {
 router.get("/dashboards/website-traffic", async (req, res) => {
   try {
     const filters = buildFilters(req.query as Record<string, unknown>);
-    const data = await getWebsiteTraffic(filters);
-    res.json({ appliedRange: appliedRange(filters), ...data });
+    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
+      getWebsiteTraffic(filters),
+    );
+    res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
@@ -218,8 +229,10 @@ router.get("/dashboards/funnel", async (req, res) => {
       return;
     }
     const filters = buildFilters(req.query as Record<string, unknown>);
-    const data = await getFunnelMetric(metric, filters);
-    res.json({ appliedRange: appliedRange(filters), ...data });
+    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
+      getFunnelMetric(metric, filters),
+    );
+    res.json({ appliedRange: appliedRange(filters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }
@@ -234,8 +247,10 @@ function ehiGoalsYearFilters(filters: DashboardFilters): DashboardFilters {
 router.get("/dashboards/ehi-goals", async (req, res) => {
   try {
     const yearFilters = ehiGoalsYearFilters(buildFilters(req.query as Record<string, unknown>));
-    const data = await getEhiGoals(yearFilters);
-    res.json({ appliedRange: appliedRange(yearFilters), ...data });
+    const { value: data, dataAsOf, refreshing } = await withDataFreshness(() =>
+      getEhiGoals(yearFilters),
+    );
+    res.json({ appliedRange: appliedRange(yearFilters), dataAsOf, refreshing, ...data });
   } catch (err) {
     sendSnowflakeError(res, err);
   }

@@ -133,6 +133,8 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               status={status.data}
               checking={status.isLoading}
               lastRefreshed={dash.dataUpdatedAt}
+              dataAsOf={dash.data?.dataAsOf}
+              refreshing={dash.data?.refreshing}
             />
           </div>
           <TargetToggle target={target} onChange={setTarget} />

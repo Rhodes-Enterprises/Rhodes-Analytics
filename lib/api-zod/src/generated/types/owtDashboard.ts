@@ -22,4 +22,8 @@ export interface OwtDashboard {
   ratios: OwtRatioRow[];
   /** The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain. */
   unknownRecords: OwtDashboardUnknownRecords;
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }

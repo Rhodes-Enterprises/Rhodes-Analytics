@@ -21,4 +21,8 @@ export interface FunnelMetricDashboard {
   sources: FunnelMetricDashboardSourcesItem[];
   divisions: FunnelBreakdownRow[];
   developments: FunnelMetricDashboardDevelopmentsItem[];
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }

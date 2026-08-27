@@ -456,7 +456,19 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LeasingMonthlyPoint"
-      required: [appliedRange, fiscalYear, kpis, funnel, matrix, communities, monthly]
+        dataAsOf:
+          type: string
+          description: >-
+            ISO 8601 time the oldest cached query result feeding this payload
+            was loaded from Snowflake — the honest "data as of" stamp under
+            stale-while-revalidate serving.
+        refreshing:
+          type: boolean
+          description: >-
+            True when at least one underlying cache entry was served stale
+            with a background refresh in flight (newer numbers arrive on the
+            next load).
+      required: [appliedRange, dataAsOf, refreshing, fiscalYear, kpis, funnel, matrix, communities, monthly]
     LeasingFunnel:
       type: object
       description: Upstream Rhodes Living funnel stages vs their RL_* goals
@@ -668,7 +680,19 @@ components:
             sales:
               $ref: "#/components/schemas/OwtUnknownBucketList"
           required: [leads, tours, sales]
-      required: [appliedRange, kpis, trafficMatrix, divisions, developments, ratios, unknownRecords]
+        dataAsOf:
+          type: string
+          description: >-
+            ISO 8601 time the oldest cached query result feeding this payload
+            was loaded from Snowflake — the honest "data as of" stamp under
+            stale-while-revalidate serving.
+        refreshing:
+          type: boolean
+          description: >-
+            True when at least one underlying cache entry was served stale
+            with a background refresh in flight (newer numbers arrive on the
+            next load).
+      required: [appliedRange, dataAsOf, refreshing, kpis, trafficMatrix, divisions, developments, ratios, unknownRecords]
     OwtDevelopmentRow:
       allOf:
         - $ref: "#/components/schemas/OwtDivisionRow"
@@ -955,7 +979,19 @@ components:
               sessions:
                 type: number
             required: [development, division, users, newUsers, sessions]
-      required: [appliedRange, kpis, monthly, channels, devices, developments]
+        dataAsOf:
+          type: string
+          description: >-
+            ISO 8601 time the oldest cached query result feeding this payload
+            was loaded from Snowflake — the honest "data as of" stamp under
+            stale-while-revalidate serving.
+        refreshing:
+          type: boolean
+          description: >-
+            True when at least one underlying cache entry was served stale
+            with a background refresh in flight (newer numbers arrive on the
+            next load).
+      required: [appliedRange, dataAsOf, refreshing, kpis, monthly, channels, devices, developments]
     FunnelBreakdownRow:
       type: object
       properties:
@@ -1056,7 +1092,19 @@ components:
                   development:
                     type: string
                 required: [development]
-      required: [appliedRange, metric, kpis, monthly, sources, divisions, developments]
+        dataAsOf:
+          type: string
+          description: >-
+            ISO 8601 time the oldest cached query result feeding this payload
+            was loaded from Snowflake — the honest "data as of" stamp under
+            stale-while-revalidate serving.
+        refreshing:
+          type: boolean
+          description: >-
+            True when at least one underlying cache entry was served stale
+            with a background refresh in flight (newer numbers arrive on the
+            next load).
+      required: [appliedRange, dataAsOf, refreshing, metric, kpis, monthly, sources, divisions, developments]
     EhiGoals:
       type: object
       properties:
@@ -1103,7 +1151,19 @@ components:
               ptgPercent:
                 type: ["number", "null"]
             required: [division, metric, label, toDateGoal, actual, ptgPercent]
-      required: [appliedRange, metrics, divisions]
+        dataAsOf:
+          type: string
+          description: >-
+            ISO 8601 time the oldest cached query result feeding this payload
+            was loaded from Snowflake — the honest "data as of" stamp under
+            stale-while-revalidate serving.
+        refreshing:
+          type: boolean
+          description: >-
+            True when at least one underlying cache entry was served stale
+            with a background refresh in flight (newer numbers arrive on the
+            next load).
+      required: [appliedRange, dataAsOf, refreshing, metrics, divisions]
     CommunityList:
       type: object
       properties:

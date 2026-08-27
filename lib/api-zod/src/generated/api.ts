@@ -219,7 +219,9 @@ export const GetOwtDashboardResponse = zod.object({
   "crmUrl": zod.string().nullable().describe('Link to the record in the CRM')
 }).describe('One CRM record missing an Online\/Onsite channel label'))
 }).describe('Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.')
-}).describe('The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain.')
+}).describe('The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain.'),
+  "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
+  "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
 
@@ -298,7 +300,9 @@ export const GetWebsiteTrafficResponse = zod.object({
   "users": zod.number(),
   "newUsers": zod.number(),
   "sessions": zod.number()
-}))
+})),
+  "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
+  "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
 
@@ -364,7 +368,9 @@ export const GetFunnelMetricResponse = zod.object({
   "ptgPercent": zod.number().nullable()
 }).and(zod.object({
   "development": zod.string()
-})))
+}))),
+  "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
+  "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
 
@@ -403,7 +409,9 @@ export const GetEhiGoalsResponse = zod.object({
   "toDateGoal": zod.number(),
   "actual": zod.number(),
   "ptgPercent": zod.number().nullable()
-}))
+})),
+  "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
+  "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
 
@@ -603,7 +611,9 @@ export const GetLeasingDashboardResponse = zod.object({
   "firstToursGoal": zod.number(),
   "moveIns": zod.number(),
   "moveInsGoal": zod.number()
-}).describe('Monthly actual vs goal per funnel stage. Stage goals are 0 when no matching RL_\* goal type exists for the fiscal year \/ channel filter.\n'))
+}).describe('Monthly actual vs goal per funnel stage. Stage goals are 0 when no matching RL_\* goal type exists for the fiscal year \/ channel filter.\n')),
+  "dataAsOf": zod.string().describe('ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest \"data as of\" stamp under stale-while-revalidate serving.'),
+  "refreshing": zod.boolean().describe('True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load).')
 })
 
 
@@ -614,3 +624,5 @@ export const GetLeasingDashboardResponse = zod.object({
 export const HealthCheckResponse = zod.object({
   "status": zod.string()
 })
+
+

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ChevronRight, RefreshCw, Database, ExternalLink } from "lucide-react";
+import { ChevronRight, RefreshCw, ExternalLink } from "lucide-react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -31,6 +31,7 @@ import {
   CrossYearRangeHint,
   DownloadDataButton,
   InvertedRangeHint,
+  LiveStatusBadge,
   LoneDateHint,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -190,6 +191,8 @@ export default function OverviewWithTargetsPage() {
               status={status.data}
               checking={status.isLoading}
               lastRefreshed={dash.dataUpdatedAt}
+              dataAsOf={dash.data?.dataAsOf}
+              refreshing={dash.data?.refreshing}
             />
           </div>
           {/* Target selector */}
@@ -348,60 +351,6 @@ export default function OverviewWithTargetsPage() {
     </Layout>
   );
 }
-
-// ---------- pieces ----------
-
-function LiveStatusBadge({
-  status,
-  checking,
-  lastRefreshed,
-}: {
-  status: { connected: boolean; database?: string; error?: string } | undefined;
-  checking: boolean;
-  lastRefreshed: number;
-}) {
-  const time =
-    lastRefreshed > 0
-      ? new Date(lastRefreshed).toLocaleTimeString("en-US", {
-          hour: "numeric",
-          minute: "2-digit",
-        })
-      : null;
-  return (
-    <div
-      className="mt-1.5 flex items-center gap-1.5 text-xs"
-      data-testid="badge-data-source"
-    >
-      {checking && !status ? (
-        <span className="text-muted-foreground">Checking data source…</span>
-      ) : status?.connected ? (
-        <>
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-          </span>
-          <span className="font-medium text-emerald-700 dark:text-emerald-400">
-            Live · Snowflake
-          </span>
-          <Database className="h-3 w-3 text-muted-foreground" />
-          {time && (
-            <span className="text-muted-foreground">
-              refreshed {time}
-            </span>
-          )}
-        </>
-      ) : (
-        <>
-          <span className="h-2 w-2 rounded-full bg-red-500" />
-          <span className="font-medium text-red-600 dark:text-red-400">
-            Snowflake connection unavailable
-          </span>
-        </>
-      )}
-    </div>
-  );
-}
-
 function LegendDot({ className, label }: { className: string; label: string }) {
   return (
     <span className="flex items-center gap-1.5">

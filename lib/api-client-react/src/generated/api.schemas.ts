@@ -118,6 +118,10 @@ export interface LeasingDashboard {
   matrix: LeasingDashboardMatrix;
   communities: LeasingCommunityRow[];
   monthly: LeasingMonthlyPoint[];
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }
 
 export type OwtDashboardAppliedRange = {
@@ -300,6 +304,10 @@ export interface OwtDashboard {
   ratios: OwtRatioRow[];
   /** The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain. */
   unknownRecords: OwtDashboardUnknownRecords;
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }
 
 export type OwtYoyMeasuresItemPointsItem = {
@@ -373,6 +381,10 @@ export interface WebsiteTraffic {
   channels: WebsiteTrafficChannelsItem[];
   devices: WebsiteTrafficDevicesItem[];
   developments: WebsiteTrafficDevelopmentsItem[];
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }
 
 export interface FunnelBreakdownRow {
@@ -435,6 +447,10 @@ export interface FunnelMetricDashboard {
   sources: FunnelMetricDashboardSourcesItem[];
   divisions: FunnelBreakdownRow[];
   developments: FunnelMetricDashboardDevelopmentsItem[];
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }
 
 export type EhiGoalsMetricsItem = {
@@ -465,6 +481,10 @@ export interface EhiGoals {
   appliedRange: AppliedRange;
   metrics: EhiGoalsMetricsItem[];
   divisions: EhiGoalsDivisionsItem[];
+  /** ISO 8601 time the oldest cached query result feeding this payload was loaded from Snowflake — the honest "data as of" stamp under stale-while-revalidate serving. */
+  dataAsOf: string;
+  /** True when at least one underlying cache entry was served stale with a background refresh in flight (newer numbers arrive on the next load). */
+  refreshing: boolean;
 }
 
 export type CommunityListCommunitiesItem = {
@@ -611,3 +631,4 @@ startDate?: string;
  */
 endDate?: string;
 };
+
