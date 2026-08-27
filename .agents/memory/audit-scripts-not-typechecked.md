@@ -57,3 +57,16 @@ generations to it. Surviving `interface`/`EMPTY_*` remnants reveal which
 generation the consumers expect. Parallel tasks often repair the SAME graft:
 after the next rebase, check for doubled definitions before assuming your
 repair survived.
+
+## Finding ALL undefined names at once
+Runtime smoke-runs surface missing helpers one at a time (slow whack-a-mole when
+each run costs minutes of Snowflake pacing). Instead scan the whole script in
+one shot:
+
+    npx tsc --noEmit --skipLibCheck --noResolve --module esnext --target es2022 scripts/<script>.ts
+
+`--noResolve` skips imports (their names error out too — filter for TS2304/TS2552
+only and ignore errors about imported symbols); every genuinely undefined
+identifier in the file shows up in one pass. Verified: found the one remaining
+dropped helper immediately after a merge had silently deleted two helper
+definitions whose call sites survived.

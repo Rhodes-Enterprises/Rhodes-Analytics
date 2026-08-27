@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "wouter";
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -26,26 +25,27 @@ import { Layout } from "@/components/layout";
 import { useCommittedDateRange } from "@/hooks/use-committed-date";
 import { serverDefaultRange } from "@/lib/date-defaults";
 import {
+  ALL,
+  Breadcrumb,
   CrossYearRangeHint,
   DownloadDataButton,
+  FilterSelect,
   InvertedRangeHint,
   LiveStatusBadge,
   LoneDateHint,
+  MONTH_NAMES,
   RefreshDataButton,
   appliedRangeInfo,
   filterDisplayValue,
+  fmt,
+  fmtPct,
+  ptgBg,
+  ptgColor,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   cn,
   downloadData,
@@ -54,38 +54,7 @@ import {
   type DownloadInfo,
 } from "@/lib/utils";
 
-// ---------- formatting ----------
-
 const nf = new Intl.NumberFormat("en-US");
-function fmt(n: number | null | undefined, digits = 0): string {
-  if (n == null || Number.isNaN(n)) return "–";
-  return n.toLocaleString("en-US", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-}
-function fmtPct(n: number | null | undefined, digits = 1): string {
-  if (n == null || Number.isNaN(n)) return "–";
-  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
-}
-
-/** PTG traffic-light: on-track, slipping, at-risk */
-function ptgColor(ptg: number | null | undefined): string {
-  if (ptg == null) return "text-muted-foreground";
-  if (ptg >= -2) return "text-emerald-600 dark:text-emerald-400";
-  if (ptg >= -15) return "text-amber-600 dark:text-amber-400";
-  return "text-red-600 dark:text-red-400";
-}
-function ptgBg(ptg: number | null | undefined): string {
-  if (ptg == null) return "";
-  if (ptg >= -2) return "bg-emerald-500/10";
-  if (ptg >= -15) return "bg-amber-500/10";
-  return "bg-red-500/10";
-}
-
-const ALL = "__all__";
-const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-
 /** One CSV row for a goal/funnel matrix line, matching the on-screen columns. */
 function matrixCsvRow(
   label: string,
@@ -161,18 +130,7 @@ export default function LeasingPage() {
   return (
     <Layout>
       <div className="space-y-6">
-        <nav className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          <Link
-            href="/workspaces/marketing"
-            className="hover:text-foreground transition-colors"
-          >
-            Marketing Dashboards
-          </Link>
-          <ChevronRight className="h-3.5 w-3.5" />
-          <span className="text-foreground font-medium">
-            Rhodes Living Leasing
-          </span>
-        </nav>
+        <Breadcrumb page="Rhodes Living Leasing" />
 
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -300,40 +258,6 @@ function LegendDot({ className, label }: { className: string; label: string }) {
     </span>
   );
 }
-
-function FilterSelect({
-  label,
-  value,
-  onChange,
-  options,
-  testId,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
-  testId: string;
-}) {
-  return (
-    <div className="space-y-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="h-9" data-testid={testId}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={ALL}>All</SelectItem>
-          {options.map((o) => (
-            <SelectItem key={o} value={o}>
-              {o}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
 function KpiRow({ data }: { data: LeasingDashboard }) {
   const { kpis } = data;
   const items = [
@@ -778,7 +702,7 @@ function MonthlyChart({
   const stageLabel = TREND_STAGES.find((s) => s.key === stage)?.label ?? "";
 
   const leaseData = data.monthly.map((p) => ({
-    month: MONTHS[p.month - 1],
+    month: MONTH_NAMES[p.month - 1],
     Ratified: p.ratified,
     Cancelled: p.cancelled,
     Net: p.net,
@@ -790,7 +714,7 @@ function MonthlyChart({
       : data.monthly.map((p) => {
           const { actual, goal } = STAGE_SERIES[stage](p);
           return {
-            month: MONTHS[p.month - 1],
+            month: MONTH_NAMES[p.month - 1],
             Actual: actual,
             Goal: +goal.toFixed(1),
           };
