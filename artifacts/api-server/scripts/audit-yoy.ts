@@ -9,8 +9,19 @@
  * that cannot fan out by construction.
  *
  * Scenarios: the default view (no params) plus filtered views (busiest
- * company and channel, picked dynamically so they never go stale; failure to
- * find a value FAILS the audit rather than silently skipping the scenario).
+ * company, channel, lead source, and cohort quarter, picked dynamically so
+ * they never go stale; failure to find a value FAILS the audit rather than
+ * silently skipping the scenario).
+ *
+ * Lead-source and cohort baselines bind with the same asymmetry the API
+ * uses: leadSource filters contacts (LEAD_SOURCE_OVERVIEW) AND deals
+ * (DEAL_LEAD_SOURCE_OVERVIEW); cohortQuarter filters contacts ONLY; the GA
+ * series is never filtered by either. EHI_COHORT_QUARTER equals the
+ * contact's create quarter, so under a cohort filter the leads series is a
+ * no-op inside the cohort's own months and zero everywhere else — the
+ * cross-year cells and the tour-date series are what discriminate, which is
+ * why the scenario checks every measure across both years rather than
+ * relying on the leads series alone.
  *
  * For each scenario, a handful of monthly points per measure (leads, tours,
  * sales, website users) are checked in BOTH the current and the prior year —
@@ -95,11 +106,31 @@ interface ScenarioFilters {
   company?: string;
   /** Applied as contactChannel AND dealChannel, like the dashboard UI does */
   channel?: string;
+  /**
+   * Filters contacts (LEAD_SOURCE_OVERVIEW) AND deals
+   * (DEAL_LEAD_SOURCE_OVERVIEW); GA has no lead-source dimension.
+   */
+  leadSource?: string;
+  /**
+   * Filters contacts only (EHI_COHORT_QUARTER) — the API's dealFilters and
+   * gaFilters have no cohort dimension, so the sales and website-user
+   * baselines must stay unfiltered under it.
+   */
+  cohortQuarter?: string;
 }
 
 interface Scenario {
   name: string;
   filters: ScenarioFilters;
+  /**
+   * Measures whose baselines must include at least one non-zero point, or
+   * the scenario FAILS as vacuous. The scenario-wide all-zero guard is
+   * toothless for lead-source/cohort scenarios: their GA (and goal) checks
+   * are unfiltered by design and always non-zero, so without this the
+   * filtered series could silently compare 0 vs 0 forever (e.g. after a
+   * pick-vs-check drift) while appearing covered.
+   */
+  mustHaveData?: string[];
 }
 
 interface Frag {
@@ -116,6 +147,14 @@ function contactFrag(f: ScenarioFilters): Frag {
       `C.CONTACT_EHI_COMMUNITY_OF_INTEREST IN (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)`,
     );
     binds.push(f.company);
+  }
+  if (f.cohortQuarter) {
+    parts.push("C.EHI_COHORT_QUARTER = ?");
+    binds.push(f.cohortQuarter);
+  }
+  if (f.leadSource) {
+    parts.push("C.LEAD_SOURCE_OVERVIEW = ?");
+    binds.push(f.leadSource);
   }
   if (f.channel) {
     parts.push("C.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
@@ -134,6 +173,12 @@ function dealFrag(f: ScenarioFilters): Frag {
     );
     binds.push(f.company);
   }
+  if (f.leadSource) {
+    parts.push("X.DEAL_LEAD_SOURCE_OVERVIEW = ?");
+    binds.push(f.leadSource);
+  }
+  // cohortQuarter deliberately NOT applied: the API's dealFilters has no
+  // cohort dimension, so the sales baselines must stay unfiltered under it.
   if (f.channel) {
     parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
     binds.push(f.channel);
@@ -149,7 +194,8 @@ function gaFrag(f: ScenarioFilters): Frag {
     parts.push("MATCHED_COMPANY_NAME = ?");
     binds.push(f.company);
   }
-  // GA has no channel dimension in the dashboard; channel does not apply.
+  // GA has no channel, lead-source, or cohort dimension in the dashboard;
+  // those filters do not apply (mirrors the API's gaFilters).
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
 }
 
@@ -161,7 +207,9 @@ function goalFrag(f: ScenarioFilters): Frag {
     parts.push("COMPANY_NAME = ?");
     binds.push(f.company);
   }
-  // Channel does not filter goals in the API either.
+  // Channel, lead source, and cohort do not filter goals in the API either,
+  // so goal baselines stay unfiltered under those scenarios — which also
+  // catches the API ever wrongly starting to filter goals by them.
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
 }
 
@@ -172,6 +220,8 @@ function toQueryParams(f: ScenarioFilters): Record<string, string> {
     params.contactChannel = f.channel;
     params.dealChannel = f.channel;
   }
+  if (f.leadSource) params.leadSource = f.leadSource;
+  if (f.cohortQuarter) params.cohortQuarter = f.cohortQuarter;
   return params;
 }
 
@@ -293,6 +343,7 @@ async function auditScenario(
   // the round trips. A missing (year, month) group reads as 0, exactly
   // like the old scalar COUNT over zero rows.
   const checks: Check[] = [];
+  const baselineNonZeroByMeasure = new Map<string, number>();
   for (const measure of measures) {
     const points = byMeasure.get(measure)!;
     const { sql, binds } = baselineGroupedSql(
@@ -307,19 +358,25 @@ async function auditScenario(
     );
     const baselineAt = (year: number, month: number) =>
       byYearMonth.get(`${year}-${month}`) ?? 0;
+    let nonZeroBaselines = 0;
     for (const month of months) {
       const pt = points.find((p) => p.month === month)!;
+      const currentBaseline = baselineAt(yoy.year, month);
+      const priorBaseline = baselineAt(yoy.priorYear, month);
+      if (currentBaseline !== 0) nonZeroBaselines++;
+      if (priorBaseline !== 0) nonZeroBaselines++;
       checks.push({
         label: `${measure} ${yoy.year}-${String(month).padStart(2, "0")}`,
         api: pt.currentYear,
-        baseline: baselineAt(yoy.year, month),
+        baseline: currentBaseline,
       });
       checks.push({
         label: `${measure} ${yoy.priorYear}-${String(month).padStart(2, "0")}`,
         api: pt.priorYear,
-        baseline: baselineAt(yoy.priorYear, month),
+        baseline: priorBaseline,
       });
     }
+    baselineNonZeroByMeasure.set(measure, nonZeroBaselines);
   }
 
   // Goal points: business-plan annual goals from DM_GOALS, current year
@@ -376,6 +433,19 @@ async function auditScenario(
     );
     return false;
   }
+  // Per-measure vacuity guard: for the series a filter actually binds, all-
+  // zero baselines mean the filter check proved nothing (the GA/goal checks
+  // keep the scenario-wide guard above happy even then).
+  for (const measure of scenario.mustHaveData ?? []) {
+    if (!baselineNonZeroByMeasure.get(measure)) {
+      console.error(
+        `FAIL every ${measure} baseline point is zero — the filtered ${measure} ` +
+          "series exercises no data, so this scenario cannot vouch for that filter " +
+          "(representative-filter pick drifted from the checked months?)",
+      );
+      failed = true;
+    }
+  }
   return !failed;
 }
 
@@ -385,38 +455,142 @@ async function auditScenario(
  * Busiest Esperanza company and channel across the current + prior year, so
  * the filtered scenarios always exercise non-trivial data in both series.
  * Missing values FAIL the audit — a silently skipped scenario is not coverage.
+ *
+ * The lead source and cohort quarter are ranked over the exact (year, month)
+ * grid the scenarios check — YEAR IN (prior, current) AND MONTH IN (checked
+ * months) — and the picked value must have data there for EVERY series its
+ * filter binds: leads, tours, AND ratified deals for the lead source
+ * (DEAL_LEAD_SOURCE_OVERVIEW checked only against zero rows would prove
+ * nothing — audit-dashboard.ts rationale, hardened from "prefer" to
+ * "require"); leads AND tours for the cohort (tour-date cells are the
+ * cross-quarter discriminator). That structurally guarantees at least one
+ * non-zero baseline cell per filtered series, which mustHaveData then
+ * enforces. When NO value qualifies, the audit FAILS as uncovered instead
+ * of reporting success off 0=0 comparisons.
  */
 async function pickRepresentativeFilters(
   year: number,
-): Promise<{ company: string; channel: string }> {
-  const [companyRows, channelRows] = await Promise.all([
-    querySnowflake<{ COMPANY_NAME: string }>(
-      `SELECT D.COMPANY_NAME, COUNT(*) AS N
-       FROM DM_CONTACTS C
-       JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-       WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
-       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
-      [year - 1, year],
-    ),
-    querySnowflake<{ CH: string }>(
-      `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
-       FROM DM_CONTACTS C
-       WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
-         AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
-       GROUP BY 1 ORDER BY N DESC LIMIT 1`,
-      [year - 1, year],
-    ),
-  ]);
+  months: number[],
+): Promise<{
+  company: string;
+  channel: string;
+  leadSource: string;
+  cohortQuarter: string;
+}> {
+  const monthPlaceholders = months.map(() => "?").join(", ");
+  const gridBinds = [year - 1, year, ...months];
+  const [
+    companyRows,
+    channelRows,
+    leadSourceRows,
+    tourSourceRows,
+    dealSourceRows,
+    cohortLeadRows,
+    cohortTourRows,
+  ] = await Promise.all([
+      querySnowflake<{ COMPANY_NAME: string }>(
+        `SELECT D.COMPANY_NAME, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         JOIN ${DEV_DIM} D ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+         WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+         GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+        [year - 1, year],
+      ),
+      querySnowflake<{ CH: string }>(
+        `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+           AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+        [year - 1, year],
+      ),
+      // All lead sources with leads in the checked grid, by volume (not
+      // LIMIT 1): the pick below requires one that also has tours and
+      // ratified deals there.
+      querySnowflake<{ LS: string }>(
+        `SELECT C.LEAD_SOURCE_OVERVIEW AS LS, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+           AND MONTH(C.CONTACT_CREATE_DATE) IN (${monthPlaceholders})
+           AND C.LEAD_SOURCE_OVERVIEW IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC`,
+        gridBinds,
+      ),
+      querySnowflake<{ LS: string }>(
+        `SELECT DISTINCT C.LEAD_SOURCE_OVERVIEW AS LS
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)
+           AND MONTH(C.EHI_MIN_FIRST_TOUR_DATE) IN (${monthPlaceholders})
+           AND C.LEAD_SOURCE_OVERVIEW IS NOT NULL`,
+        gridBinds,
+      ),
+      querySnowflake<{ LS: string }>(
+        `SELECT DISTINCT X.DEAL_LEAD_SOURCE_OVERVIEW AS LS
+         FROM DM_DEALS X
+         WHERE ${isSaleSql("X")} AND YEAR(X.CONTRACT_RATIFIED_DATE) IN (?, ?)
+           AND MONTH(X.CONTRACT_RATIFIED_DATE) IN (${monthPlaceholders})
+           AND X.DEAL_LEAD_SOURCE_OVERVIEW IS NOT NULL`,
+        gridBinds,
+      ),
+      // Cohort = create quarter, so ranking by grid leads picks a cohort
+      // whose own months overlap the checks (non-zero no-op cells in its
+      // year) while every same-month cell of the OTHER year is zero under
+      // the filter — those cross-year cells are what catch a dropped
+      // cohort fragment on the create-date series.
+      querySnowflake<{ CQ: string }>(
+        `SELECT C.EHI_COHORT_QUARTER AS CQ, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.CONTACT_CREATE_DATE) IN (?, ?)
+           AND MONTH(C.CONTACT_CREATE_DATE) IN (${monthPlaceholders})
+           AND C.EHI_COHORT_QUARTER IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC`,
+        gridBinds,
+      ),
+      // Cohorts whose contacts also TOURED inside the grid — the tour-date
+      // series is the cross-quarter discriminator, so a cohort with no
+      // tours there would leave the tours checks comparing 0 vs 0.
+      querySnowflake<{ CQ: string }>(
+        `SELECT DISTINCT C.EHI_COHORT_QUARTER AS CQ
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND YEAR(C.EHI_MIN_FIRST_TOUR_DATE) IN (?, ?)
+           AND MONTH(C.EHI_MIN_FIRST_TOUR_DATE) IN (${monthPlaceholders})
+           AND C.EHI_COHORT_QUARTER IS NOT NULL`,
+        gridBinds,
+      ),
+    ]);
   const company = companyRows[0]?.COMPANY_NAME;
   const channel = channelRows[0]?.CH;
-  const missing = [!company && "company", !channel && "channel"].filter(Boolean);
+  // Busiest lead source that has leads AND tours AND ratified deals in the
+  // grid; busiest cohort (by grid leads) that also has tours there. A value
+  // missing any bound series would leave that series comparing 0 vs 0 —
+  // fake coverage — so no qualifying value fails the audit loudly instead.
+  const tourSources = new Set(tourSourceRows.map((r) => r.LS));
+  const dealSources = new Set(dealSourceRows.map((r) => r.LS));
+  const leadSource = leadSourceRows.find(
+    (r) => tourSources.has(r.LS) && dealSources.has(r.LS),
+  )?.LS;
+  const cohortsWithTours = new Set(cohortTourRows.map((r) => r.CQ));
+  const cohortQuarter = cohortLeadRows.find((r) => cohortsWithTours.has(r.CQ))?.CQ;
+  const missing = [
+    !company && "company",
+    !channel && "channel",
+    !leadSource && "lead source with leads, tours, and ratified deals",
+    !cohortQuarter && "cohort quarter with leads and tours",
+  ].filter(Boolean);
   if (missing.length) {
     throw new Error(
-      `No representative ${missing.join(", ")} found for ${year - 1}/${year} — ` +
-        "cannot exercise the required filtered scenarios (empty source data or broken dimension)",
+      `No representative ${missing.join("; ")} found for ${year - 1}/${year} ` +
+        `(months [${months.join(", ")}]) — cannot exercise the required filtered ` +
+        "scenarios with real data on every series the filter binds " +
+        "(empty source data or broken dimension)",
     );
   }
-  return { company: company!, channel: channel! };
+  return {
+    company: company!,
+    channel: channel!,
+    leadSource: leadSource!,
+    cohortQuarter: cohortQuarter!,
+  };
 }
 
 /**
@@ -441,12 +615,28 @@ async function main() {
   const months = monthsToCheck();
   console.log(`Checking months [${months.join(", ")}] for years ${year - 1} and ${year}`);
 
-  const { company, channel } = await pickRepresentativeFilters(year);
+  const { company, channel, leadSource, cohortQuarter } =
+    await pickRepresentativeFilters(year, months);
 
   const scenarios: Scenario[] = [
     { name: "default view", filters: {} },
     { name: `company filter (${company})`, filters: { company } },
     { name: `channel filter (${channel})`, filters: { channel } },
+    // leadSource must hit DM_CONTACTS.LEAD_SOURCE_OVERVIEW AND
+    // DM_DEALS.DEAL_LEAD_SOURCE_OVERVIEW; cohortQuarter must hit contacts
+    // ONLY (sales and GA stay unfiltered). The picks guarantee non-zero
+    // cells inside the checked grid for every series each filter binds,
+    // so mustHaveData holds ALL of those series to it.
+    {
+      name: `lead-source filter (${leadSource})`,
+      filters: { leadSource },
+      mustHaveData: ["leads", "tours", "grossSales"],
+    },
+    {
+      name: `cohort-quarter filter (${cohortQuarter})`,
+      filters: { cohortQuarter },
+      mustHaveData: ["leads", "tours"],
+    },
   ];
   console.log(`Scenarios: ${scenarios.map((s) => s.name).join("; ")}`);
 
