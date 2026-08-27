@@ -28,7 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
+import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
@@ -110,19 +110,21 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
   };
 
   const metricSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const downloadMonthly = () => {
+  const downloadMonthly = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       `${metricSlug}-monthly-vs-goal`,
       ["Month", "Online", "Onsite", "Monthly Goal"],
       d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.online, m.onsite, m.goal]),
     );
   };
-  const downloadSources = () => {
+  const downloadSources = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       `${metricSlug}-by-lead-source`,
       ["Lead Source", unit],
       d.sources.map((s): CsvValue[] => [s.name, s.count]),
@@ -408,8 +410,9 @@ function BreakdownTable({
   downloadSlug: string;
   downloadFilename: string;
 }) {
-  const downloadTable = () =>
-    downloadCsv(
+  const downloadTable = (format: DownloadFormat) =>
+    downloadData(
+      format,
       downloadFilename,
       [firstColumn, `Total ${unit}`, "Online", "Onsite", "TD Goal", "PTG %"],
       rows.map((r): CsvValue[] => [

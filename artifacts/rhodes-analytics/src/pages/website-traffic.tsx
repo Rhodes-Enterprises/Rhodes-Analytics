@@ -27,7 +27,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
+import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
@@ -99,37 +99,41 @@ export default function WebsiteTrafficPage() {
     setEndDate(`${year}-12-31`);
   };
 
-  const downloadMonthly = () => {
+  const downloadMonthly = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       "website-traffic-monthly-users-sessions",
       ["Month", "Users", "New Users", "Sessions"],
       d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.users, m.newUsers, m.sessions]),
     );
   };
-  const downloadChannels = () => {
+  const downloadChannels = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       "website-traffic-users-by-channel",
       ["Channel", "Users"],
       d.channels.map((c): CsvValue[] => [c.name, c.users]),
     );
   };
-  const downloadDevices = () => {
+  const downloadDevices = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       "website-traffic-users-by-device",
       ["Device", "Users"],
       d.devices.map((c): CsvValue[] => [c.name, c.users]),
     );
   };
-  const downloadDevelopments = () => {
+  const downloadDevelopments = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       "website-traffic-by-development",
       ["Development", "Division", "Users", "New Users", "Sessions"],
       d.developments.map((r): CsvValue[] => [

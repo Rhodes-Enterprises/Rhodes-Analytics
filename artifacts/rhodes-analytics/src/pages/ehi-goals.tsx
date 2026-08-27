@@ -11,7 +11,7 @@ import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
+import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 import {
   Breadcrumb,
   DownloadDataButton,
@@ -43,10 +43,11 @@ export default function EhiGoalsPage() {
     queryClient.setQueryData(getGetEhiGoalsQueryKey(params), live);
   };
 
-  const downloadGoalAttainment = () => {
+  const downloadGoalAttainment = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
-    downloadCsv(
+    return downloadData(
+      format,
       "ehi-goals-goal-attainment",
       ["Metric", "Resolved Goal Type", "Full-Year Goal", "TD Goal", "Actual", "Attainment %", "PTG %"],
       d.metrics.map((m): CsvValue[] => [
@@ -197,8 +198,9 @@ function DivisionMatrix({
   }
   const labels = new Map(divisions.map((d) => [d.metric, d.label]));
 
-  const downloadDivisionAttainment = () =>
-    downloadCsv(
+  const downloadDivisionAttainment = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "ehi-goals-division-attainment",
       [
         "Division",

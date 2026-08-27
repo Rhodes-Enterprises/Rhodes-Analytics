@@ -1,5 +1,18 @@
 import { Link } from "wouter";
-import { ChevronRight, Database, Download, RefreshCw } from "lucide-react";
+import {
+  ChevronRight,
+  Database,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  RefreshCw,
+} from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -7,10 +20,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { toast } from "@/hooks/use-toast";
+import { cn, type DownloadFormat } from "@/lib/utils";
 
 /** Shared pieces for the migrated marketing dashboards. */
 
@@ -270,36 +284,78 @@ export function FilterSelect({
 
 /**
  * Small icon button that sits in a card header's top-right corner and
- * downloads the card's underlying data as CSV. Every instance gets a stable
- * test id (`button-download-<slug>`) so audits/e2e can find it.
+ * downloads the card's underlying data. Opens a two-item format menu:
+ * CSV (plain-text export, unchanged) or Excel (typed workbook — real
+ * number/percent columns, bold frozen header, auto-sized widths). The same
+ * handler receives the picked format, so both files carry identical data and
+ * share the filename base (only the extension differs).
+ *
+ * Stable test ids so audits/e2e can find everything: the trigger keeps
+ * `button-download-<slug>`; the items are `menuitem-download-<slug>-csv`
+ * and `menuitem-download-<slug>-xlsx`.
  */
 export function DownloadDataButton({
   slug,
   onDownload,
-  label = "Download CSV",
+  label = "Download data",
   className,
 }: {
   /** Stable kebab-case identifier; becomes data-testid `button-download-<slug>`. */
   slug: string;
-  onDownload: () => void;
+  /** Called with the format the user picked; may return a promise (XLSX). */
+  onDownload: (format: DownloadFormat) => void | Promise<void>;
   /** Tooltip / accessible label. */
   label?: string;
   className?: string;
 }) {
+  const pick = (format: DownloadFormat) => {
+    // Surface failures (e.g. the lazy Excel chunk failing to load) instead
+    // of letting the click silently do nothing.
+    void Promise.resolve(onDownload(format)).catch((err: unknown) => {
+      console.error(`Download (${format}) failed:`, err);
+      toast({
+        variant: "destructive",
+        title: format === "xlsx" ? "Excel download failed" : "CSV download failed",
+        description:
+          format === "xlsx"
+            ? "Could not build the workbook — try again, or use CSV."
+            : "Could not build the file — try again.",
+      });
+    });
+  };
   return (
-    <button
-      type="button"
-      onClick={onDownload}
-      title={label}
-      aria-label={label}
-      data-testid={`button-download-${slug}`}
-      className={cn(
-        "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-        className,
-      )}
-    >
-      <Download className="h-3.5 w-3.5" />
-    </button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={label}
+          aria-label={label}
+          data-testid={`button-download-${slug}`}
+          className={cn(
+            "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[state=open]:bg-muted data-[state=open]:text-foreground",
+            className,
+          )}
+        >
+          <Download className="h-3.5 w-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem
+          data-testid={`menuitem-download-${slug}-csv`}
+          onSelect={() => pick("csv")}
+        >
+          <FileText className="mr-2 h-3.5 w-3.5" />
+          CSV (.csv)
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          data-testid={`menuitem-download-${slug}-xlsx`}
+          onSelect={() => pick("xlsx")}
+        >
+          <FileSpreadsheet className="mr-2 h-3.5 w-3.5" />
+          Excel (.xlsx)
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 /**

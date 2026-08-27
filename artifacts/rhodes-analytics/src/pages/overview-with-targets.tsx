@@ -59,7 +59,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
+import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -573,8 +573,9 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
     measure: string,
     cell: { fullSpanGoal: number; toDateGoal: number; actual: number; ptgPercent: number | null },
   ): CsvValue[] => [sectionName, measure, cell.fullSpanGoal, cell.toDateGoal, cell.actual, cell.ptgPercent];
-  const downloadTrafficGoals = () =>
-    downloadCsv(
+  const downloadTrafficGoals = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "overview-with-targets-traffic-goals",
       ["Section", "Measure", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
       [
@@ -805,8 +806,9 @@ function SummaryTable({
   const displayLabel = (label: string) =>
     label.replace("Esperanza Homes ", "").replace(", LLC", "");
 
-  const downloadTable = () =>
-    downloadCsv(
+  const downloadTable = (format: DownloadFormat) =>
+    downloadData(
+      format,
       downloadFilename,
       [
         labelHeader,
@@ -995,8 +997,9 @@ function RatioChart({
     Actual: +(r.actual * 100).toFixed(1),
     behind: r.ptgPercent != null && r.ptgPercent < 0,
   }));
-  const downloadRatioChart = () =>
-    downloadCsv(
+  const downloadRatioChart = (format: DownloadFormat) =>
+    downloadData(
+      format,
       `overview-with-targets-${slug}`,
       ["Ratio", "Goal %", "Actual %"],
       data.map((d): CsvValue[] => [d.name, d.Goal, d.Actual]),
@@ -1041,8 +1044,9 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
     online: ratios.filter((r) => r.group === "online"),
     onsite: ratios.filter((r) => r.group === "onsite"),
   };
-  const downloadRatioGoals = () =>
-    downloadCsv(
+  const downloadRatioGoals = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "overview-with-targets-ratio-goals",
       ["Conversion Ratio", "Goal %", "Actual %", "PTG %"],
       ratios.map((r): CsvValue[] => [
@@ -1146,9 +1150,10 @@ function YoySection({
   const gaStartLabel = yoy?.gaHistoryStart
     ? `${MONTHS[Number(yoy.gaHistoryStart.slice(5, 7)) - 1]} ${yoy.gaHistoryStart.slice(0, 4)}`
     : null;
-  const downloadYoy = () => {
+  const downloadYoy = (format: DownloadFormat) => {
     if (!yoy || !series) return;
-    downloadCsv(
+    return downloadData(
+      format,
       `overview-with-targets-yoy-${measureLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       ["Month", String(yoy.priorYear), String(yoy.year), "Goal"],
       series.points.map((p): CsvValue[] => [

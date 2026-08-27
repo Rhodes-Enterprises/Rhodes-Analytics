@@ -34,7 +34,7 @@ import {
   RefreshDataButton,
   fmt,
 } from "@/components/dashboard-shared";
-import { downloadCsv, type CsvValue } from "@/lib/utils";
+import { downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 
 const MEASURE_LABELS: Record<string, string> = {
   websiteUsers: "Website Users",
@@ -76,11 +76,12 @@ export default function YearOverYearPage() {
     return d ? `${MONTH_NAMES[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}` : null;
   }, [yoy.data?.gaHistoryStart]);
 
-  const downloadMeasure = (m: OwtYoy["measures"][number]) => {
+  const downloadMeasure = (m: OwtYoy["measures"][number], format: DownloadFormat) => {
     const d = yoy.data;
     if (!d) return;
     const label = MEASURE_LABELS[m.measure] ?? m.measure;
-    downloadCsv(
+    return downloadData(
+      format,
       `year-over-year-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       ["Month", String(d.year), String(d.priorYear), "Business Plan Goal"],
       m.points.map((p): CsvValue[] => [
@@ -171,7 +172,7 @@ export default function YearOverYearPage() {
                   </CardTitle>
                   <DownloadDataButton
                     slug={`yoy-${m.measure}`}
-                    onDownload={() => downloadMeasure(m)}
+                    onDownload={(format) => downloadMeasure(m, format)}
                   />
                 </CardHeader>
                 <CardContent className="h-72">

@@ -44,7 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
+import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -386,8 +386,9 @@ function MatrixRow({
 
 function GoalMatrix({ data }: { data: LeasingDashboard }) {
   const m = data.matrix;
-  const downloadLeaseGoals = () =>
-    downloadCsv(
+  const downloadLeaseGoals = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "leasing-lease-goals",
       ["Measure", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
       [
@@ -434,8 +435,9 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
 
 function FunnelMatrix({ data }: { data: LeasingDashboard }) {
   const fu = data.funnel;
-  const downloadFunnel = () =>
-    downloadCsv(
+  const downloadFunnel = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "leasing-funnel",
       ["Stage", "Full Span Goal", "To Date Goal", "Actual", "PTG %"],
       [
@@ -508,8 +510,9 @@ function CommunityTable({ data }: { data: LeasingDashboard }) {
     };
   }, [rows]);
 
-  const downloadCommunitySummary = () =>
-    downloadCsv(
+  const downloadCommunitySummary = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "leasing-community-summary",
       ["Community", "Lease Goal", "TD Goal", "Ratified", "Online", "Onsite", "Cancelled", "Net", "PTG %"],
       [
@@ -668,10 +671,11 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
   // back as all-zero goals — drop the line rather than plot a flat zero.
   const hasStageGoal = stageData.some((p) => p.Goal !== 0);
 
-  const downloadTrends = () => {
+  const downloadTrends = (format: DownloadFormat) => {
     const stageSlug = stageLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     if (stage === "leases") {
-      downloadCsv(
+      return downloadData(
+        format,
         `leasing-monthly-trends-${stageSlug}`,
         ["Month", "Ratified", "Cancelled", "Net", "Goal"],
         leaseData.map((p): CsvValue[] => [p.month, p.Ratified, p.Cancelled, p.Net, p.Goal]),
@@ -679,7 +683,8 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
     } else {
       // Match the on-screen chart: the goal series is dropped when no goal
       // exists for this stage/year/filter combination.
-      downloadCsv(
+      return downloadData(
+        format,
         `leasing-monthly-trends-${stageSlug}`,
         hasStageGoal ? ["Month", "Actual", "Goal"] : ["Month", "Actual"],
         stageData.map((p): CsvValue[] =>

@@ -9,10 +9,10 @@
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "test": "vitest run && node --test src/lib/*.test.ts",
     "test:csv": "esbuild scripts/test-csv.ts --bundle --platform=node --format=esm --outfile=dist-test/test-csv.mjs --log-level=warning && node dist-test/test-csv.mjs",
+    "test:xlsx": "esbuild scripts/test-xlsx.ts --bundle --platform=node --format=cjs --outfile=dist-test/test-xlsx.cjs --log-level=warning && node dist-test/test-xlsx.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "esbuild": "0.27.3",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-accordion": "^1.2.4",
     "@radix-ui/react-alert-dialog": "^1.1.7",
@@ -59,6 +59,8 @@
     "cmdk": "^1.1.1",
     "date-fns": "^3.6.0",
     "embla-carousel-react": "^8.6.0",
+    "esbuild": "0.27.3",
+    "exceljs": "^4.4.0",
     "framer-motion": "catalog:",
     "input-otp": "^1.4.2",
     "jsdom": "^30.0.1",

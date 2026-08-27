@@ -18,8 +18,8 @@ import {
   RefreshDataButton,
   fmt,
 } from "@/components/dashboard-shared";
-import { downloadCsv, type CsvValue } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
+import { downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
 
 type SortKey = "development" | "division" | "leadsYtd" | "toursYtd" | "salesYtd";
 type SortDir = "asc" | "desc";
@@ -120,8 +120,9 @@ export default function CommunityListPage() {
 
   // Exports exactly what the table shows: current search, show/hide toggles,
   // and sort order all apply.
-  const downloadCommunities = () =>
-    downloadCsv(
+  const downloadCommunities = (format: DownloadFormat) =>
+    downloadData(
+      format,
       "community-list",
       ["Development", "Division", "Location", "Flags", "Leads YTD", "Tours YTD", "Sales YTD"],
       rows.map((c): CsvValue[] => [
