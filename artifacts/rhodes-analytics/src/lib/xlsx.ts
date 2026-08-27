@@ -21,9 +21,16 @@
  *
  * Call sites that need to correct the inference can pass explicit per-column
  * overrides through `downloadData`/`downloadXlsx`.
+ *
+ * Provenance (optional `info` param): when a call site passes a
+ * `DownloadInfo`, a second "Info" sheet lists the dashboard, each active
+ * filter and its value, the export timestamp, and the backend's data-as-of
+ * stamp — both timestamps in America/Chicago. The "Data" sheet is unchanged,
+ * stays first, and remains the sheet the workbook opens on. CSV downloads
+ * deliberately omit this metadata (see downloadCsv in utils.ts).
  */
 import { Workbook, type CellValue } from "exceljs";
-import type { CsvValue } from "./utils";
+import type { CsvValue, DownloadInfo } from "./utils";
 
 /** How a column is typed/formatted in the generated workbook. */
 export type XlsxColumnFormat = "text" | "number" | "percent";
@@ -104,15 +111,61 @@ function displayWidth(v: CsvValue, format: XlsxColumnFormat, decimals: number): 
     .reduce((max, line) => Math.max(max, line.length), 0);
 }
 
+/** Chicago-rendered timestamps, e.g. "Aug 27, 2026, 2:41 PM CDT". */
+const CHICAGO_TIMESTAMP = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Chicago",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZoneName: "short",
+});
+
 /**
- * Build a single-sheet workbook from the same headers/rows a CSV download
- * uses: bold frozen header row, typed number/percent columns, auto-sized
- * column widths. Exported for the round-trip tests in scripts/test-xlsx.ts.
+ * Render an ISO timestamp in company time (America/Chicago). An unparseable
+ * input comes back verbatim — wrong-looking is better than silently dropped.
+ * Exported for the round-trip tests in scripts/test-xlsx.ts.
+ */
+export function formatChicagoTimestamp(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : CHICAGO_TIMESTAMP.format(date);
+}
+
+/**
+ * Append the provenance sheet: one bold label + value per row. Values are
+ * plain text cells — XLSX strings are literal (never evaluated by Excel),
+ * so filter values need no formula-injection escaping.
+ */
+function addInfoSheet(workbook: Workbook, info: DownloadInfo): void {
+  const entries: [string, string][] = [["Dashboard", info.page]];
+  for (const filter of info.filters ?? []) entries.push([filter.label, filter.value]);
+  entries.push(["Exported", CHICAGO_TIMESTAMP.format(new Date())]);
+  if (info.dataAsOf) entries.push(["Data as of", formatChicagoTimestamp(info.dataAsOf)]);
+
+  const sheet = workbook.addWorksheet("Info");
+  for (const [label, value] of entries) {
+    const row = sheet.addRow([label, value]);
+    row.getCell(1).font = { bold: true };
+  }
+  for (const col of [1, 2] as const) {
+    const widest = entries.reduce((max, entry) => Math.max(max, entry[col - 1].length), 0);
+    sheet.getColumn(col).width = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, widest + 2));
+  }
+}
+
+/**
+ * Build a workbook from the same headers/rows a CSV download uses: bold
+ * frozen header row, typed number/percent columns, auto-sized column widths.
+ * With `info`, a second "Info" sheet records provenance; the "Data" sheet
+ * always stays first and active so the file opens on the data. Exported for
+ * the round-trip tests in scripts/test-xlsx.ts.
  */
 export function buildDownloadWorkbook(
   headers: string[],
   rows: CsvValue[][],
   overrides?: readonly (XlsxColumnFormat | undefined)[],
+  info?: DownloadInfo,
 ): Workbook {
   const formats = resolveColumnFormats(headers, rows, overrides);
   const decimals = headers.map((_, i) =>
@@ -149,6 +202,22 @@ export function buildDownloadWorkbook(
     );
     column.width = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, widest + 2));
   });
+
+  if (info) {
+    addInfoSheet(workbook, info);
+    // Even with a second sheet, the workbook must open on Data (sheet 0).
+    workbook.views = [
+      {
+        x: 0,
+        y: 0,
+        width: 20000,
+        height: 20000,
+        firstSheet: 0,
+        activeTab: 0,
+        visibility: "visible",
+      },
+    ];
+  }
 
   return workbook;
 }

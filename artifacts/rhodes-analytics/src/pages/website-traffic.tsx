@@ -27,7 +27,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  cn,
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
@@ -40,9 +46,12 @@ import {
   LiveStatusBadge,
   RefreshDataButton,
   TargetToggle,
+  appliedRangeInfo,
+  filterDisplayValue,
   fmt,
   fmtPct,
   ptgColor,
+  targetLabel,
   type TargetValue,
 } from "@/components/dashboard-shared";
 
@@ -99,6 +108,19 @@ export default function WebsiteTrafficPage() {
     setEndDate(`${year}-12-31`);
   };
 
+  // Provenance for the Excel Info sheet: this page's filters as displayed,
+  // with the server-resolved applied range (not the raw inputs, which may be
+  // blank while the backend fills in the default quarter).
+  const downloadInfo: DownloadInfo = {
+    page: "Website Traffic",
+    filters: [
+      { label: "Target", value: targetLabel(target) },
+      { label: "Division", value: filterDisplayValue(company) },
+      { label: "Development", value: filterDisplayValue(development) },
+      ...(dash.data ? appliedRangeInfo(dash.data.appliedRange) : []),
+    ],
+    dataAsOf: dash.data?.dataAsOf,
+  };
   const downloadMonthly = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
@@ -107,6 +129,8 @@ export default function WebsiteTrafficPage() {
       "website-traffic-monthly-users-sessions",
       ["Month", "Users", "New Users", "Sessions"],
       d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.users, m.newUsers, m.sessions]),
+      undefined,
+      downloadInfo,
     );
   };
   const downloadChannels = (format: DownloadFormat) => {
@@ -117,6 +141,8 @@ export default function WebsiteTrafficPage() {
       "website-traffic-users-by-channel",
       ["Channel", "Users"],
       d.channels.map((c): CsvValue[] => [c.name, c.users]),
+      undefined,
+      downloadInfo,
     );
   };
   const downloadDevices = (format: DownloadFormat) => {
@@ -127,6 +153,8 @@ export default function WebsiteTrafficPage() {
       "website-traffic-users-by-device",
       ["Device", "Users"],
       d.devices.map((c): CsvValue[] => [c.name, c.users]),
+      undefined,
+      downloadInfo,
     );
   };
   const downloadDevelopments = (format: DownloadFormat) => {
@@ -143,6 +171,8 @@ export default function WebsiteTrafficPage() {
         r.newUsers,
         r.sessions,
       ]),
+      undefined,
+      downloadInfo,
     );
   };
 

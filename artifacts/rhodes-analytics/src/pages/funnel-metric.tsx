@@ -28,7 +28,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  cn,
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 import {
   ALL,
   MONTH_NAMES,
@@ -41,10 +47,13 @@ import {
   LiveStatusBadge,
   RefreshDataButton,
   TargetToggle,
+  appliedRangeInfo,
+  filterDisplayValue,
   fmt,
   fmtPct,
   ptgColor,
   ptgBg,
+  targetLabel,
   type TargetValue,
 } from "@/components/dashboard-shared";
 
@@ -110,6 +119,19 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
   };
 
   const metricSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  // Provenance for the Excel Info sheet: this page's filters as displayed,
+  // with the server-resolved applied range (not the raw inputs, which may be
+  // blank while the backend fills in the default quarter).
+  const downloadInfo: DownloadInfo = {
+    page: title,
+    filters: [
+      { label: "Target", value: targetLabel(target) },
+      { label: "Division", value: filterDisplayValue(company) },
+      { label: "Development", value: filterDisplayValue(development) },
+      ...(dash.data ? appliedRangeInfo(dash.data.appliedRange) : []),
+    ],
+    dataAsOf: dash.data?.dataAsOf,
+  };
   const downloadMonthly = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
@@ -118,6 +140,8 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
       `${metricSlug}-monthly-vs-goal`,
       ["Month", "Online", "Onsite", "Monthly Goal"],
       d.monthly.map((m): CsvValue[] => [MONTH_NAMES[m.month - 1], m.online, m.onsite, m.goal]),
+      undefined,
+      downloadInfo,
     );
   };
   const downloadSources = (format: DownloadFormat) => {
@@ -128,6 +152,8 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
       `${metricSlug}-by-lead-source`,
       ["Lead Source", unit],
       d.sources.map((s): CsvValue[] => [s.name, s.count]),
+      undefined,
+      downloadInfo,
     );
   };
 
@@ -338,6 +364,7 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               testId="table-divisions"
               downloadSlug="division-summary"
               downloadFilename={`${metricSlug}-division-summary`}
+              downloadInfo={downloadInfo}
             />
             <BreakdownTable
               title="Development Summary"
@@ -350,6 +377,7 @@ function FunnelMetricPage({ metric, title, unit, color }: FunnelPageConfig) {
               testId="table-developments"
               downloadSlug="development-summary"
               downloadFilename={`${metricSlug}-development-summary`}
+              downloadInfo={downloadInfo}
             />
           </>
         )}
@@ -394,6 +422,7 @@ function BreakdownTable({
   testId,
   downloadSlug,
   downloadFilename,
+  downloadInfo,
 }: {
   title: string;
   rows: {
@@ -409,6 +438,7 @@ function BreakdownTable({
   testId: string;
   downloadSlug: string;
   downloadFilename: string;
+  downloadInfo: DownloadInfo;
 }) {
   const downloadTable = (format: DownloadFormat) =>
     downloadData(
@@ -423,6 +453,8 @@ function BreakdownTable({
         r.toDateGoal,
         r.ptgPercent,
       ]),
+      undefined,
+      downloadInfo,
     );
   return (
     <Card>

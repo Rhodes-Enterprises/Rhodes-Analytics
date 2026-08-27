@@ -32,9 +32,15 @@ import {
   FilterSelect,
   LiveStatusBadge,
   RefreshDataButton,
+  filterDisplayValue,
   fmt,
 } from "@/components/dashboard-shared";
-import { downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 
 const MEASURE_LABELS: Record<string, string> = {
   websiteUsers: "Website Users",
@@ -80,6 +86,19 @@ export default function YearOverYearPage() {
     const d = yoy.data;
     if (!d) return;
     const label = MEASURE_LABELS[m.measure] ?? m.measure;
+    // Provenance for the Excel Info sheet. This page has no date-range
+    // filter; the years row records which comparison the file holds, and the
+    // measure row disambiguates the four otherwise identical column layouts.
+    // The YoY payload carries no dataAsOf stamp, so that row is omitted.
+    const downloadInfo: DownloadInfo = {
+      page: "Year Over Year",
+      filters: [
+        { label: "Division", value: filterDisplayValue(company) },
+        { label: "Development", value: filterDisplayValue(development) },
+        { label: "Years", value: `${d.year} vs ${d.priorYear}` },
+        { label: "Measure", value: label },
+      ],
+    };
     return downloadData(
       format,
       `year-over-year-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
@@ -90,6 +109,8 @@ export default function YearOverYearPage() {
         p.priorYear,
         p.goal,
       ]),
+      undefined,
+      downloadInfo,
     );
   };
 

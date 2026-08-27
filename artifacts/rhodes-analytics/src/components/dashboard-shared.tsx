@@ -24,11 +24,37 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { toast } from "@/hooks/use-toast";
-import { cn, type DownloadFormat } from "@/lib/utils";
+import { cn, type DownloadFormat, type DownloadInfoFilter } from "@/lib/utils";
 
 /** Shared pieces for the migrated marketing dashboards. */
 
 export const ALL = "__all__";
+
+/** Display value for a filter selection: the ALL sentinel reads as "All". */
+export function filterDisplayValue(value: string): string {
+  return value === ALL ? "All" : value;
+}
+
+/** Display label for a target selection (falls back to the raw value). */
+export function targetLabel(value: string): string {
+  return TARGETS.find((t) => t.value === value)?.label ?? value;
+}
+
+/**
+ * Info-sheet rows for a server-resolved applied date range: the range the
+ * backend actually queried (defaults included), plus the progress-through
+ * date when the range extends past it. Used by Excel download provenance.
+ */
+export function appliedRangeInfo(range: {
+  startDate: string;
+  endDate: string;
+  toDate: string;
+}): DownloadInfoFilter[] {
+  return [
+    { label: "Date range", value: `${range.startDate} to ${range.endDate}` },
+    { label: "Progress through", value: range.toDate },
+  ];
+}
 
 export const MONTH_NAMES = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",

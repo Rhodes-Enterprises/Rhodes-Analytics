@@ -11,7 +11,13 @@ import { Layout } from "@/components/layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  cn,
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 import {
   Breadcrumb,
   DownloadDataButton,
@@ -22,6 +28,7 @@ import {
   fmtPct,
   ptgColor,
   ptgBg,
+  targetLabel,
   type TargetValue,
 } from "@/components/dashboard-shared";
 
@@ -43,6 +50,23 @@ export default function EhiGoalsPage() {
     queryClient.setQueryData(getGetEhiGoalsQueryKey(params), live);
   };
 
+  // Provenance for the Excel Info sheet: this page filters on target only;
+  // the fiscal year and progress-through date come from the server-resolved
+  // applied range.
+  const downloadInfo: DownloadInfo = {
+    page: "EHI Goals",
+    filters: [
+      { label: "Target", value: targetLabel(target) },
+      ...(dash.data
+        ? [
+            { label: "Fiscal year", value: dash.data.appliedRange.startDate.slice(0, 4) },
+            { label: "Progress through", value: dash.data.appliedRange.toDate },
+          ]
+        : []),
+    ],
+    dataAsOf: dash.data?.dataAsOf,
+  };
+
   const downloadGoalAttainment = (format: DownloadFormat) => {
     const d = dash.data;
     if (!d) return;
@@ -59,6 +83,8 @@ export default function EhiGoalsPage() {
         m.attainmentPct,
         m.ptgPercent,
       ]),
+      undefined,
+      downloadInfo,
     );
   };
 
@@ -171,7 +197,7 @@ export default function EhiGoalsPage() {
               </CardContent>
             </Card>
 
-            <DivisionMatrix divisions={dash.data.divisions} />
+            <DivisionMatrix divisions={dash.data.divisions} downloadInfo={downloadInfo} />
           </>
         )}
       </div>
@@ -181,6 +207,7 @@ export default function EhiGoalsPage() {
 
 function DivisionMatrix({
   divisions,
+  downloadInfo,
 }: {
   divisions: {
     division: string;
@@ -190,6 +217,7 @@ function DivisionMatrix({
     actual: number;
     ptgPercent: number | null;
   }[];
+  downloadInfo: DownloadInfo;
 }) {
   const byDivision = new Map<string, Map<string, (typeof divisions)[number]>>();
   for (const row of divisions) {
@@ -216,6 +244,8 @@ function DivisionMatrix({
           return cell ? [cell.actual, cell.toDateGoal, cell.ptgPercent] : [null, null, null];
         }),
       ]),
+      undefined,
+      downloadInfo,
     );
 
   return (

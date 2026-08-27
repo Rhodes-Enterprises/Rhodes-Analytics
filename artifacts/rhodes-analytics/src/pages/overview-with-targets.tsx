@@ -42,6 +42,9 @@ import {
   LoneDateHint,
   MONTH_NAMES,
   RefreshDataButton,
+  appliedRangeInfo,
+  filterDisplayValue,
+  targetLabel,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -61,7 +64,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  cn,
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -178,6 +187,37 @@ export default function OverviewWithTargetsPage() {
       company === ALL ? list : list.filter((d) => d.company === company);
     return [...new Set(scoped.map((d) => d.development))];
   }, [filters.data, company]);
+
+  // Provenance for the Excel Info sheet, shared by every download on this
+  // page except the YoY chart (see yoyDownloadInfo). The applied range comes
+  // from the server response — the range actually queried, defaults included.
+  const downloadInfo: DownloadInfo = {
+    page: "Overview with Targets",
+    filters: [
+      { label: "Target", value: targetLabel(target) },
+      { label: "Division", value: filterDisplayValue(company) },
+      { label: "Development", value: filterDisplayValue(development) },
+      { label: "Cohort Quarter", value: filterDisplayValue(cohortQuarter) },
+      { label: "Lead Source", value: filterDisplayValue(leadSource) },
+      { label: "Contact Channel", value: filterDisplayValue(contactChannel) },
+      { label: "Deal Channel", value: filterDisplayValue(dealChannel) },
+      ...(dash.data ? appliedRangeInfo(dash.data.appliedRange) : []),
+    ],
+    dataAsOf: dash.data?.dataAsOf,
+  };
+  // The YoY query honors only Division/Development — its downloads must not
+  // claim filters that never applied to those numbers. The YoY payload also
+  // carries no dataAsOf stamp, so that row is omitted.
+  const yoyDownloadInfo: DownloadInfo = {
+    page: "Overview with Targets",
+    filters: [
+      { label: "Division", value: filterDisplayValue(company) },
+      { label: "Development", value: filterDisplayValue(development) },
+      ...(yoy.data
+        ? [{ label: "Years", value: `${yoy.data.year} vs ${yoy.data.priorYear}` }]
+        : []),
+    ],
+  };
 
   return (
     <Layout>
@@ -360,10 +400,10 @@ export default function OverviewWithTargetsPage() {
         {dash.data && (
           <>
             <KpiRow data={dash.data} />
-            <TrafficMatrix data={dash.data} />
-            <DivisionTable data={dash.data} />
-            <DevelopmentTable data={dash.data} />
-            <RatioSection ratios={dash.data.ratios} />
+            <TrafficMatrix data={dash.data} downloadInfo={downloadInfo} />
+            <DivisionTable data={dash.data} downloadInfo={downloadInfo} />
+            <DevelopmentTable data={dash.data} downloadInfo={downloadInfo} />
+            <RatioSection ratios={dash.data.ratios} downloadInfo={downloadInfo} />
           </>
         )}
 
@@ -372,6 +412,7 @@ export default function OverviewWithTargetsPage() {
           yoy={yoy.data}
           loading={yoy.isLoading}
           error={yoy.isError ? ((yoy.error as Error)?.message ?? "Snowflake query failed.") : null}
+          downloadInfo={yoyDownloadInfo}
         />
       </div>
     </Layout>
@@ -557,7 +598,13 @@ function UnknownRow({
 
 /** Keys of the unknown-channel drill-down buckets, derived from the API type. */
 type UnknownBucketKey = keyof OwtDashboard["unknownRecords"];
-function TrafficMatrix({ data }: { data: OwtDashboard }) {
+function TrafficMatrix({
+  data,
+  downloadInfo,
+}: {
+  data: OwtDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   const m = data.trafficMatrix;
   const u = m.unknown;
   // Drill-down dialog state: bucket stays set while the dialog animates
@@ -609,6 +656,8 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
         matrixCsvRow("Total", "Total Leads", m.total.leads),
         matrixCsvRow("Total", "Total Tours", m.total.tours),
       ],
+      undefined,
+      downloadInfo,
     );
   return (
     <Card>
@@ -709,7 +758,13 @@ const UNKNOWN_BUCKET_META: Record<
 function trendMonthLabel(month: string): string {
   return MONTH_NAMES[Number(month.slice(5, 7)) - 1] ?? month;
 }
-function DivisionTable({ data }: { data: OwtDashboard }) {
+function DivisionTable({
+  data,
+  downloadInfo,
+}: {
+  data: OwtDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   return (
     <SummaryTable
       title="Division Summary"
@@ -717,6 +772,7 @@ function DivisionTable({ data }: { data: OwtDashboard }) {
       testId="table-divisions"
       downloadSlug="division-summary"
       downloadFilename="overview-with-targets-division-summary"
+      downloadInfo={downloadInfo}
       rows={data.divisions.map((r) => ({ ...r, label: r.division, key: r.division }))}
       userTotals={{
         newUsers: data.trafficMatrix.newWebsiteUsers,
@@ -726,7 +782,13 @@ function DivisionTable({ data }: { data: OwtDashboard }) {
   );
 }
 
-function DevelopmentTable({ data }: { data: OwtDashboard }) {
+function DevelopmentTable({
+  data,
+  downloadInfo,
+}: {
+  data: OwtDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   return (
     <SummaryTable
       title="Development Summary"
@@ -734,6 +796,7 @@ function DevelopmentTable({ data }: { data: OwtDashboard }) {
       testId="table-developments"
       downloadSlug="development-summary"
       downloadFilename="overview-with-targets-development-summary"
+      downloadInfo={downloadInfo}
       rows={data.developments.map((r) => ({
         ...r,
         label: r.development,
@@ -793,6 +856,7 @@ function SummaryTable({
   userTotals,
   downloadSlug,
   downloadFilename,
+  downloadInfo,
 }: {
   title: string;
   labelHeader: string;
@@ -802,6 +866,7 @@ function SummaryTable({
   userTotals: { newUsers: number; totalUsers: number };
   downloadSlug: string;
   downloadFilename: string;
+  downloadInfo: DownloadInfo;
 }) {
   const totals = useMemo(() => {
     const sum = (pick: (r: (typeof rows)[number]) => number) =>
@@ -891,6 +956,8 @@ function SummaryTable({
           null, null, null, null, null, null, null, null, null, null,
         ],
       ],
+      undefined,
+      downloadInfo,
     );
 
   const PtgCell = ({ v }: { v: number | null }) => (
@@ -1000,10 +1067,12 @@ function RatioChart({
   title,
   rows,
   slug,
+  downloadInfo,
 }: {
   title: string;
   rows: OwtRatioRow[];
   slug: string;
+  downloadInfo: DownloadInfo;
 }) {
   const data = rows.map((r) => ({
     name: r.name
@@ -1019,6 +1088,8 @@ function RatioChart({
       `overview-with-targets-${slug}`,
       ["Ratio", "Goal %", "Actual %"],
       data.map((d): CsvValue[] => [d.name, d.Goal, d.Actual]),
+      undefined,
+      downloadInfo,
     );
   return (
     <Card>
@@ -1054,7 +1125,13 @@ function RatioChart({
   );
 }
 
-function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
+function RatioSection({
+  ratios,
+  downloadInfo,
+}: {
+  ratios: OwtRatioRow[];
+  downloadInfo: DownloadInfo;
+}) {
   const groups = {
     total: ratios.filter((r) => r.group === "total"),
     online: ratios.filter((r) => r.group === "online"),
@@ -1071,6 +1148,8 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
         +(r.actual * 100).toFixed(1),
         r.ptgPercent,
       ]),
+      undefined,
+      downloadInfo,
     );
   return (
     <div className="space-y-4">
@@ -1120,9 +1199,24 @@ function RatioSection({ ratios }: { ratios: OwtRatioRow[] }) {
         </CardContent>
       </Card>
       <div className="grid gap-4 lg:grid-cols-3">
-        <RatioChart title="Total Ratios" rows={groups.total} slug="total-ratios" />
-        <RatioChart title="Online Ratios" rows={groups.online} slug="online-ratios" />
-        <RatioChart title="Onsite Ratios" rows={groups.onsite} slug="onsite-ratios" />
+        <RatioChart
+          title="Total Ratios"
+          rows={groups.total}
+          slug="total-ratios"
+          downloadInfo={downloadInfo}
+        />
+        <RatioChart
+          title="Online Ratios"
+          rows={groups.online}
+          slug="online-ratios"
+          downloadInfo={downloadInfo}
+        />
+        <RatioChart
+          title="Onsite Ratios"
+          rows={groups.onsite}
+          slug="onsite-ratios"
+          downloadInfo={downloadInfo}
+        />
       </div>
     </div>
   );
@@ -1140,10 +1234,12 @@ function YoySection({
   yoy,
   loading,
   error,
+  downloadInfo,
 }: {
   yoy: OwtYoy | undefined;
   loading: boolean;
   error: string | null;
+  downloadInfo: DownloadInfo;
 }) {
   const [measure, setMeasure] = useState("websiteUsers");
   const series = yoy?.measures.find((m) => m.measure === measure);
@@ -1178,6 +1274,15 @@ function YoySection({
         p.currentYear,
         p.goal,
       ]),
+      undefined,
+      // The measure toggle decides which series the file holds — record it.
+      {
+        ...downloadInfo,
+        filters: [
+          ...(downloadInfo.filters ?? []),
+          { label: "Measure", value: measureLabel },
+        ],
+      },
     );
   };
 

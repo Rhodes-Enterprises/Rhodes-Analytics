@@ -14,7 +14,7 @@ _Replace the heading above with the project's name, and this line with one sente
 - `pnpm --filter @workspace/api-server run audit:ui` — last-mile UI binding audit: builds the rhodes-analytics app, loads Overview with Targets in headless Chromium (playwright-core + Nix `chromium`), and verifies every rendered KPI/matrix/ratio/breakdown cell against the page's own `overview-with-targets` response (formatting-normalized), including the unknown-channel rows (shown exactly when the payload's unknown bucket is non-zero). Phase 2 then drives every filter control (6 selects, both date inputs, target selector) one at a time and asserts each change puts exactly the chosen value in the RIGHT query param of the page's next request — no stray/duplicate/renamed params, `__all__` never leaks on reset — and that the headline re-renders from the new payload (each response is briefly withheld and the headline must enter its loading state, proving the view is bound to the request lifecycle even when values coincide). Catches swapped columns, wrong-field bindings, and miswired filters that all API audits miss. Transient Snowflake-proxy 5xx are absorbed by watching the page's own query retries. Needs `AUDIT_API_BASE` (audit:all provides it).
 - `pnpm --filter @workspace/api-server run audit:ui-leasing` — same last-mile UI binding audit for the Leasing page: KPIs, funnel + lease-goal matrices, community summary (rows, footer sums), subtitle/chart-title bindings vs the page's own `leasing` response. Shared harness lives in `scripts/audit-ui-shared.ts` — new page audits should reuse it, not copy it.
 - `pnpm --filter @workspace/api-server run audit:warmup` — verify the startup cache warm-up still pre-computes the exact cache keys real default (no-filter) requests read: runs the real warm-up in-process, replays every warmed endpoint's default request, and fails on any cache miss (always in-process against current source; ignores `AUDIT_API_BASE`). Warmed endpoints live in `WARMED_ENDPOINTS` (src/routes/dashboards.ts) — add new warm jobs there and this audit covers them automatically
-- `pnpm --filter @workspace/rhodes-analytics run test:csv` / `run test:xlsx` — serializer tests for the shared download helpers (CSV quoting/injection guard; XLSX round-trip: percent/number formats, frozen bold header, widths)
+- `pnpm --filter @workspace/rhodes-analytics run test:csv` / `run test:xlsx` — serializer tests for the shared download helpers (CSV quoting/injection guard; XLSX round-trip: percent/number formats, frozen bold header, widths, provenance "Info" sheet)
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Stack
@@ -32,7 +32,7 @@ _Populate as you build — short repo map plus pointers to the source-of-truth f
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- **Excel downloads carry provenance; CSV stays bare.** Every `.xlsx` download includes a second "Info" sheet stamping the dashboard name, each active filter (server-resolved applied range, not raw inputs), the export time, and the backend `dataAsOf` — timestamps in America/Chicago. The "Data" sheet stays first and active, so files open exactly as before. CSV deliberately gets no metadata lines: a comment header would shift the column row off line 1 and break `pandas.read_csv`, `csv.reader`, and Excel text imports, so CSV stays machine-first (provenance is the Excel format's job).
 
 ## Product
 

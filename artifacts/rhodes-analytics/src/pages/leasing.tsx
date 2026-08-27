@@ -32,6 +32,8 @@ import {
   LiveStatusBadge,
   LoneDateHint,
   RefreshDataButton,
+  appliedRangeInfo,
+  filterDisplayValue,
 } from "@/components/dashboard-shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -44,7 +46,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn, downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  cn,
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 
 // ---------- formatting ----------
 
@@ -135,6 +143,19 @@ export default function LeasingPage() {
   const resetRange = () => {
     setStartDate("");
     setEndDate("");
+  };
+
+  // Provenance for the Excel Info sheet, shared by every download on this
+  // page. The applied range comes from the server response — the range
+  // actually queried, defaults included.
+  const downloadInfo: DownloadInfo = {
+    page: "Rhodes Living Leasing",
+    filters: [
+      { label: "Community", value: filterDisplayValue(community) },
+      { label: "Channel", value: filterDisplayValue(channel) },
+      ...(dash.data ? appliedRangeInfo(dash.data.appliedRange) : []),
+    ],
+    dataAsOf: dash.data?.dataAsOf,
   };
 
   return (
@@ -260,11 +281,11 @@ export default function LeasingPage() {
         {dash.data && (
           <>
             <KpiRow data={dash.data} />
-            <FunnelMatrix data={dash.data} />
-            <GoalMatrix data={dash.data} />
-            <CommunityTable data={dash.data} />
+            <FunnelMatrix data={dash.data} downloadInfo={downloadInfo} />
+            <GoalMatrix data={dash.data} downloadInfo={downloadInfo} />
+            <CommunityTable data={dash.data} downloadInfo={downloadInfo} />
             <CommunityFunnelTable data={dash.data} />
-            <MonthlyChart data={dash.data} />
+            <MonthlyChart data={dash.data} downloadInfo={downloadInfo} />
           </>
         )}
       </div>
@@ -425,7 +446,13 @@ function UnknownFunnelRow({
     </tr>
   );
 }
-function GoalMatrix({ data }: { data: LeasingDashboard }) {
+function GoalMatrix({
+  data,
+  downloadInfo,
+}: {
+  data: LeasingDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   const m = data.matrix;
   const downloadLeaseGoals = (format: DownloadFormat) =>
     downloadData(
@@ -438,6 +465,8 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
         matrixCsvRow("Onsite Leases Ratified", m.onsite),
         matrixCsvRow("Net Leases", m.net),
       ],
+      undefined,
+      downloadInfo,
     );
   return (
     <Card>
@@ -474,7 +503,13 @@ function GoalMatrix({ data }: { data: LeasingDashboard }) {
   );
 }
 
-function FunnelMatrix({ data }: { data: LeasingDashboard }) {
+function FunnelMatrix({
+  data,
+  downloadInfo,
+}: {
+  data: LeasingDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   const fu = data.funnel;
   const u = fu.unknown;
   const downloadFunnel = (format: DownloadFormat) =>
@@ -500,6 +535,8 @@ function FunnelMatrix({ data }: { data: LeasingDashboard }) {
           : []),
         matrixCsvRow("Move-Ins", fu.moveIns),
       ],
+      undefined,
+      downloadInfo,
     );
   return (
     <Card>
@@ -571,7 +608,13 @@ function FunnelMatrix({ data }: { data: LeasingDashboard }) {
   );
 }
 
-function CommunityTable({ data }: { data: LeasingDashboard }) {
+function CommunityTable({
+  data,
+  downloadInfo,
+}: {
+  data: LeasingDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   const rows = data.communities;
   const totals = useMemo(() => {
     const sum = (pick: (r: (typeof rows)[number]) => number) =>
@@ -616,6 +659,8 @@ function CommunityTable({ data }: { data: LeasingDashboard }) {
           null,
         ],
       ],
+      undefined,
+      downloadInfo,
     );
 
   return (
@@ -722,7 +767,13 @@ const STAGE_SERIES: Record<
   moveIns: (p) => ({ actual: p.moveIns, goal: p.moveInsGoal }),
 };
 
-function MonthlyChart({ data }: { data: LeasingDashboard }) {
+function MonthlyChart({
+  data,
+  downloadInfo,
+}: {
+  data: LeasingDashboard;
+  downloadInfo: DownloadInfo;
+}) {
   const [stage, setStage] = useState<TrendStageKey>("leases");
   const stageLabel = TREND_STAGES.find((s) => s.key === stage)?.label ?? "";
 
@@ -750,12 +801,22 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
 
   const downloadTrends = (format: DownloadFormat) => {
     const stageSlug = stageLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    // The stage toggle decides which series the file holds — record it.
+    const trendsInfo: DownloadInfo = {
+      ...downloadInfo,
+      filters: [
+        ...(downloadInfo.filters ?? []),
+        { label: "Trend stage", value: stageLabel },
+      ],
+    };
     if (stage === "leases") {
       return downloadData(
         format,
         `leasing-monthly-trends-${stageSlug}`,
         ["Month", "Ratified", "Cancelled", "Net", "Goal"],
         leaseData.map((p): CsvValue[] => [p.month, p.Ratified, p.Cancelled, p.Net, p.Goal]),
+        undefined,
+        trendsInfo,
       );
     } else {
       // Match the on-screen chart: the goal series is dropped when no goal
@@ -767,6 +828,8 @@ function MonthlyChart({ data }: { data: LeasingDashboard }) {
         stageData.map((p): CsvValue[] =>
           hasStageGoal ? [p.month, p.Actual, p.Goal] : [p.month, p.Actual],
         ),
+        undefined,
+        trendsInfo,
       );
     }
   };

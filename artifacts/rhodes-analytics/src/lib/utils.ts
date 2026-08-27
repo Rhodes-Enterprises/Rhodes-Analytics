@@ -63,6 +63,13 @@ function triggerBlobDownload(filename: string, blob: Blob): void {
 /**
  * Trigger a browser download of the given data as a CSV file.
  * A UTF-8 BOM is prepended so Excel detects the encoding correctly.
+ *
+ * Deliberately bare: headers + rows only, no provenance/comment lines. CSV
+ * is the machine-readable format — a leading "# filters: …" line would
+ * shift the header off row 1 and break pandas/`csv.reader` pipelines, Excel
+ * imports, and any script that consumes these files today. Provenance
+ * (page, filters, export time, data-as-of) ships on the Excel download's
+ * "Info" sheet instead — see DownloadInfo and src/lib/xlsx.ts.
  */
 export function downloadCsv(filename: string, headers: string[], rows: CsvValue[][]): void {
   const name = filename.toLowerCase().endsWith(".csv") ? filename : `${filename}.csv`;
@@ -77,6 +84,30 @@ export function downloadCsv(filename: string, headers: string[], rows: CsvValue[
 /** File formats offered by every DownloadDataButton menu. */
 export type DownloadFormat = "csv" | "xlsx";
 
+/** One "label: value" line on an Excel download's Info sheet. */
+export interface DownloadInfoFilter {
+  label: string;
+  value: string;
+}
+
+/**
+ * Provenance stamped onto a second "Info" sheet of every Excel download:
+ * which dashboard produced the file, the filters that were active (as
+ * displayed on screen), and the backend's data-freshness stamp. The export
+ * timestamp itself is added by the workbook builder at write time; both
+ * timestamps render in America/Chicago (company time).
+ *
+ * CSV downloads intentionally carry none of this — see downloadCsv.
+ */
+export interface DownloadInfo {
+  /** Dashboard/page name, e.g. "Overview with Targets". */
+  page: string;
+  /** Active filters in display order, formatted as shown on screen. */
+  filters?: readonly DownloadInfoFilter[];
+  /** Server "data as of" ISO stamp, when the payload carries one. */
+  dataAsOf?: string;
+}
+
 const XLSX_MIME =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
@@ -89,16 +120,21 @@ const XLSX_MIME =
  *
  * Rejects if the workbook can't be built (e.g. the lazy chunk fails to
  * load) — callers surface that; DownloadDataButton shows a toast.
+ *
+ * When `info` is provided, a second "Info" sheet records the dashboard,
+ * active filters, export time, and data-as-of stamp. The "Data" sheet is
+ * untouched and stays first, so the workbook still opens on the data.
  */
 export async function downloadXlsx(
   filename: string,
   headers: string[],
   rows: CsvValue[][],
   formats?: readonly (XlsxColumnFormat | undefined)[],
+  info?: DownloadInfo,
 ): Promise<void> {
   const name = filename.toLowerCase().endsWith(".xlsx") ? filename : `${filename}.xlsx`;
   const { buildDownloadWorkbook } = await import("./xlsx");
-  const workbook = buildDownloadWorkbook(headers, rows, formats);
+  const workbook = buildDownloadWorkbook(headers, rows, formats, info);
   const buffer = await workbook.xlsx.writeBuffer();
   triggerBlobDownload(name, new Blob([buffer], { type: XLSX_MIME }));
 }
@@ -108,6 +144,10 @@ export async function downloadXlsx(
  * and the exact same headers/rows feed both formats, so the two files always
  * carry identical data. Returns the XLSX promise so the caller (typically a
  * DownloadDataButton handler) can report failures.
+ *
+ * `info` (page, active filters, data-as-of) is stamped onto the Excel
+ * workbook's "Info" sheet only; the CSV output stays bare by design so
+ * existing machine consumers keep working (see downloadCsv).
  */
 export function downloadData(
   format: DownloadFormat,
@@ -115,7 +155,8 @@ export function downloadData(
   headers: string[],
   rows: CsvValue[][],
   xlsxFormats?: readonly (XlsxColumnFormat | undefined)[],
+  info?: DownloadInfo,
 ): void | Promise<void> {
-  if (format === "xlsx") return downloadXlsx(filename, headers, rows, xlsxFormats);
+  if (format === "xlsx") return downloadXlsx(filename, headers, rows, xlsxFormats, info);
   downloadCsv(filename, headers, rows);
 }

@@ -19,12 +19,26 @@ import {
   fmt,
 } from "@/components/dashboard-shared";
 import { useQueryClient } from "@tanstack/react-query";
-import { downloadData, type CsvValue, type DownloadFormat } from "@/lib/utils";
+import {
+  downloadData,
+  type CsvValue,
+  type DownloadFormat,
+  type DownloadInfo,
+} from "@/lib/utils";
 
 type SortKey = "development" | "division" | "leadsYtd" | "toursYtd" | "salesYtd";
 type SortDir = "asc" | "desc";
 
 const NUMERIC_KEYS = new Set<SortKey>(["leadsYtd", "toursYtd", "salesYtd"]);
+
+/** Column names as shown in the table header, for download provenance. */
+const SORT_LABELS: Record<SortKey, string> = {
+  development: "Development",
+  division: "Division",
+  leadsYtd: "Leads YTD",
+  toursYtd: "Tours YTD",
+  salesYtd: "Sales YTD",
+};
 
 function SortHeader({
   label,
@@ -119,7 +133,21 @@ export default function CommunityListPage() {
   };
 
   // Exports exactly what the table shows: current search, show/hide toggles,
-  // and sort order all apply.
+  // and sort order all apply — so the Info sheet records those client-side
+  // filters. The communities payload carries no dataAsOf stamp, so that row
+  // is omitted.
+  const downloadInfo: DownloadInfo = {
+    page: "Community List",
+    filters: [
+      { label: "Search", value: search.trim() || "(none)" },
+      { label: "Only communities with goals", value: onlyWithGoals ? "Yes" : "No" },
+      { label: "Show non-selling projects", value: showNonSelling ? "Yes" : "No" },
+      {
+        label: "Sort",
+        value: `${SORT_LABELS[sortKey]} (${sortDir === "asc" ? "ascending" : "descending"})`,
+      },
+    ],
+  };
   const downloadCommunities = (format: DownloadFormat) =>
     downloadData(
       format,
@@ -140,6 +168,8 @@ export default function CommunityListPage() {
         c.toursYtd,
         c.salesYtd,
       ]),
+      undefined,
+      downloadInfo,
     );
 
   return (
