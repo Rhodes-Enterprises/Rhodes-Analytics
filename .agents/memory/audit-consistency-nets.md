@@ -1,6 +1,6 @@
 ---
 name: Chart-vs-table consistency nets & label-drift guards
-description: Same-page chart/table agreement checks, and guards for audits that hardcode label literals
+description: Same-page chart/table agreement checks, label-literal drift guards, and combined-filter scenario conventions
 ---
 
 Dashboard pages here intentionally query the same numbers twice (a totals query and a monthly GROUP BY query). Nothing upstream forces the two to agree, so every such pair needs a same-response consistency check in the dashboard's audit script (Σ monthly == totals, per series).
@@ -14,7 +14,6 @@ Dashboard pages here intentionally query the same numbers twice (a totals query 
 - Cover BOTH Online and Onsite channel filters: channel filters swap in per-channel goal types, so a regression can hit one channel only.
 - Consistency-only variants are NOT enough for filter values that change semantics (per-channel goal types, opposite-channel-has-no-target): both API-derived series share a wrong goal-type resolution, so they agree while wrong. Such variants need real Snowflake baselines — scoped to the affected section (e.g. funnel-only) to keep query load down.
 - Don't rely on a "busiest value" picker to visit semantic-bearing literal values: the busiest channel can be a third label (e.g. 'Unknown'), leaving Online AND Onsite unvisited. Pin literal-value variants explicitly.
-
 
 ## Audit query pacing: rate, not concurrency, is the constraint
 
@@ -54,6 +53,17 @@ A UI count and the record list that explains it must be one snapshot end to end:
 - Prove the net can fail: doctor the SQL predicate on a throwaway build and watch the in-response equality diverge.
 
 
+## Combined-filter scenarios (fragment composition)
+
+Filter audits that only exercise single filters miss bugs that appear when WHERE fragments compose (a company semi-join interacting with a lead-source predicate, binds appended out of step with their SQL parts). A dashboard audit with filtered scenarios needs at least one scenario binding 2+ filters, including one that also binds explicit dates so the date binds precede a multi-filter fragment's binds.
+
+**Why:** users stack filters in the UI; each fragment can be individually correct and still compose wrong — every single-filter scenario passes while stacked views ship wrong numbers. (The overview audit gained these; leasing/yoy audits were still single-filter as of Aug 2026.)
+
+**How to apply:**
+- Pick combination values NESTED, not independently: busiest lead source INSIDE the picked company, busiest channel INSIDE the picked development (a second pick round, reusing the same semi-join shape the baselines bind). Independently busy picks can intersect to zero rows everywhere, and an all-0-vs-0 scenario is vacuous — treat a missing nested value as an audit FAILURE, same as missing base picks.
+- On the deal side, prefer the nested lead source that also has ratified deals in range so the composed deal fragment sees non-zero data.
+- Both sides' fragment builders must append SQL part + bind TOGETHER in one fixed field order (audit fragments mirror the API's filter builders); the combo scenarios are what catch either side breaking that pairing.
+- Prove the scenarios fire with a doctoring HTTP proxy keyed on the combined-params signature (e.g. doctors a headline only when company AND leadSource are both present) — single-filter scenarios stay green, so the failure is attributable to the combos.
 ## UI-audit binding maps and cross-task integration gaps
 
 The UI audit binds every rendered value to an API field via per-table label→field maps and fails any rendered label it does not know. Two parallel tasks can EACH validate green yet be jointly inconsistent (one adds UI rows, the other adds the UI audit without them) — the first tree containing both sides fails, and fixing that main-side latent break in-task is expected, not drift.

@@ -19,6 +19,17 @@
  * to find a non-empty value FAILS the audit rather than silently skipping
  * the scenario.
  *
+ * Two scenarios bind COMBINED filters (company + lead source; development +
+ * channel + explicit dates) because users stack filters in the UI, and a
+ * bug that only appears when fragments compose — the company semi-join
+ * interacting with a lead-source predicate, binds appended in the wrong
+ * order — would pass every single-filter scenario and still ship wrong
+ * numbers. Combination values are picked NESTED (the busiest lead source
+ * inside the picked company, the busiest channel inside the picked
+ * development), so the combined slice has leads by construction:
+ * independently busy picks could intersect to zero rows everywhere, and an
+ * all-0-vs-0 scenario would be vacuous coverage, not a safety net.
+ *
  * Baseline filter semantics deliberately mirror the API's asymmetry:
  * leadSource filters both contacts (LEAD_SOURCE_OVERVIEW) and deals
  * (DEAL_LEAD_SOURCE_OVERVIEW), while cohortQuarter filters contacts only —
@@ -495,7 +506,16 @@ interface Frag {
   binds: (string | number)[];
 }
 
-/** Baseline fragments for DM_CONTACTS (alias C). */
+/**
+ * Baseline fragments for DM_CONTACTS (alias C).
+ *
+ * Each filter appends its SQL part and its bind TOGETHER, in one fixed
+ * field order — the same order the API's contactFilters
+ * (src/lib/overview-targets.ts) uses — so for any COMBINATION of filters
+ * the bind sequence matches the fragment's ? order on both sides. The
+ * combined-filter scenarios exercise exactly this pairing; a bind pushed
+ * out of step with its part shows up there as divergence.
+ */
 function contactFrag(f: ScenarioFilters): Frag {
   const parts: string[] = [];
   const binds: (string | number)[] = [];
@@ -524,7 +544,10 @@ function contactFrag(f: ScenarioFilters): Frag {
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
 }
 
-/** Baseline fragments for DM_DEALS (alias X). */
+/**
+ * Baseline fragments for DM_DEALS (alias X). Same part/bind pairing
+ * invariant as contactFrag, mirroring the API's dealFilters field order.
+ */
 function dealFrag(f: ScenarioFilters): Frag {
   const parts: string[] = [];
   const binds: (string | number)[] = [];
@@ -1427,6 +1450,19 @@ interface CommunityRow {
  * has ratified deals in range — the deal-side DEAL_LEAD_SOURCE_OVERVIEW
  * binding checked only against zero rows would prove nothing. Missing
  * values make the audit FAIL — a silently skipped scenario is not coverage.
+ *
+ * For the COMBINED-filter scenarios it also picks values nested inside the
+ * base picks (second query round, since they depend on the first):
+ *  - companyLeadSource: busiest lead source WITHIN the picked company,
+ *    preferring one that also has the company's ratified deals in range so
+ *    the composed deal-side binding (company semi-join AND
+ *    DEAL_LEAD_SOURCE_OVERVIEW) sees non-zero data whenever possible;
+ *  - developmentChannel: busiest channel WITHIN the picked development.
+ * Nesting guarantees each combination has leads in range by construction.
+ * Independently busy values could intersect to zero rows everywhere, and a
+ * combination that passes 0-vs-0 on every check would be vacuous coverage
+ * — so a missing nested value fails the audit exactly like a missing base
+ * value does.
  */
 async function pickRepresentativeFilters(
   startDate: string,
@@ -1437,6 +1473,10 @@ async function pickRepresentativeFilters(
   channel: string;
   leadSource: string;
   cohortQuarter: string;
+  /** Busiest lead source inside `company` — combined-filter scenario */
+  companyLeadSource: string;
+  /** Busiest channel inside `development` — combined-filter scenario */
+  developmentChannel: string;
 }> {
   const [companyRows, devRows, channelRows, leadSourceRows, dealSourceRows, cohortRows] =
     await Promise.all([
@@ -1514,12 +1554,68 @@ async function pickRepresentativeFilters(
         "cannot exercise the required filtered scenarios (empty source data or broken dimension)",
     );
   }
+
+  // Second round: combination values nested inside the base picks (they
+  // depend on `company` / `development`, so they cannot join the batch
+  // above). The company clause is the same DEV_DIM semi-join shape the
+  // baselines bind, so "busy for the pick" and "busy for the baseline"
+  // cannot drift apart.
+  const [companyLeadSourceRows, companyDealSourceRows, developmentChannelRows] =
+    await Promise.all([
+      sfQuery<{ LS: string }>(
+        `SELECT C.LEAD_SOURCE_OVERVIEW AS LS, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+           AND C.CONTACT_EHI_COMMUNITY_OF_INTEREST IN
+               (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)
+           AND C.LEAD_SOURCE_OVERVIEW IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC`,
+        [startDate, toDate, company!],
+      ),
+      sfQuery<{ LS: string }>(
+        `SELECT DISTINCT X.DEAL_LEAD_SOURCE_OVERVIEW AS LS
+         FROM DM_DEALS X
+         WHERE ${isSaleSql("X")} AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+           AND X.DEAL_EHI_COMMUNITY_OF_INTEREST IN
+               (SELECT DEVELOPMENT_NAME FROM ${DEV_DIM} WHERE COMPANY_NAME = ?)
+           AND X.DEAL_LEAD_SOURCE_OVERVIEW IS NOT NULL`,
+        [startDate, toDate, company!],
+      ),
+      sfQuery<{ CH: string }>(
+        `SELECT C.ONSITE_ONLINE_SOURCE_CHANNEL AS CH, COUNT(*) AS N
+         FROM DM_CONTACTS C
+         WHERE ${isLeadSql("C")} AND C.CONTACT_CREATE_DATE BETWEEN ? AND ?
+           AND C.CONTACT_EHI_COMMUNITY_OF_INTEREST = ?
+           AND C.ONSITE_ONLINE_SOURCE_CHANNEL IS NOT NULL
+         GROUP BY 1 ORDER BY N DESC LIMIT 1`,
+        [startDate, toDate, development!],
+      ),
+    ]);
+  const companyDealSources = new Set(companyDealSourceRows.map((r) => r.LS));
+  const companyLeadSource =
+    companyLeadSourceRows.find((r) => companyDealSources.has(r.LS))?.LS ??
+    companyLeadSourceRows[0]?.LS;
+  const developmentChannel = developmentChannelRows[0]?.CH;
+  const missingCombo = [
+    !companyLeadSource && `lead source inside company "${company}"`,
+    !developmentChannel && `channel inside development "${development}"`,
+  ].filter(Boolean);
+  if (missingCombo.length) {
+    throw new Error(
+      `No representative ${missingCombo.join(", ")} found in ${startDate}..${toDate} — ` +
+        "cannot exercise the required combined-filter scenarios with non-empty data " +
+        "(a combination passing 0-vs-0 everywhere would be vacuous coverage, not a safety net)",
+    );
+  }
+
   return {
     company: company!,
     development: development!,
     channel: channel!,
     leadSource: leadSource!,
     cohortQuarter: cohortQuarter!,
+    companyLeadSource: companyLeadSource!,
+    developmentChannel: developmentChannel!,
   };
 }
 
@@ -1573,8 +1669,15 @@ async function main() {
   const toDate = expectedToDate(startDate, endDate);
   console.log(`Default range: ${startDate}..${endDate}, toDate=${toDate}`);
 
-  const { company, development, channel, leadSource, cohortQuarter } =
-    await pickRepresentativeFilters(startDate, toDate);
+  const {
+    company,
+    development,
+    channel,
+    leadSource,
+    cohortQuarter,
+    companyLeadSource,
+    developmentChannel,
+  } = await pickRepresentativeFilters(startDate, toDate);
 
   const priorYear = Number(startDate.slice(0, 4)) - 1;
   const scenarios: Scenario[] = [
@@ -1607,6 +1710,33 @@ async function main() {
       withBreakdowns: true,
     },
     { ...explicitRangeScenario(startDate), withBreakdowns: true },
+    // COMBINED filters — users stack these in the UI, and a bug that only
+    // appears when fragments compose (the company semi-join interacting
+    // with a lead-source predicate, binds appended in the wrong order)
+    // passes every single-filter scenario above. Values are nested picks
+    // (busiest lead source inside the picked company, busiest channel
+    // inside the picked development), so each combination has leads in
+    // range by construction — never an all-0-vs-0 vacuous pass. The second
+    // combo also binds explicit dates (the elapsed default quarter — the
+    // exact window the picks are busy in), so the two date binds precede a
+    // multi-filter fragment's binds just as the API's own queries order
+    // them; its appliedRange assertion still bites because the explicit
+    // endDate (today) differs from the default quarter end.
+    {
+      name: `combined company + lead source (${company} × ${companyLeadSource})`,
+      filters: { company, leadSource: companyLeadSource },
+    },
+    {
+      name:
+        `combined development + channel + explicit dates ` +
+        `(${development} × ${developmentChannel}, ${startDate}..${toDate})`,
+      filters: {
+        development,
+        channel: developmentChannel,
+        startDate,
+        endDate: toDate,
+      },
+    },
     {
       name: `prior fiscal year (${priorYear}) — past-year target resolution`,
       filters: {

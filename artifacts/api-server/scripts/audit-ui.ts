@@ -150,12 +150,11 @@ interface OverviewPayload {
   trafficMatrix: {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
-    /** Rows with neither 'Online' nor 'Onsite' label — actuals only, no goals exist for the bucket. */
+    /** Actual-only bucket for rows with no Online/Onsite label. */
     unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
     newWebsiteUsers: number;
   };
-
   divisions: BreakdownRow[];
 
   developments: BreakdownRow[];
@@ -553,19 +552,22 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
     "Total Leads": m.total.leads,
     "Total Tours": m.total.tours,
   };
-  // Actual-only rows for the unknown-channel bucket (no Online/Onsite label).
-  // The page renders the three rows together only while the bucket is
-  // non-empty (its hasUnknown rule); goals are never issued for the bucket,
-  // so the goal and PTG columns must show the null dash and only the Actual
-  // cell binds to an API field.
-  const hasUnknown = m.unknown.leads > 0 || m.unknown.tours > 0 || m.unknown.sales > 0;
-  const unknownBindings: Record<string, number> = hasUnknown
+  // The unknown-channel bucket renders ACTUAL-ONLY rows (no goals exist for
+  // unlabeled rows): en-dash placeholders in both goal columns and PTG %,
+  // plus a "<share>% of <total>" subtitle under the label. The page renders
+  // the section only when the bucket is non-zero — mirror that condition
+  // from the audited payload itself, so rows shown for an all-zero bucket
+  // (or hidden while the bucket has data) fail loudly.
+  const u = m.unknown;
+  if (!u) fail("traffic matrix", "payload trafficMatrix.unknown section is missing");
+  const unknownBindings: Record<string, { actual: number; total: number; totalName: string }> = u
     ? {
-        "Unknown Leads": m.unknown.leads,
-        "Unknown Tours": m.unknown.tours,
-        "Unknown Sales": m.unknown.sales,
+        "Unknown Leads": { actual: u.leads, total: m.total.leads.actual, totalName: "total leads" },
+        "Unknown Tours": { actual: u.tours, total: m.total.tours.actual, totalName: "total tours" },
+        "Unknown Sales": { actual: u.sales, total: p.kpis.grossSales, totalName: "gross sales" },
       }
     : {};
+  const hasUnknown = !!u && (u.leads > 0 || u.tours > 0 || u.sales > 0);
   const missing = new Set<string>();
   const col = (h: string) => columnIndex("traffic matrix", dom.matrix!.headers, h, missing);
   const cFull = col("Full Span Goal");
@@ -575,16 +577,28 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
 
   const seen = new Set<string>();
   for (const row of dom.matrix.rows) {
-    if (row.label in unknownBindings) {
+    const ub = unknownBindings[row.label];
+    if (ub) {
       seen.add(row.label);
       if (cFull >= 0)
         checkCell(`matrix "${row.label}" · Full Span Goal`, row.cells[cFull], null, { percent: false });
       if (cToDate >= 0)
         checkCell(`matrix "${row.label}" · To Date Goal`, row.cells[cToDate], null, { percent: false });
       if (cActual >= 0)
-        checkCell(`matrix "${row.label}" · Actual`, row.cells[cActual], unknownBindings[row.label], { percent: false });
+        checkCell(`matrix "${row.label}" · Actual`, row.cells[cActual], ub.actual, { percent: false });
       if (cPtg >= 0)
         checkCell(`matrix "${row.label}" · PTG %`, row.cells[cPtg], null, { percent: true });
+      // Share subtitle uses the page's own rounding: "<1" below one
+      // percent, whole percents otherwise, absent when the actual is 0.
+      const pct = ub.total > 0 && ub.actual > 0 ? (ub.actual / ub.total) * 100 : null;
+      const share = pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
+      if (share != null) {
+        checkText(`matrix "${row.label}" · share subtitle`, row.sub, `${share}% of ${ub.totalName}`);
+      } else if (row.sub != null) {
+        fail(`matrix "${row.label}" · share subtitle`, `expected no subtitle (zero actual) but saw "${row.sub}"`);
+      } else {
+        ok(`matrix "${row.label}" · share subtitle`, "absent for zero actual");
+      }
       continue;
     }
     const cell = bindings[row.label];
@@ -612,13 +626,25 @@ function checkMatrix(dom: DomSnapshot, p: OverviewPayload): void {
       }
     }
   }
-  for (const label of [...Object.keys(bindings), ...Object.keys(unknownBindings)]) {
+  for (const label of Object.keys(bindings)) {
     if (!seen.has(label)) {
       fail(`traffic matrix · "${label}"`, "expected row is missing from the rendered table");
     }
   }
+  for (const label of Object.keys(unknownBindings)) {
+    if (hasUnknown && !seen.has(label)) {
+      fail(
+        `traffic matrix · "${label}"`,
+        "expected row is missing — the audited response's unknown-channel bucket is non-zero, so the Unknown section must render",
+      );
+    } else if (!hasUnknown && seen.has(label)) {
+      fail(
+        `traffic matrix · "${label}"`,
+        "row rendered although the audited response's unknown-channel bucket is all zero — the Unknown section must be hidden",
+      );
+    }
+  }
 }
-
 function checkRatios(dom: DomSnapshot, p: OverviewPayload): void {
   if (!dom.ratios) {
     fail("ratios", 'table [data-testid="table-ratios"] not found on page');
