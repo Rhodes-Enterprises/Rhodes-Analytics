@@ -1,25 +1,38 @@
 ---
-name: Audit scripts bypass tsc
-description: scripts/ dir is outside tsconfig include; esbuild bundling does no type or symbol checking, so renamed helpers surface only at runtime
+name: Audit scripts typecheck
+description: scripts/ now typechecked via a dedicated scripts tsconfig chained into the package typecheck; DOM lib for page.evaluate; what the net does and doesn't catch
 ---
 
-# Audit scripts are not typechecked
+# Audit scripts are typechecked (gap closed)
 
-The api-server `tsconfig.json` has `include: ["src"]` — everything under
-`scripts/` (the audit family) is **never** seen by `tsc`. The audit scripts
-are built with esbuild (`--packages=external`), which does no type checking
-and no cross-symbol validation: an undefined identifier survives bundling and
-explodes only at runtime, potentially minutes into a Snowflake-heavy run.
+The api-server package has a second tsconfig (`tsconfig.scripts.json`,
+include: ["scripts"], `lib: ["es2022","dom","dom.iterable"]`, own
+tsBuildInfoFile ending in `.tsbuildinfo` so gitignore matches) chained into
+the package's `typecheck` script after the src check. esbuild still does no
+checking — the tsc pass is the only net over `scripts/`.
 
-**Why:** after a rebase, a helper was renamed on main (raw import aliased,
-call sites moved to a retrying wrapper). Auto-merged sections from the task
-branch still called the old name; `tsc --noEmit` was green, the audit bundled
-fine, and the failure appeared 350s into the run as "querySnowflake is not
-defined".
+**Why:** the scripts dir used to be outside any tsconfig; three runtime
+crashes (comment-glued `const` declaration, a function clobbered back to a
+stale Map-returning version while call sites used the newer lookup-function
+API, a deleted helper still called) sat in merged main invisibly because
+only esbuild ever touched these files. The first scripts-wide tsc run
+surfaced all three in seconds.
 
-**How to apply:** after resolving rebase conflicts in `scripts/*.ts`, don't
-trust a green typecheck. Grep the merged file for the identifiers your grafted
-sections call (imports, shared helpers) and confirm each is still defined —
-especially when main's commits mention renames, wrappers, or "shared helpers".
-A cheap smoke check: `node --check` the bundled output or run the audit once
-before completing.
+**How to apply:**
+- New audit/helper scripts under `scripts/` are covered automatically
+  (directory include). Scripts added OUTSIDE `scripts/`, or a new package's
+  script dir, need the same treatment — a naked esbuild bundle step means
+  zero checking.
+- DOM code inside `page.evaluate` blocks typechecks because of the DOM lib —
+  which also means node-side code referencing `document` would wrongly pass;
+  keep browser-side code inside evaluate callbacks.
+- The DOM lib resolved all of audit-ui's ~14 latent evaluate-block errors
+  without typed wrappers.
+- After rebases, `pnpm --filter @workspace/api-server run typecheck` now
+  catches renamed/deleted helpers in scripts — run it before trusting a
+  merged tree (supersedes the old "grep grafted call sites" advice, though a
+  smoke run still catches value-level drift types can't see).
+- The net CANNOT see a dropped entry-point call: an uninvoked `main()` is
+  legal TS, and the audit then passes vacuously (observed: a leasing audit
+  "passing" in 0.5s with zero output). Trust a PASS only if the audit printed
+  work; sub-second durations in the audit:all summary are the tell.

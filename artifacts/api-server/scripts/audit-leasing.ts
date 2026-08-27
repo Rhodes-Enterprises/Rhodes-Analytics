@@ -462,45 +462,71 @@ const EMPTY_GOAL_SUMS: GoalSums = {
   byCommunity: new Map(),
 };
 /**
- * Full-span + to-date goal sums for several goal types in ONE query (the
- * funnel needs up to 6 types per scenario; grouping keeps the audit under
- * the Snowflake proxy rate limit).
+ * Goal baselines for every needed goal type in ONE grouped query, honoring
+ * the community filter. Grouping DM_GOALS by (type, development, month)
+ * lets the same round trip serve the KPI/matrix sums, the monthly-series
+ * goal points, and the per-community goal columns — each is an exact
+ * rollup of the (type, dev, month) partition, so the values equal what the
+ * old one-query-per-consumer scalars computed (goals are fractional
+ * daily-distributed values; rolling groups up in JS only reorders float
+ * additions, dust far inside the audit tolerance). An undefined goal type
+ * (e.g. the opposite channel under a channel filter, or a split that
+ * doesn't exist for the fiscal year) never touches the query and reads as
+ * zeros/empty, exactly like the old early-return.
  */
 async function baselineGoalsByType(
-  goalTypes: string[],
+  goalTypes: (string | undefined)[],
   fiscalYear: number,
   startDate: string,
   endDate: string,
   toDate: string,
   community?: string,
-): Promise<Map<string, { fullSpan: number; toDate: number }>> {
-  if (goalTypes.length === 0) return new Map();
-  const placeholders = goalTypes.map(() => "?").join(",");
-  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
-  let extra = "";
-  if (community) {
-    extra = " AND DEVELOPMENT_NAME = ?";
-    binds.push(community);
+): Promise<(goalType: string | undefined) => GoalSums> {
+  const types = [...new Set(goalTypes.filter((t): t is string => !!t))];
+  const byType = new Map<string, GoalSums>();
+  if (types.length) {
+    const binds: (string | number)[] = [toDate, fiscalYear, ...types, startDate, endDate];
+    let extra = "";
+    if (community) {
+      extra = " AND DEVELOPMENT_NAME = ?";
+      binds.push(community);
+    }
+    const rows = await querySnowflake<{
+      GT: string;
+      DEV: string | null;
+      M: number;
+      FULL_SPAN: number | null;
+      TO_DATE: number | null;
+    }>(
+      `SELECT GOAL_TYPE AS GT, DEVELOPMENT_NAME AS DEV, MONTH(BUDGET_DATE) AS M,
+              SUM(GOAL) AS FULL_SPAN, SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+       FROM DM_GOALS
+       WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${types.map(() => "?").join(", ")})
+         AND BUDGET_DATE BETWEEN ? AND ?${extra}
+       GROUP BY 1, 2, 3`,
+      binds,
+    );
+    for (const row of rows) {
+      let g = byType.get(row.GT);
+      if (!g) {
+        g = { fullSpan: 0, toDate: 0, byMonth: new Map(), byCommunity: new Map() };
+        byType.set(row.GT, g);
+      }
+      const full = Number(row.FULL_SPAN) || 0;
+      const td = Number(row.TO_DATE) || 0;
+      const month = Number(row.M);
+      g.fullSpan += full;
+      g.toDate += td;
+      g.byMonth.set(month, (g.byMonth.get(month) ?? 0) + full);
+      if (row.DEV) {
+        const c = g.byCommunity.get(row.DEV) ?? { fullSpan: 0, toDate: 0 };
+        c.fullSpan += full;
+        c.toDate += td;
+        g.byCommunity.set(row.DEV, c);
+      }
+    }
   }
-  const rows = await querySnowflake<{
-    GOAL_TYPE: string;
-    FULL_SPAN: number;
-    TO_DATE: number;
-  }>(
-    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
-            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-     FROM DM_GOALS
-     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
-       AND BUDGET_DATE BETWEEN ? AND ?${extra}
-     GROUP BY 1`,
-    binds,
-  );
-  return new Map(
-    rows.map((r) => [
-      r.GOAL_TYPE,
-      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
-    ]),
-  );
+  return (goalType) => (goalType && byType.get(goalType)) || EMPTY_GOAL_SUMS;
 }
 /**
  * GA mapping domain — communities with any matched development row at all,
@@ -1525,6 +1551,11 @@ async function baselineContactStage(
   return { total, online, onsite };
 }
 
+/** Single-scalar COUNT baseline (for sources no grouped scan shares). */
+async function countScalar(sql: string, binds: (string | number)[]): Promise<number> {
+  const rows = await querySnowflake<{ N: number }>(sql, binds);
+  return Number(rows[0]?.N) || 0;
+}
 /**
  * Web-traffic actual baseline: GA session starts for the Rhodes Living web
  * property. The GA source has no online/onsite channel column, so a channel
@@ -1657,7 +1688,7 @@ async function auditFunnel(
       continue;
     }
     const gtName = typeByCell.get(c.name);
-    const goal = (gtName && goalSums.get(gtName)) || { fullSpan: 0, toDate: 0 };
+    const goal = goalSums(gtName);
     check(`funnel.${c.name}.actual`, cell.actual, actualByCell[c.name]);
     check(`funnel.${c.name}.fullSpanGoal`, cell.fullSpanGoal, goal.fullSpan);
     check(`funnel.${c.name}.toDateGoal`, cell.toDateGoal, goal.toDate);
@@ -1671,7 +1702,7 @@ async function auditFunnel(
   if (scenario.requireGoalData) {
     for (const stage of ["leads", "firstTours"] as const) {
       const gtName = cellGoalType(stage, "total");
-      const sum = (gtName && goalSums.get(gtName)?.fullSpan) || 0;
+      const sum = goalSums(gtName).fullSpan;
       if (!gtName || sum === 0) {
         failures++;
         console.error(

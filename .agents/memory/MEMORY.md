@@ -7,7 +7,7 @@
 - [Ratio goals & ratio audits](goal-data-model.md) — goal-ratio input table has junk NULL rows (filter year, skip nulls); resolve names both directions; audit derived ratios with compounded (1+t)/(1−t) tolerance.
 - [Stale local build state](stale-project-references.md) — "no exported member" = stale lib dist/ (tsc -b, --force if no-op); instant ERR_MODULE_NOT_FOUND after a rebase = stale node_modules (pnpm install).
 - [Managed rebase hazards](managed-rebase-hazards.md) — conflict-free auto-rebases can drop imports or misplace hunks; re-typecheck, diff touched files vs main, restart workflows before re-completing.
-- [Audit scripts bypass tsc](audit-scripts-not-typechecked.md) — scripts/ is outside tsconfig include; esbuild won't catch renamed helpers after rebases — grep grafted call sites, smoke-run before completing.
+- [Audit scripts typecheck](audit-scripts-not-typechecked.md) — scripts/ now typechecked (scripts tsconfig + DOM lib for evaluate blocks, chained into package typecheck); esbuild alone checks nothing.
 - [Chart-vs-table & label-drift nets](audit-consistency-nets.md) — Σ monthly==totals same-response checks, float-only tolerance, vacuity+label guards; drill-downs ship in the same statement+response as their counts; combined-filter scenarios need NESTED picks (busiest value inside the other pick).
 - [Dashboard query cache](dashboard-query-cache.md) — shared SWR cache; traffic-triggered refreshes only (warehouse credits), global 2-wide gate (proxy 10 RPS); ALS-tracked dataAsOf/refreshing stamps (oldest entry wins); forced-refresh path for new endpoints.
 - [Audit tolerance conventions](audit-conventions.md) — same-day-cached endpoints: bound by today-stamped activity + slack, never exact/flat; "today" = America/Chicago, never UTC; prove checks can fail via doctoring proxy.
@@ -23,7 +23,6 @@
 - [Frontend unit tests](frontend-unit-tests.md) — vitest must never load the env-guarded vite.config (separate vitest.config); tsc excludes tests; extend the single "test" validation command.
 - [Validation registration quirk](validation-registration.md) — setValidationCommand may inject a "Project" wrapper workflow that hijacks the Run button; delete the wrapper, keep the isValidation workflow.
 - [Post-rebase env drift](post-rebase-env-drift.md) — completion rebases don't reinstall deps; instant ERR_MODULE_NOT_FOUND in validation means run pnpm install, not debug the script.
-- [Stale TS project references](stale-project-references.md) — "no exported member" from @workspace libs during typecheck usually means stale dist/ declarations; run tsc -b on the lib first.
 - [Merge windows time out](merge-window-timeout.md) — resolve conflicts and call continueMergeResolution fast; platform aborts stalled rebases and drops WIP resolutions; verify before/after, not inside.
 - [No-history nulls](no-history-nulls.md) — months before a source's history start are null ("no data yet"), never 0; cutoff = unfiltered MIN(date), month-granular; audits require null exactly there.
 - [exceljs XLSX quirks](exceljs-quirks.md) — width 9 = "default" → style-less col dropped on write (clamp to 10); percent cells store fractions (v/100 + 0.0%); node tests: esbuild cjs, not esm.
