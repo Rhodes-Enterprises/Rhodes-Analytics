@@ -23,3 +23,5 @@ The Snowflake proxy's ~10 RPS repl-wide cap makes round trips — not scan cost 
 **Why:** audit:all had grown to ~20 min of mostly rate-limit waiting; batching cut round trips ~3-4x per scenario with byte-identical check output.
 
 **How to apply:** any new audit script (or new scenario) that would fire >3 scalar baselines against one table should start from these shapes; never weaken vacuity guards or label guards to batch them.
+
+**The same shapes serve the live endpoints:** merging each dashboard total+monthly statement pair into one GROUP BY (dims, MONTH) query — totals = Σ months in JS — halved a cold filtered load's fan-out (14→7 statements, one wave through the 7-wide statement cap; order-balanced cold medians ~9.9s→6.5s). Totals-from-months satisfies the Σ monthly==totals audit contract by construction; float reorder dust appears only on fractional (goal) sums, counts stay integer-exact. Give merged fetchers cache keys that encode exactly their SQL inputs — omit filters the SQL ignores (e.g. channel for goals/traffic) — so flipping an ignored filter is a cache hit, not a refetch.

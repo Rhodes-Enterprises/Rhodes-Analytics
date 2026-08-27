@@ -14,6 +14,13 @@ import { CHANNEL_ONLINE, CHANNEL_ONSITE } from "./business-defs";
  *   splits); older fiscal years used RL_Leases, which is used as a fallback.
  * - There is no cancellation goal; net leases are compared against the
  *   ratified goal.
+ * - Statement budget: every Snowflake statement's whole lifecycle holds a
+ *   slot under the global statement cap (lib/snowflake.ts), so a cold
+ *   load's fan-out width decides how many waves it drains in. Each
+ *   actuals/goals source is therefore fetched ONCE at month grain
+ *   (GROUP BY … MONTH) and serves both the totals and the monthly trend —
+ *   7 statements per filter combination instead of 14, one wave through
+ *   the cap.
  */
 
 // ---------- Small in-memory cache (per-process) ----------
@@ -25,32 +32,6 @@ import { CHANNEL_ONLINE, CHANNEL_ONSITE } from "./business-defs";
 // keeps its own entry budget, but the background-refresh rate-limit gate is
 // shared process-wide.
 const cached = createQueryCache({ maxEntries: 200 });
-
-/**
- * Minimal concurrency limiter for the dashboard's cold-cache query burst.
- * The Snowflake proxy allows ~10 RPS per repl; an unbounded Promise.all of
- * 15 queries can breach that on its own when the proxy is already busy.
- */
-function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
-  let active = 0;
-  const waiters: (() => void)[] = [];
-  return async function limit<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= max) {
-      // Wait for a slot; the releasing task transfers its slot directly to
-      // us (active stays constant), so latecomers can't overshoot the cap.
-      await new Promise<void>((resolve) => waiters.push(resolve));
-    } else {
-      active++;
-    }
-    try {
-      return await fn();
-    } finally {
-      const next = waiters.shift();
-      if (next) next();
-      else active--;
-    }
-  };
-}
 
 export interface LeasingFilters {
   community?: string;
@@ -138,16 +119,39 @@ function resolveFunnelGoalTypes(available: string[]): Map<string, string> {
 }
 
 // ---------- Queries ----------
+//
+// Every fetcher below returns ONE month-grained result set per source and
+// filter combination. Totals (KPIs, funnel table, goal matrix, community
+// summary) are derived in JS by summing the monthly rows — the audits'
+// chart-vs-table consistency checks (Σ monthly == total) already require
+// the two views to agree, so deriving one from the other both halves the
+// cold-load statement fan-out and makes that invariant hold by
+// construction. Don't split any of these back into separate total+monthly
+// statements: that doubles the waves through the global statement cap.
 
 interface GoalRow {
   GOAL_TYPE: string;
   COMPANY_NAME: string;
   DEVELOPMENT_NAME: string | null;
+  /** MONTH(BUDGET_DATE), 1-12. */
+  M: number;
+  /** SUM(GOAL) within the month (goals span startDate → endDate). */
   FULL_SPAN: number;
+  /** SUM(GOAL) within the month, capped at the toDate elapsed cutoff. */
   TO_DATE: number;
 }
 
-async function fetchGoals(
+/**
+ * Goal rows for all requested goal types, grouped by type, company,
+ * development AND month. One statement serves every goal consumer: the
+ * KPI/matrix/funnel/community totals sum FULL_SPAN / TO_DATE across months,
+ * and the monthly trend's goal series reads FULL_SPAN per month.
+ *
+ * The cache key deliberately omits the channel filter: goals carry no
+ * channel dimension (channel scoping picks a different GOAL_TYPE from the
+ * same rows), so flipping the channel filter reuses the cached rows.
+ */
+async function fetchGoalRows(
   f: LeasingFilters,
   fiscalYear: number,
   types: string[],
@@ -161,79 +165,27 @@ async function fetchGoals(
     binds.push(f.community);
   }
   const sql = `
-    SELECT GOAL_TYPE, COMPANY_NAME, DEVELOPMENT_NAME,
+    SELECT GOAL_TYPE, COMPANY_NAME, DEVELOPMENT_NAME, MONTH(BUDGET_DATE) AS M,
            SUM(GOAL) AS FULL_SPAN,
            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
     FROM DM_GOALS
     WHERE FISCAL_YEAR = ?
       AND GOAL_TYPE IN (${placeholders})
       AND BUDGET_DATE BETWEEN ? AND ?${communitySql}
-    GROUP BY 1, 2, 3`;
-  return cached(`rlGoals:${JSON.stringify([f, fiscalYear, types])}`, () =>
-    querySnowflake<GoalRow>(sql, binds),
-  );
+    GROUP BY 1, 2, 3, 4`;
+  const key = `rlGoalRows:${fiscalYear}:${JSON.stringify([
+    [...types].sort(),
+    f.startDate,
+    f.endDate,
+    f.toDate,
+    f.community ?? null,
+  ])}`;
+  return cached(key, () => querySnowflake<GoalRow>(sql, binds));
 }
-
 interface LeaseRow {
   COMMUNITY: string | null;
   CHANNEL: string | null;
   N: number;
-}
-
-/** Count RL deals by community/channel over a date column within the range. */
-async function fetchLeaseCounts(
-  f: LeasingFilters,
-  dateCol: "LEASE_RATIFIED_DATE" | "CANCELLATION_DATE",
-): Promise<LeaseRow[]> {
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  const parts: string[] = [];
-  if (f.community) {
-    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
-    binds.push(f.community);
-  }
-  if (f.channel) {
-    parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-    binds.push(f.channel);
-  }
-  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-  const sql = `
-    SELECT TRIM(X.RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) AS COMMUNITY,
-           X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
-           COUNT(*) AS N
-    FROM DM_DEALS X
-    WHERE X.PIPELINE_NAME = '${RL_PIPELINE}'
-      AND X.${dateCol} BETWEEN ? AND ?${extra}
-    GROUP BY 1, 2`;
-  return cached(`rlLeases:${dateCol}:${JSON.stringify(f)}`, () =>
-    querySnowflake<LeaseRow>(sql, binds),
-  );
-}
-
-/**
- * Count RL web sessions (GA session starts for the Rhodes Living property)
- * grouped by matched community. Only some communities have a GA
- * MATCHED_DEVELOPMENT_NAME mapping; unmatched sessions come back with a
- * null COMMUNITY (they still count toward the site-wide total).
- */
-async function fetchTrafficByCommunity(f: LeasingFilters): Promise<LeaseRow[]> {
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  let communitySql = "";
-  if (f.community) {
-    communitySql = " AND TRIM(MATCHED_DEVELOPMENT_NAME) = ?";
-    binds.push(f.community);
-  }
-  const sql = `
-    SELECT TRIM(MATCHED_DEVELOPMENT_NAME) AS COMMUNITY,
-           NULL AS CHANNEL,
-           COUNT(*) AS N
-    FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-    WHERE PROPERTY = 'Rhodes Living'
-      AND IS_SESSION_START = 'Yes'
-      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}
-    GROUP BY 1`;
-  return cached(`rlTrafficByDev:${JSON.stringify(f)}`, () =>
-    querySnowflake<LeaseRow>(sql, binds),
-  );
 }
 
 /**
@@ -256,182 +208,21 @@ async function fetchTrafficMappedCommunities(): Promise<Set<string>> {
   );
   return new Set(rows.map((r) => r.COMMUNITY));
 }
-/**
- * Count RL contacts by community/channel for a funnel stage.
- * - leads: contacts created in range with an RL community of interest
- * - firstTours: contacts whose first RL tour date falls in range
- * - moveIns: contacts whose first RL move-in date falls in range
- */
-async function fetchContactStageCounts(
-  f: LeasingFilters,
-  stage: "leads" | "firstTours" | "moveIns",
-): Promise<LeaseRow[]> {
-  const dateExpr = {
-    leads: "X.CONTACT_CREATE_DATE",
-    firstTours: "X.RL_MIN_FIRST_TOUR_DATE",
-    moveIns: "TO_DATE(X.RL_MIN_MOVE_IN_DATE)",
-  }[stage];
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  const parts: string[] = [];
-  if (stage === "leads") {
-    // A lead is a contact with an RL community of interest.
-    parts.push(
-      "X.RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
-    );
-  }
-  if (f.community) {
-    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?");
-    binds.push(f.community);
-  }
-  if (f.channel) {
-    parts.push("X.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-    binds.push(f.channel);
-  }
-  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-  const sql = `
-    SELECT TRIM(X.RL_COMMUNITY_OF_INTEREST) AS COMMUNITY,
-           X.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
-           COUNT(*) AS N
-    FROM DM_CONTACTS X
-    WHERE ${dateExpr} BETWEEN ? AND ?${extra}
-    GROUP BY 1, 2`;
-  return cached(`rlFunnel:${stage}:${JSON.stringify(f)}`, () =>
-    querySnowflake<LeaseRow>(sql, binds),
-  );
-}
-
 interface MonthlyRow {
   M: number;
   N: number;
 }
 
-/** Monthly actuals honor the requested range: startDate → toDate (elapsed). */
-async function fetchMonthly(
-  f: LeasingFilters,
-  dateCol: "LEASE_RATIFIED_DATE" | "CANCELLATION_DATE",
-): Promise<MonthlyRow[]> {
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  const parts: string[] = [];
-  if (f.community) {
-    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
-    binds.push(f.community);
-  }
-  if (f.channel) {
-    parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-    binds.push(f.channel);
-  }
-  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-  const sql = `
-    SELECT MONTH(X.${dateCol}) AS M, COUNT(*) AS N
-    FROM DM_DEALS X
-    WHERE X.PIPELINE_NAME = '${RL_PIPELINE}'
-      AND X.${dateCol} BETWEEN ? AND ?${extra}
-    GROUP BY 1`;
-  return cached(`rlMonthly:${dateCol}:${JSON.stringify(f)}`, () =>
-    querySnowflake<MonthlyRow>(sql, binds),
-  );
-}
-
-interface MonthlyGoalRow extends MonthlyRow {
-  GOAL_TYPE: string;
-}
-
-/**
- * Monthly goals cover the full requested span: startDate → endDate.
- * One query for all requested goal types (lease trend + funnel stages) to
- * stay under the Snowflake proxy rate limit.
- */
-async function fetchMonthlyGoals(
-  f: LeasingFilters,
-  fiscalYear: number,
-  goalTypes: string[],
-): Promise<MonthlyGoalRow[]> {
-  if (goalTypes.length === 0) return [];
-  const placeholders = goalTypes.map(() => "?").join(",");
-  const binds: (string | number)[] = [fiscalYear, ...goalTypes, f.startDate, f.endDate];
-  let communitySql = "";
-  if (f.community) {
-    communitySql = " AND DEVELOPMENT_NAME = ?";
-    binds.push(f.community);
-  }
-  const sql = `
-    SELECT GOAL_TYPE, MONTH(BUDGET_DATE) AS M, SUM(GOAL) AS N
-    FROM DM_GOALS
-    WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
-      AND BUDGET_DATE BETWEEN ? AND ?${communitySql}
-    GROUP BY 1, 2`;
-  return cached(
-    `rlMonthlyGoals:${fiscalYear}:${[...goalTypes].sort().join(",")}:${f.startDate}:${f.endDate}:${f.community ?? ""}`,
-    () => querySnowflake<MonthlyGoalRow>(sql, binds),
-  );
-}
-
-/** Monthly RL web sessions (same source/filters as fetchTrafficCount). */
-async function fetchMonthlyTraffic(f: LeasingFilters): Promise<MonthlyRow[]> {
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  let communitySql = "";
-  if (f.community) {
-    communitySql = " AND MATCHED_DEVELOPMENT_NAME = ?";
-    binds.push(f.community);
-  }
-  const sql = `
-    SELECT MONTH(GOOGLE_ANALYTICS_DATE) AS M, COUNT(*) AS N
-    FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
-    WHERE PROPERTY = 'Rhodes Living'
-      AND IS_SESSION_START = 'Yes'
-      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}
-    GROUP BY 1`;
-  return cached(`rlMonthlyTraffic:${JSON.stringify(f)}`, () =>
-    querySnowflake<MonthlyRow>(sql, binds),
-  );
-}
-
-/** Monthly contact-stage counts (same definitions as fetchContactStageCounts). */
-async function fetchMonthlyContactStage(
-  f: LeasingFilters,
-  stage: "leads" | "firstTours" | "moveIns",
-): Promise<MonthlyRow[]> {
-  const dateExpr = {
-    leads: "X.CONTACT_CREATE_DATE",
-    firstTours: "X.RL_MIN_FIRST_TOUR_DATE",
-    moveIns: "TO_DATE(X.RL_MIN_MOVE_IN_DATE)",
-  }[stage];
-  const binds: (string | number)[] = [f.startDate, f.toDate];
-  const parts: string[] = [];
-  if (stage === "leads") {
-    parts.push(
-      "X.RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
-    );
-  }
-  if (f.community) {
-    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?");
-    binds.push(f.community);
-  }
-  if (f.channel) {
-    parts.push("X.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
-    binds.push(f.channel);
-  }
-  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
-  const sql = `
-    SELECT MONTH(${dateExpr}) AS M, COUNT(*) AS N
-    FROM DM_CONTACTS X
-    WHERE ${dateExpr} BETWEEN ? AND ?${extra}
-    GROUP BY 1`;
-  return cached(`rlMonthlyFunnel:${stage}:${JSON.stringify(f)}`, () =>
-    querySnowflake<MonthlyRow>(sql, binds),
-  );
-}
-
-// ---------- Helpers ----------
-
+/** LeaseRow at month grain — the single-statement shape all actuals share. */
+interface LeaseMonthlyRow extends LeaseRow, MonthlyRow {}
 function ptg(actual: number, goal: number): number | null {
   if (!goal) return null;
   return (actual / goal - 1) * 100;
 }
 
-function sumRows(
-  rows: LeaseRow[],
-  filter?: (r: LeaseRow) => boolean,
+function sumRows<T extends { N: number }>(
+  rows: T[],
+  filter?: (r: T) => boolean,
 ): number {
   let total = 0;
   for (const r of rows) if (!filter || filter(r)) total += Number(r.N) || 0;
@@ -479,6 +270,7 @@ export async function getLeasingFilterOptions() {
 
 // ---------- Main dashboard payload ----------
 
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 export async function getLeasingDashboard(f: LeasingFilters) {
   const fiscalYear = new Date(f.startDate + "T00:00:00").getFullYear();
 
@@ -514,52 +306,32 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     firstTours: stageTrendGoalType("firstTours"),
     moveIns: stageTrendGoalType("moveIns"),
   };
-  const monthlyGoalTypes = [
-    ...new Set(
-      [trendGoalType, ...Object.values(funnelTrendGoalTypes)].filter(
-        (t): t is string => Boolean(t),
-      ),
-    ),
-  ];
-
-  // Bound the cold-cache fan-out: this dashboard needs 15 Snowflake queries,
-  // and firing them all at once can alone breach the proxy's ~10 RPS budget
-  // (429s) when the proxy is already contended (boot warm-up, background
-  // refreshes, audits). The global refresh gate only covers SWR refreshes,
-  // so cap this endpoint's own burst; 4-wide keeps cold-miss latency low.
-  const limit = createLimiter(4);
+  // One statement per data family, each grouped by month (and by
+  // community/channel where the query supports them), so a cold filter
+  // combination issues 7 Snowflake statements and drains through the shared
+  // statement cap in a single wave instead of two — roughly halving cold
+  // latency and proxy-budget pressure. Totals are derived by summing
+  // monthly rows; the audit's sum-of-monthly == totals consistency checks
+  // pin that equivalence. The GA mapping domain is date-independent and
+  // cached once per process, so it costs nothing on repeat filter picks.
   const [
     goals,
     ratified,
     cancelled,
-    monthlyRatified,
-    monthlyCancelled,
-    monthlyGoals,
     trafficRows,
     leadRows,
     tourRows,
     moveInRows,
-    monthlyTraffic,
-    monthlyLeads,
-    monthlyTours,
-    monthlyMoveIns,
     trafficDomain,
   ] = await Promise.all([
-    limit(() => fetchGoals(f, fiscalYear, types)),
-    limit(() => fetchLeaseCounts(f, "LEASE_RATIFIED_DATE")),
-    limit(() => fetchLeaseCounts(f, "CANCELLATION_DATE")),
-    limit(() => fetchMonthly(f, "LEASE_RATIFIED_DATE")),
-    limit(() => fetchMonthly(f, "CANCELLATION_DATE")),
-    limit(() => fetchMonthlyGoals(f, fiscalYear, monthlyGoalTypes)),
-    limit(() => fetchTrafficByCommunity(f)),
-    limit(() => fetchContactStageCounts(f, "leads")),
-    limit(() => fetchContactStageCounts(f, "firstTours")),
-    limit(() => fetchContactStageCounts(f, "moveIns")),
-    limit(() => fetchMonthlyTraffic(f)),
-    limit(() => fetchMonthlyContactStage(f, "leads")),
-    limit(() => fetchMonthlyContactStage(f, "firstTours")),
-    limit(() => fetchMonthlyContactStage(f, "moveIns")),
-    limit(() => fetchTrafficMappedCommunities()),
+    fetchGoalRows(f, fiscalYear, types),
+    fetchLeaseRows(f, "LEASE_RATIFIED_DATE"),
+    fetchLeaseRows(f, "CANCELLATION_DATE"),
+    fetchTrafficRows(f),
+    fetchContactStageRows(f, "leads"),
+    fetchContactStageRows(f, "firstTours"),
+    fetchContactStageRows(f, "moveIns"),
+    fetchTrafficMappedCommunities(),
   ]);
 
   const goalTotal = (
@@ -758,29 +530,31 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     rows
       .filter((r) => Number(r.M) === m)
       .reduce((t, r) => t + (Number(r.N) || 0), 0);
+  // Goal series: FULL_SPAN per month from the same grouped goal rows that
+  // feed the totals above (goals span startDate → endDate).
   const goalByMonth = (type: string | undefined, m: number) =>
     type
-      ? monthlyGoals
+      ? goals
           .filter((r) => r.GOAL_TYPE === type && Number(r.M) === m)
-          .reduce((t, r) => t + (Number(r.N) || 0), 0)
+          .reduce((t, r) => t + (Number(r.FULL_SPAN) || 0), 0)
       : 0;
   const monthly = Array.from({ length: 12 }, (_, i) => {
     const m = i + 1;
-    const rat = byMonth(monthlyRatified, m);
-    const can = byMonth(monthlyCancelled, m);
+    const rat = byMonth(ratified, m);
+    const can = byMonth(cancelled, m);
     return {
       month: m,
       ratified: rat,
       cancelled: can,
       net: rat - can,
       goal: goalByMonth(trendGoalType, m),
-      webTraffic: byMonth(monthlyTraffic, m),
+      webTraffic: byMonth(trafficRows, m),
       webTrafficGoal: goalByMonth(funnelTrendGoalTypes.webTraffic, m),
-      leads: byMonth(monthlyLeads, m),
+      leads: byMonth(leadRows, m),
       leadsGoal: goalByMonth(funnelTrendGoalTypes.leads, m),
-      firstTours: byMonth(monthlyTours, m),
+      firstTours: byMonth(tourRows, m),
       firstToursGoal: goalByMonth(funnelTrendGoalTypes.firstTours, m),
-      moveIns: byMonth(monthlyMoveIns, m),
+      moveIns: byMonth(moveInRows, m),
       moveInsGoal: goalByMonth(funnelTrendGoalTypes.moveIns, m),
     };
   });
@@ -795,4 +569,125 @@ export async function getLeasingDashboard(f: LeasingFilters) {
     communities,
     monthly,
   };
+}
+
+/**
+ * RL web sessions (GA session starts for the Rhodes Living property)
+ * grouped by matched community and month. Only some communities have a GA
+ * MATCHED_DEVELOPMENT_NAME mapping; unmatched sessions come back with a
+ * null COMMUNITY but still count toward the site-wide total (the funnel's
+ * traffic total is the sum of ALL rows). The cache key omits the channel
+ * filter: GA sessions carry no deal channel.
+ */
+async function fetchTrafficRows(f: LeasingFilters): Promise<LeaseMonthlyRow[]> {
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  let communitySql = "";
+  if (f.community) {
+    communitySql = " AND TRIM(MATCHED_DEVELOPMENT_NAME) = ?";
+    binds.push(f.community);
+  }
+  const sql = `
+    SELECT TRIM(MATCHED_DEVELOPMENT_NAME) AS COMMUNITY,
+           NULL AS CHANNEL,
+           MONTH(GOOGLE_ANALYTICS_DATE) AS M,
+           COUNT(*) AS N
+    FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
+    WHERE PROPERTY = 'Rhodes Living'
+      AND IS_SESSION_START = 'Yes'
+      AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${communitySql}
+    GROUP BY 1, 3`;
+  const key = `rlTrafficRows:${JSON.stringify([f.startDate, f.toDate, f.community ?? null])}`;
+  return cached(key, () => querySnowflake<LeaseMonthlyRow>(sql, binds));
+}
+
+/**
+ * Count RL deals by community/channel/month over a date column within the
+ * range (startDate → toDate elapsed). Totals — all-up, per channel, per
+ * community — are sums of these rows; the monthly trend groups them by M.
+ */
+async function fetchLeaseRows(
+  f: LeasingFilters,
+  dateCol: "LEASE_RATIFIED_DATE" | "CANCELLATION_DATE",
+): Promise<LeaseMonthlyRow[]> {
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  const parts: string[] = [];
+  if (f.community) {
+    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const sql = `
+    SELECT TRIM(X.RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) AS COMMUNITY,
+           X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
+           MONTH(X.${dateCol}) AS M,
+           COUNT(*) AS N
+    FROM DM_DEALS X
+    WHERE X.PIPELINE_NAME = '${RL_PIPELINE}'
+      AND X.${dateCol} BETWEEN ? AND ?${extra}
+    GROUP BY 1, 2, 3`;
+  // Keys hold exactly the SQL inputs (actuals never bind endDate — they
+  // stop at the elapsed cutoff), so filter tweaks the query ignores don't
+  // cold-miss the cache.
+  const key = `rlLeaseRows:${dateCol}:${JSON.stringify([
+    f.startDate,
+    f.toDate,
+    f.community ?? null,
+    f.channel ?? null,
+  ])}`;
+  return cached(key, () => querySnowflake<LeaseMonthlyRow>(sql, binds));
+}
+
+/**
+ * Count RL contacts by community/channel/month for a funnel stage.
+ * - leads: contacts created in range with an RL community of interest
+ * - firstTours: contacts whose first RL tour date falls in range
+ * - moveIns: contacts whose first RL move-in date falls in range
+ * Funnel totals and channel splits are sums of these rows; the monthly
+ * trend groups them by M.
+ */
+async function fetchContactStageRows(
+  f: LeasingFilters,
+  stage: "leads" | "firstTours" | "moveIns",
+): Promise<LeaseMonthlyRow[]> {
+  const dateExpr = {
+    leads: "X.CONTACT_CREATE_DATE",
+    firstTours: "X.RL_MIN_FIRST_TOUR_DATE",
+    moveIns: "TO_DATE(X.RL_MIN_MOVE_IN_DATE)",
+  }[stage];
+  const binds: (string | number)[] = [f.startDate, f.toDate];
+  const parts: string[] = [];
+  if (stage === "leads") {
+    // A lead is a contact with an RL community of interest.
+    parts.push(
+      "X.RL_COMMUNITY_OF_INTEREST IS NOT NULL AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+    );
+  }
+  if (f.community) {
+    parts.push("TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?");
+    binds.push(f.community);
+  }
+  if (f.channel) {
+    parts.push("X.ONSITE_ONLINE_SOURCE_CHANNEL = ?");
+    binds.push(f.channel);
+  }
+  const extra = parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  const sql = `
+    SELECT TRIM(X.RL_COMMUNITY_OF_INTEREST) AS COMMUNITY,
+           X.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
+           MONTH(${dateExpr}) AS M,
+           COUNT(*) AS N
+    FROM DM_CONTACTS X
+    WHERE ${dateExpr} BETWEEN ? AND ?${extra}
+    GROUP BY 1, 2, 3`;
+  const key = `rlFunnelRows:${stage}:${JSON.stringify([
+    f.startDate,
+    f.toDate,
+    f.community ?? null,
+    f.channel ?? null,
+  ])}`;
+  return cached(key, () => querySnowflake<LeaseMonthlyRow>(sql, binds));
 }

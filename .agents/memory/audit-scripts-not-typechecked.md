@@ -3,6 +3,7 @@ name: Audit scripts typecheck
 description: scripts/ now typechecked via a dedicated scripts tsconfig chained into the package typecheck; DOM lib for page.evaluate; what the net does and doesn't catch
 ---
 
+
 # Audit scripts are typechecked (gap closed)
 
 The api-server package has a second tsconfig (`tsconfig.scripts.json`,

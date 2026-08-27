@@ -15,10 +15,10 @@
 - [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium; UI audits: page's own XHR, param-multiset wiring, route-hold lifecycle proof vs vacuous equality, retry-tolerant 5xx.
 - [Client date-range guards](date-range-guards.md) — guard lone (single-set) dates too, and anchor client "today" to America/Chicago like the server: viewer-clock guards fail at quarter/year boundaries.
 - [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter filter no-ops leads; tours carry signal); pick lead sources that also have deals in range.
-- [Batched audit baselines](batched-audit-baselines.md) — collapse scalar counts into COUNT_IF/GROUP BY scans (0==missing, bind order: subquery SELECT binds first); UNION ALL for different date axes.
+- [Batched Snowflake round trips](batched-audit-baselines.md) — collapse scalars into COUNT_IF/GROUP BY scans (0==missing; subquery binds first); same shapes halve live endpoint fan-out (totals = Σ monthly).
 - [Env-var number parsing](env-var-parsing.md) — Number("") is 0, not NaN: unset env + ">= 0" guard silently disables budgets; treat empty as absent, and test the genuinely UNSET path.
 - [In-process audit patterns](in-process-audit-pattern.md) — warm-vs-request key drift via cache observer; clock-injected timezone-rollover binding via sentinel-seeded cache; --packages=external breaks on TS-source pkgs.
-- [Auto-merge verification](automerge-verification.md) — assisted rounds can corrupt regions outside markers; mid-rebase the tree lacks still-queued commits — check before re-implementing "lost" work.
+- [Auto-merge verification](automerge-verification.md) — assisted rounds corrupt regions outside markers; the rebase BASE can ship broken; idling mid-rebase gets it ABORTED (recover via dist/*.map).
 - [Parallel-task merges](parallel-task-merges.md) — two branches often fix the SAME gap; auto-merge stacks both (doubled registrations/type fields/functions) without conflicts — grep both-touched files, re-verify renamed helpers.
 - [Frontend unit tests](frontend-unit-tests.md) — vitest must never load the env-guarded vite.config (separate vitest.config); tsc excludes tests; extend the single "test" validation command.
 - [Validation registration quirk](validation-registration.md) — setValidationCommand may inject a "Project" wrapper workflow that hijacks the Run button; delete the wrapper, keep the isValidation workflow.
