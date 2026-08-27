@@ -8,7 +8,7 @@
 - [Stale local build state](stale-project-references.md) — "no exported member" = stale lib dist/ (tsc -b, --force if no-op); instant ERR_MODULE_NOT_FOUND after a rebase = stale node_modules (pnpm install).
 - [Managed rebase hazards](managed-rebase-hazards.md) — conflict-free auto-rebases can drop imports or misplace hunks; re-typecheck, diff touched files vs main, restart workflows before re-completing.
 - [Audit scripts bypass tsc](audit-scripts-not-typechecked.md) — scripts/ is outside tsconfig include; esbuild won't catch renamed helpers after rebases — grep grafted call sites, smoke-run before completing.
-- [Chart-vs-table & label-drift nets](audit-consistency-nets.md) — Σ monthly==totals same-response checks, float-only tolerance, vacuity guards; label guards when audits hardcode literals.
+- [Chart-vs-table & label-drift nets](audit-consistency-nets.md) — Σ monthly==totals same-response checks, float-only tolerance, vacuity guards, label guards; drill-down lists ship in the same statement+response as their counts; clean audit runs.
 - [Dashboard query cache](dashboard-query-cache.md) — all dashboard libs use the shared SWR cache; refreshes traffic-triggered only (warehouse credits), one global 2-wide refresh gate (proxy 10 RPS).
 - [Audit tolerance conventions](audit-conventions.md) — same-day-cached endpoints: bound by today-stamped activity + slack, never exact/flat; "today" = America/Chicago, never UTC; prove checks can fail via doctoring proxy.
 - [Audit timeout layering](audit-conventions.md) — request deadline ×(retries+1)+backoffs must fit the per-audit budget; kill stuck audits via detached process group (killing pnpm orphans them).

@@ -654,7 +654,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OwtRatioRow"
-      required: [appliedRange, kpis, trafficMatrix, divisions, developments, ratios]
+        unknownRecords:
+          type: object
+          description: >-
+            The CRM records behind each trafficMatrix.unknown bucket — the
+            actionable to-do list for fixing channel attribution at the
+            source, delivered with the counts they explain.
+          properties:
+            leads:
+              $ref: "#/components/schemas/OwtUnknownBucketList"
+            tours:
+              $ref: "#/components/schemas/OwtUnknownBucketList"
+            sales:
+              $ref: "#/components/schemas/OwtUnknownBucketList"
+          required: [leads, tours, sales]
+      required: [appliedRange, kpis, trafficMatrix, divisions, developments, ratios, unknownRecords]
     OwtDevelopmentRow:
       allOf:
         - $ref: "#/components/schemas/OwtDivisionRow"
@@ -741,6 +755,54 @@ components:
         ptgPercent:
           type: ["number", "null"]
       required: [name, group, goal, actual, ptgPercent]
+    OwtUnknownRecord:
+      type: object
+      description: One CRM record missing an Online/Onsite channel label
+      properties:
+        name:
+          type: ["string", "null"]
+          description: Deal name (sales) or contact full name (leads/tours)
+        email:
+          type: ["string", "null"]
+          description: Contact email (leads/tours only; null for sales)
+        development:
+          type: ["string", "null"]
+          description: Community of interest as entered on the CRM record
+        division:
+          type: ["string", "null"]
+          description: Division attributed via the company dimension (null when unmapped)
+        date:
+          type: string
+          description: Contract-ratified date (sales), create date (leads), or first-tour date (tours)
+        rawChannel:
+          type: ["string", "null"]
+          description: Raw channel value on the record — e.g. the literal 'Unknown', or null when blank
+        crmUrl:
+          type: ["string", "null"]
+          description: Link to the record in the CRM
+      required: [name, email, development, division, date, rawChannel, crmUrl]
+    OwtUnknownBucketList:
+      type: object
+      description: >-
+        Record-level drill-down behind one unknown-channel matrix bucket.
+        Rides inside the overview response — same payload, same data
+        snapshot as the count it explains — so the dialog can never
+        disagree with the on-screen row.
+      properties:
+        total:
+          type: number
+          description: >-
+            Full count of unlabeled records in the range. Must equal the
+            matching trafficMatrix.unknown bucket; both come from one
+            Snowflake statement (audited).
+        truncated:
+          type: boolean
+          description: True when more records exist than the capped list returns
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/OwtUnknownRecord"
+      required: [total, truncated, records]
     OwtYoy:
       type: object
       properties:

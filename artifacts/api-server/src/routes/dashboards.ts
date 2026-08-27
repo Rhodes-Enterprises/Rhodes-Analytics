@@ -122,6 +122,11 @@ router.get("/dashboards/overview-with-targets", async (req, res) => {
       },
       kpis: data.kpis,
       trafficMatrix: data.trafficMatrix,
+      // Record-level lists behind the unknown buckets ride in the same
+      // response as the counts they explain, from the same cached bundle —
+      // a background cache refresh can never make a drill-down dialog
+      // disagree with the matrix row the user clicked.
+      unknownRecords: data.unknownRecords,
       divisions: data.divisions,
       developments: data.developments,
       ratios: data.ratios,

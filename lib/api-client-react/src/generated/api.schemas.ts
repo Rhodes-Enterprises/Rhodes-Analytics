@@ -172,6 +172,64 @@ export type OwtDashboardTrafficMatrix = {
   newWebsiteUsers: number;
 };
 
+/**
+ * One CRM record missing an Online/Onsite channel label
+ */
+export interface OwtUnknownRecord {
+  /**
+     * Deal name (sales) or contact full name (leads/tours)
+     * @nullable
+     */
+  name: string | null;
+  /**
+     * Contact email (leads/tours only; null for sales)
+     * @nullable
+     */
+  email: string | null;
+  /**
+     * Community of interest as entered on the CRM record
+     * @nullable
+     */
+  development: string | null;
+  /**
+     * Division attributed via the company dimension (null when unmapped)
+     * @nullable
+     */
+  division: string | null;
+  /** Contract-ratified date (sales), create date (leads), or first-tour date (tours) */
+  date: string;
+  /**
+     * Raw channel value on the record — e.g. the literal 'Unknown', or null when blank
+     * @nullable
+     */
+  rawChannel: string | null;
+  /**
+     * Link to the record in the CRM
+     * @nullable
+     */
+  crmUrl: string | null;
+}
+
+/**
+ * Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.
+ */
+export interface OwtUnknownBucketList {
+  /** Full count of unlabeled records in the range. Must equal the matching trafficMatrix.unknown bucket; both come from one Snowflake statement (audited). */
+  total: number;
+  /** True when more records exist than the capped list returns */
+  truncated: boolean;
+  records: OwtUnknownRecord[];
+}
+
+/**
+ * The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain.
+ */
+export type OwtDashboardUnknownRecords = {
+  leads: OwtUnknownBucketList;
+  tours: OwtUnknownBucketList;
+  sales: OwtUnknownBucketList;
+};
+
 export interface OwtDivisionRow {
   division: string;
   newWebsiteUsers: number;
@@ -234,6 +292,8 @@ export interface OwtDashboard {
   divisions: OwtDivisionRow[];
   developments: OwtDevelopmentRow[];
   ratios: OwtRatioRow[];
+  /** The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain. */
+  unknownRecords: OwtDashboardUnknownRecords;
 }
 
 export type OwtYoyMeasuresItemPointsItem = {

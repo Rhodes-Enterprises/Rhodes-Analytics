@@ -172,7 +172,48 @@ export const GetOwtDashboardResponse = zod.object({
   "goal": zod.number().nullable(),
   "actual": zod.number(),
   "ptgPercent": zod.number().nullable()
-}))
+})),
+  "unknownRecords": zod.object({
+  "leads": zod.object({
+  "total": zod.number().describe('Full count of unlabeled records in the range. Must equal the matching trafficMatrix.unknown bucket; both come from one Snowflake statement (audited).'),
+  "truncated": zod.boolean().describe('True when more records exist than the capped list returns'),
+  "records": zod.array(zod.object({
+  "name": zod.string().nullable().describe('Deal name (sales) or contact full name (leads\/tours)'),
+  "email": zod.string().nullable().describe('Contact email (leads\/tours only; null for sales)'),
+  "development": zod.string().nullable().describe('Community of interest as entered on the CRM record'),
+  "division": zod.string().nullable().describe('Division attributed via the company dimension (null when unmapped)'),
+  "date": zod.string().describe('Contract-ratified date (sales), create date (leads), or first-tour date (tours)'),
+  "rawChannel": zod.string().nullable().describe('Raw channel value on the record — e.g. the literal \'Unknown\', or null when blank'),
+  "crmUrl": zod.string().nullable().describe('Link to the record in the CRM')
+}).describe('One CRM record missing an Online\/Onsite channel label'))
+}).describe('Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.'),
+  "tours": zod.object({
+  "total": zod.number().describe('Full count of unlabeled records in the range. Must equal the matching trafficMatrix.unknown bucket; both come from one Snowflake statement (audited).'),
+  "truncated": zod.boolean().describe('True when more records exist than the capped list returns'),
+  "records": zod.array(zod.object({
+  "name": zod.string().nullable().describe('Deal name (sales) or contact full name (leads\/tours)'),
+  "email": zod.string().nullable().describe('Contact email (leads\/tours only; null for sales)'),
+  "development": zod.string().nullable().describe('Community of interest as entered on the CRM record'),
+  "division": zod.string().nullable().describe('Division attributed via the company dimension (null when unmapped)'),
+  "date": zod.string().describe('Contract-ratified date (sales), create date (leads), or first-tour date (tours)'),
+  "rawChannel": zod.string().nullable().describe('Raw channel value on the record — e.g. the literal \'Unknown\', or null when blank'),
+  "crmUrl": zod.string().nullable().describe('Link to the record in the CRM')
+}).describe('One CRM record missing an Online\/Onsite channel label'))
+}).describe('Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.'),
+  "sales": zod.object({
+  "total": zod.number().describe('Full count of unlabeled records in the range. Must equal the matching trafficMatrix.unknown bucket; both come from one Snowflake statement (audited).'),
+  "truncated": zod.boolean().describe('True when more records exist than the capped list returns'),
+  "records": zod.array(zod.object({
+  "name": zod.string().nullable().describe('Deal name (sales) or contact full name (leads\/tours)'),
+  "email": zod.string().nullable().describe('Contact email (leads\/tours only; null for sales)'),
+  "development": zod.string().nullable().describe('Community of interest as entered on the CRM record'),
+  "division": zod.string().nullable().describe('Division attributed via the company dimension (null when unmapped)'),
+  "date": zod.string().describe('Contract-ratified date (sales), create date (leads), or first-tour date (tours)'),
+  "rawChannel": zod.string().nullable().describe('Raw channel value on the record — e.g. the literal \'Unknown\', or null when blank'),
+  "crmUrl": zod.string().nullable().describe('Link to the record in the CRM')
+}).describe('One CRM record missing an Online\/Onsite channel label'))
+}).describe('Record-level drill-down behind one unknown-channel matrix bucket. Rides inside the overview response — same payload, same data snapshot as the count it explains — so the dialog can never disagree with the on-screen row.')
+}).describe('The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain.')
 })
 
 

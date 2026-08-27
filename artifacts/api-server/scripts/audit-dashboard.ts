@@ -303,6 +303,27 @@ interface OverviewResponse {
   developments: DevelopmentRow[];
 
   ratios: RatioRow[];
+  /**
+   * Record-level lists behind the unknown buckets, embedded in the same
+   * response as the counts they explain (one Snowflake statement feeds
+   * both, so total vs trafficMatrix.unknown is a race-free predicate net).
+   */
+  unknownRecords: Record<
+    "leads" | "tours" | "sales",
+    {
+      total: number;
+      truncated: boolean;
+      records: {
+        name: string | null;
+        email: string | null;
+        development: string | null;
+        division: string | null;
+        date: string;
+        rawChannel: string | null;
+        crmUrl: string | null;
+      }[];
+    }
+  >;
 }
 
 async function fetchOverview(params: Record<string, string>): Promise<OverviewResponse> {
@@ -1410,7 +1431,6 @@ function explicitRangeScenario(defaultStart: string): Scenario {
     filters: { startDate: defaultStart, endDate: defaultStart },
   };
 }
-
 /**
  * The most recent fully-elapsed quarter of the current year, or null during
  * Q1. Its elapsed cutoff sits in a PAST quarter, so the API's goal-type
@@ -1509,9 +1529,21 @@ async function main() {
       // Baselines would be bound to a range the API never applied; the
       // appliedRange failure above already fails the run.
       console.error(
-        `Skipping goal/breakdown/ratio audits for "${scenario.name}" — appliedRange mismatch`,
+        `Skipping goal/breakdown/ratio/drill-down audits for "${scenario.name}" — appliedRange mismatch`,
       );
       continue;
+    }
+    // The unknown-bucket record lists ride inside the overview response and
+    // must reconcile with its matrix in EVERY scenario (free: pure checks
+    // on the already-fetched payload, no extra requests).
+    {
+      const drilldownOk = auditUnknownRecordsDrilldown(
+        scenario,
+        result.overview,
+        result.expStart,
+        result.expTo,
+      );
+      if (!drilldownOk) anyFailed = true;
     }
     // Goal-derived numbers are audited in EVERY scenario: goals respond to
     // company/development filters, must ignore channel filters, and rebind
@@ -1575,9 +1607,10 @@ async function main() {
         "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
         "name, a goal-type walk-back/target-resolution regression, a wrong " +
         "GOAL_TYPE resolution or broken goal to-date cutoff, ignored date " +
-        "parameters, changed filters, stale cached data, or " +
+        "parameters, changed filters, stale cached data, " +
         "mislabeled/hidden communities or per-community YTD numbers drifting " +
-        "from Snowflake in the Community List.",
+        "from Snowflake in the Community List, or the unknown-channel " +
+        "drill-down list disagreeing with its matrix bucket.",
     );
     process.exit(1);
   }
@@ -2329,6 +2362,72 @@ interface YtdBaselineRow {
   N_TODAY: number;
 }
 
+/**
+ * The record lists embedded in the overview response must reconcile with
+ * the matrix's unknown buckets IN THAT SAME RESPONSE: equal totals, every
+ * returned record itself unlabeled (no Online/Onsite value) and dated
+ * inside the audited window, and the truncation contract honored. Both
+ * sides of the equality come from one Snowflake statement per bucket, so a
+ * mismatch is real predicate drift (SQL list membership vs the JS bucket
+ * count) — never a data race between separately timed queries or requests.
+ */
+function auditUnknownRecordsDrilldown(
+  scenario: Scenario,
+  overview: OverviewResponse,
+  expStart: string,
+  expTo: string,
+): boolean {
+  console.log(`--- Unknown-records lists vs matrix buckets: ${scenario.name} ---`);
+  let failed = false;
+  for (const bucket of ["leads", "tours", "sales"] as const) {
+    const list = overview.unknownRecords[bucket];
+    const matrixCount = overview.trafficMatrix.unknown[bucket];
+    if (list.total !== matrixCount) {
+      console.error(
+        `FAIL unknownRecords.${bucket} total=${list.total} != matrix ` +
+          `unknown.${bucket}=${matrixCount} in the same response — the list ` +
+          `predicate (SQL) and the bucket predicate (JS) disagree on what "unlabeled" means`,
+      );
+      failed = true;
+    } else {
+      console.log(`OK unknownRecords.${bucket} total=${list.total} == matrix bucket`);
+    }
+    const expectedLen = Math.min(list.total, UNKNOWN_RECORDS_CAP);
+    const truncOk = list.truncated === list.total > list.records.length;
+    if (list.records.length !== expectedLen || !truncOk) {
+      console.error(
+        `FAIL unknownRecords.${bucket} returned ${list.records.length} rows ` +
+          `(truncated=${list.truncated}) for total=${list.total}, cap=${UNKNOWN_RECORDS_CAP}`,
+      );
+      failed = true;
+    }
+    const mislabeled = list.records.filter(
+      (r) => r.rawChannel === "Online" || r.rawChannel === "Onsite",
+    );
+    if (mislabeled.length > 0) {
+      console.error(
+        `FAIL unknownRecords.${bucket}: ${mislabeled.length} records carry a real ` +
+          `Online/Onsite label (e.g. ${JSON.stringify(mislabeled[0].name)}) — ` +
+          `predicate drift`,
+      );
+      failed = true;
+    }
+    // Dates are YYYY-MM-DD strings; lexicographic compare is date compare.
+    const outOfRange = list.records.filter((r) => r.date < expStart || r.date > expTo);
+    if (outOfRange.length > 0) {
+      console.error(
+        `FAIL unknownRecords.${bucket}: ${outOfRange.length} records dated ` +
+          `outside ${expStart}..${expTo} (e.g. ${outOfRange[0].date})`,
+      );
+      failed = true;
+    }
+  }
+  if (!failed) {
+    console.log("OK unknown-records lists reconcile with matrix buckets (same response)");
+  }
+  return !failed;
+}
+
 function fmtNullable(v: number | null): string {
   return v === null ? "null" : String(v);
 }
@@ -2368,6 +2467,9 @@ async function sfQuery<T extends object>(
     sfWaiters.shift()?.();
   }
 }
+
+/** Mirrors UNKNOWN_RECORDS_LIMIT in src/lib/overview-targets.ts. */
+const UNKNOWN_RECORDS_CAP = 500;
 
 interface GoalBaselineRow {
   GOAL_TYPE: string;

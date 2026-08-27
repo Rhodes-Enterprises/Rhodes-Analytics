@@ -33,3 +33,18 @@ When an audit's baselines hardcode the SAME label literals the API keys on (chan
 
 - The UI-binding audit's maps (matrix rows, headers) must be EXTENDED in the same change that adds rows/columns to a dashboard — and tasks developed in parallel can each pass alone yet fail combined (one adds UI rows, the other rebased an audit map without them). The umbrella suite at completion validation is what surfaces this; when it fails, read the audit:all summary first — the failing audit may be cross-task drift, not the current task's change. Fix = teach the binding map the new rows (conditional presence if the section hides when empty), then mutation-test the new bindings.
   In a busy merge queue the same gap may get fixed independently on main while your merge waits; when main's fix is functionally equivalent, resolve conflicts by taking main's file VERBATIM (git checkout --ours during rebase-replay) so your commit stops touching the file — that ends repeat conflict rounds. Only favor your own version when it is strictly stricter/more faithful.
+
+## Drill-down list vs bucket-count nets
+
+A UI count and the record list that explains it must be one snapshot end to end: produce both from ONE SQL statement (UNION ALL with a row-kind discriminator), cache them as one entry, and ship them in the SAME response the count is rendered from — the drill-down UI then reads the already-loaded payload instead of fetching. Separate-endpoint or separate-statement designs leave races (data movement between statements, cache rotation between render and click) that make the reconciliation contract only statistically true — a reviewer will rightly reject that.
+
+**Why:** the count and the list apply the same membership predicate in different languages (JS bucketing vs SQL WHERE); only same-statement + same-payload delivery reduces every possible mismatch to real predicate drift.
+
+**How to apply:**
+- Audit = pure in-response checks, no extra requests: list total == bucket count, each record satisfies predicate + date window, truncation contract (length == min(total, cap), truncated == total > length). Integer equality, no tolerance.
+- Prove the net can fail: doctor the SQL predicate on a throwaway build and watch the in-response equality diverge.
+
+
+## Running audits cleanly (rate-limit collisions)
+
+Single audits against the long-lived dev server can false-fail: cache-expiry bursts plus page-load traffic blow the ~10 RPS proxy budget. For a clean signal use the all-audits command (fresh private server, warmed before audits start). It runs its audits SEQUENTIALLY and keeps going past failures — judge only by the final summary and wait for the process to EXIT; a second concurrent run collides on the private port and proxy budget and all-fails with bogus fetch errors. Fetch helpers that hit endpoints right after burst phases carry bounded transient retries (429/502/503 + connection errors); correctness failures must still fail immediately.

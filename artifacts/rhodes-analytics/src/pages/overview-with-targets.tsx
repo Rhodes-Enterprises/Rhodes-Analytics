@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ChevronRight, RefreshCw, Database } from "lucide-react";
+import { ChevronRight, RefreshCw, Database, ExternalLink } from "lucide-react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -44,6 +44,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn, downloadCsv, type CsvValue } from "@/lib/utils";
 
 // ---------- formatting ----------
@@ -510,28 +517,47 @@ function MatrixRow({
  * Actual-only matrix row for the unknown-channel bucket (rows with no
  * Online/Onsite label). No goals exist for that bucket, so the goal and
  * PTG columns show a dash; the share of the corresponding total makes the
- * size of the attribution gap obvious at a glance.
+ * size of the attribution gap obvious at a glance. Clicking the row opens
+ * the drill-down dialog listing the specific CRM records to fix.
  */
 function UnknownRow({
   label,
   actual,
   total,
   totalName,
+  onOpen,
 }: {
   label: string;
   actual: number;
   total: number;
   totalName: string;
+  onOpen: () => void;
 }) {
   const pct = total > 0 && actual > 0 ? (actual / total) * 100 : null;
   const share = pct == null ? null : pct < 1 ? "<1" : String(Math.round(pct));
   return (
     <tr
-      className="border-b last:border-0"
+      className="group border-b last:border-0 cursor-pointer transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
       data-testid={`row-${label.toLowerCase().replace(/\s+/g, "-")}`}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-label={`View the ${label.toLowerCase()} records missing a channel label`}
     >
       <td className="py-2 pr-4 font-medium whitespace-nowrap">
-        {label}
+        <span className="inline-flex items-center gap-1.5">
+          {label}
+          <span className="inline-flex items-center text-xs font-normal text-primary opacity-70 transition-opacity group-hover:opacity-100">
+            view records
+            <ChevronRight className="h-3 w-3" />
+          </span>
+        </span>
         {share != null && (
           <div className="text-xs text-muted-foreground">
             {share}% of {totalName}
@@ -545,9 +571,20 @@ function UnknownRow({
     </tr>
   );
 }
+
+/** Keys of the unknown-channel drill-down buckets, derived from the API type. */
+type UnknownBucketKey = keyof OwtDashboard["unknownRecords"];
 function TrafficMatrix({ data }: { data: OwtDashboard }) {
   const m = data.trafficMatrix;
   const u = m.unknown;
+  // Drill-down dialog state: bucket stays set while the dialog animates
+  // closed so the content doesn't flash empty mid-transition.
+  const [drillBucket, setDrillBucket] = useState<UnknownBucketKey | null>(null);
+  const [drillOpen, setDrillOpen] = useState(false);
+  const openDrill = (bucket: UnknownBucketKey) => {
+    setDrillBucket(bucket);
+    setDrillOpen(true);
+  };
   // When every row is labeled (or a channel filter zeroes the bucket),
   // online + onsite already equals the totals — hide the empty section.
   const hasUnknown = u.leads > 0 || u.tours > 0 || u.sales > 0;
@@ -628,18 +665,21 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
                   actual={u.leads}
                   total={m.total.leads.actual}
                   totalName="total leads"
+                  onOpen={() => openDrill("leads")}
                 />
                 <UnknownRow
                   label="Unknown Tours"
                   actual={u.tours}
                   total={m.total.tours.actual}
                   totalName="total tours"
+                  onOpen={() => openDrill("tours")}
                 />
                 <UnknownRow
                   label="Unknown Sales"
                   actual={u.sales}
                   total={data.kpis.grossSales}
                   totalName="gross sales"
+                  onOpen={() => openDrill("sales")}
                 />
               </>
             )}
@@ -656,14 +696,29 @@ function TrafficMatrix({ data }: { data: OwtDashboard }) {
             Unknown = no Online/Onsite channel label in the CRM — an
             attribution gap worth fixing at the source. Online + Onsite +
             Unknown adds up to Total Leads, Total Tours, and the Gross Sales
-            KPI. Goals are not set for the Unknown bucket.
+            KPI. Goals are not set for the Unknown bucket. Click an Unknown
+            row to see the exact records to fix.
           </p>
         )}
+        <UnknownRecordsDialog
+          bucket={drillBucket}
+          open={drillOpen}
+          onOpenChange={setDrillOpen}
+          data={data}
+        />
       </CardContent>
     </Card>
   );
 }
 
+const UNKNOWN_BUCKET_META: Record<
+  UnknownBucketKey,
+  { title: string; noun: string; dateHeader: string }
+> = {
+  leads: { title: "Unknown Leads", noun: "leads", dateHeader: "Created" },
+  tours: { title: "Unknown Tours", noun: "tours", dateHeader: "First tour" },
+  sales: { title: "Unknown Sales", noun: "sales", dateHeader: "Contract ratified" },
+};
 function DivisionTable({ data }: { data: OwtDashboard }) {
   return (
     <SummaryTable
@@ -1139,5 +1194,175 @@ function DashboardSkeleton() {
       <Skeleton className="h-72 w-full" />
       <Skeleton className="h-72 w-full" />
     </div>
+  );
+}
+
+/**
+ * Lists the individual CRM records behind one unknown-bucket matrix cell —
+ * the actionable to-do list for the marketing team. Fetched from the
+ * drill-down endpoint with the SAME filters and date range as the dashboard,
+ * so the list always reconciles with the count on the row that was clicked.
+ */
+function UnknownRecordsDialog({
+  bucket,
+  open,
+  onOpenChange,
+  data,
+}: {
+  bucket: UnknownBucketKey | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  data: OwtDashboard;
+}) {
+  const meta = UNKNOWN_BUCKET_META[bucket ?? "sales"];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="max-w-3xl"
+        data-testid="dialog-unknown-records"
+      >
+        <DialogHeader>
+          <DialogTitle data-testid="dialog-unknown-records-title">
+            {meta.title} — records missing a channel label
+          </DialogTitle>
+          <DialogDescription>
+            These {meta.noun} carry no Online/Onsite label in the CRM. Fixing
+            them at the source closes the attribution gap in this dashboard.
+          </DialogDescription>
+        </DialogHeader>
+        {bucket != null && <UnknownRecordsBody bucket={bucket} data={data} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const shortDivision = (s: string) =>
+  s.replace("Esperanza Homes ", "").replace(", LLC", "");
+
+/**
+ * Dialog body. The record list rides inside the overview response itself,
+ * so it is already on the client the moment the row is clicked — no second
+ * fetch, no loading state, and the dialog can never disagree with the
+ * matrix row that opened it: count and records are one payload built from
+ * one server-side data snapshot.
+ */
+function UnknownRecordsBody({
+  bucket,
+  data,
+}: {
+  bucket: UnknownBucketKey;
+  data: OwtDashboard;
+}) {
+  const meta = UNKNOWN_BUCKET_META[bucket];
+  const list = data.unknownRecords[bucket];
+
+  return (
+    <>
+            <p
+              className="text-sm text-muted-foreground"
+              data-testid="text-unknown-records-summary"
+            >
+              <span className="font-semibold text-foreground">
+                {fmt(list.total)}
+              </span>{" "}
+              unlabeled {meta.noun} · {data.appliedRange.startDate} →{" "}
+              {data.appliedRange.toDate}
+            </p>
+            {list.records.length === 0 ? (
+              <p
+                className="py-8 text-center text-sm text-muted-foreground"
+                data-testid="text-unknown-records-empty"
+              >
+                No unlabeled {meta.noun} in this range with the current
+                filters.
+              </p>
+            ) : (
+              <div className="max-h-[55vh] overflow-y-auto rounded-md border">
+                <table className="w-full text-sm" data-testid="table-unknown-records">
+                  <thead className="sticky top-0 bg-background shadow-[0_1px_0_hsl(var(--border))]">
+                    <tr className="text-left text-xs text-muted-foreground">
+                      <th className="py-2 px-3 font-medium">
+                        {bucket === "sales" ? "Deal" : "Contact"}
+                      </th>
+                      <th className="py-2 px-3 font-medium">Development</th>
+                      <th className="py-2 px-3 font-medium whitespace-nowrap">
+                        {meta.dateHeader}
+                      </th>
+                      <th className="py-2 px-3 font-medium whitespace-nowrap">
+                        Channel in CRM
+                      </th>
+                      <th className="py-2 px-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {list.records.map((r, i) => (
+                      <tr
+                        key={`${r.crmUrl ?? r.name ?? ""}-${i}`}
+                        className="border-t"
+                        data-testid={`row-unknown-record-${i}`}
+                      >
+                        <td className="py-2 px-3">
+                          <div className="font-medium">
+                            {r.name ?? (
+                              <span className="italic text-muted-foreground">
+                                (no name)
+                              </span>
+                            )}
+                          </div>
+                          {r.email && (
+                            <div className="text-xs text-muted-foreground">
+                              {r.email}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-3">
+                          <div>{r.development ?? "–"}</div>
+                          {r.division && (
+                            <div className="text-xs text-muted-foreground">
+                              {shortDivision(r.division)}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap tabular-nums">
+                          {r.date}
+                        </td>
+                        <td className="py-2 px-3">
+                          {r.rawChannel ?? (
+                            <span className="italic text-muted-foreground">
+                              (blank)
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right">
+                          {r.crmUrl && (
+                            <a
+                              href={r.crmUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-primary hover:underline"
+                              data-testid={`link-crm-record-${i}`}
+                            >
+                              Open in CRM
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {list.truncated && (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="text-unknown-records-truncated"
+              >
+                Showing the first {fmt(list.records.length)} of{" "}
+                {fmt(list.total)} records — narrow the date range or filters
+                to see the rest.
+              </p>
+            )}
+    </>
   );
 }

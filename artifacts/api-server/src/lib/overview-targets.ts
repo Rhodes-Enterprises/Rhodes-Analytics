@@ -241,39 +241,48 @@ interface ActualRow {
   N: number;
 }
 
-async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<ActualRow[]> {
-  const cf = contactFilters(f);
-  const sql = `
-    SELECT D.COMPANY_NAME AS COMPANY_NAME,
-           D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
-           C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
-           COUNT(*) AS N
-    FROM DM_CONTACTS C
-    LEFT JOIN ${DEV_DIM} D
-      ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-    WHERE ${isLeadSql("C")}
-      AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
-    GROUP BY 1, 2, 3`;
-  return cached(`leadActuals:${dateCol}:${JSON.stringify(f)}`, () =>
-    querySnowflake<ActualRow>(sql, [f.startDate, f.toDate, ...cf.binds]),
+/**
+ * JS form of the unknown bucket's membership test — rows carrying NEITHER
+ * 'Online' nor 'Onsite' on the channel column (the CRM's literal 'Unknown',
+ * a NULL, or any other label). Counted directly from the grouped source
+ * rows, deliberately NOT derived as total − online − onsite, so each bucket
+ * stays independently auditable per cell. Must stay in lockstep with
+ * unlabeledChannelSql() below, which applies the same predicate in SQL for
+ * the record-level drill-down list.
+ */
+const unlabeledCount = (rows: ActualRow[]) =>
+  sumBy(
+    rows,
+    (r) => Number(r.N) || 0,
+    (r) => r.CHANNEL !== "Online" && r.CHANNEL !== "Onsite",
+  );
+
+/**
+ * One cache entry carries BOTH the grouped channel aggregates a matrix cell
+ * is computed from AND the record-level unknown-channel list behind that
+ * cell. The two result sets come from ONE Snowflake statement (UNION ALL
+ * with a ROW_KIND discriminator), so they see a single statement-level
+ * snapshot of the source table: CRM writes landing mid-fill cannot make the
+ * list disagree with the aggregates, and because both live in one cache
+ * entry they can never be served from data states cached at different
+ * times either.
+ */
+interface ActualsBundle {
+  rows: ActualRow[];
+  unknownRows: UnknownRecordRow[];
+}
+
+async function fetchLeadActuals(f: DashboardFilters, dateCol: string): Promise<ActualsBundle> {
+  const q = bundledLeadActualsQuery(f, dateCol);
+  return cached(`leadActuals:${dateCol}:${JSON.stringify(f)}`, async () =>
+    splitBundle(await querySnowflake<BundledRow>(q.sql, q.binds)),
   );
 }
 
-async function fetchSalesActuals(f: DashboardFilters): Promise<ActualRow[]> {
-  const df = dealFilters(f);
-  const sql = `
-    SELECT D.COMPANY_NAME AS COMPANY_NAME,
-           D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
-           X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
-           COUNT(*) AS N
-    FROM DM_DEALS X
-    LEFT JOIN ${DEV_DIM} D
-      ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
-    WHERE ${isSaleSql("X")}
-      AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
-    GROUP BY 1, 2, 3`;
-  return cached(`salesActuals:${JSON.stringify(f)}`, () =>
-    querySnowflake<ActualRow>(sql, [f.startDate, f.toDate, ...df.binds]),
+async function fetchSalesActuals(f: DashboardFilters): Promise<ActualsBundle> {
+  const q = bundledSalesActualsQuery(f);
+  return cached(`salesActuals:${JSON.stringify(f)}`, async () =>
+    splitBundle(await querySnowflake<BundledRow>(q.sql, q.binds)),
   );
 }
 
@@ -346,8 +355,6 @@ function ptg(actual: number, goal: number): number | null {
   return (actual / goal - 1) * 100;
 }
 
-// ---------- Filter options ----------
-
 export async function getFilterOptions() {
   return cached("filterOptions", async () => {
     const [companies, developments, cohorts, sources, channels] = await Promise.all([
@@ -399,7 +406,7 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     if (gt) goalTypeByMetric.set(metric, gt);
   }
 
-  const [goals, leads, tours, sales, users, ratioGoals] = await Promise.all([
+  const [goals, leadsBundle, toursBundle, salesBundle, users, ratioGoals] = await Promise.all([
     fetchGoals(f, fiscalYear, goalTypeByMetric),
     fetchLeadActuals(f, "CONTACT_CREATE_DATE"),
     fetchLeadActuals(f, "EHI_MIN_FIRST_TOUR_DATE"),
@@ -407,6 +414,9 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     fetchWebsiteUsers(f),
     fetchRatioGoals(fiscalYear),
   ]);
+  const leads = leadsBundle.rows;
+  const tours = toursBundle.rows;
+  const sales = salesBundle.rows;
 
   // Goal lookups
   const goalTotal = (
@@ -442,18 +452,6 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
         (!development || r.DEVELOPMENT_NAME === development),
     );
 
-  // Rows carrying NEITHER 'Online' nor 'Onsite' on the channel column — the
-  // CRM's literal 'Unknown', a NULL, or any other label. Counted directly
-  // from the same grouped source rows, deliberately NOT derived as
-  // total − online − onsite, so each bucket stays independently auditable
-  // per cell (the audit makes no sum-to-total assumption).
-  const chanUnlabeled = (rows: ActualRow[]) =>
-    sumBy(
-      rows,
-      (r) => Number(r.N) || 0,
-      (r) => r.CHANNEL !== "Online" && r.CHANNEL !== "Onsite",
-    );
-
   // Distinct-count rows come at three grouping levels; pick the right one.
   const overallUsers = users.find((r) => Number(r.G_COMPANY) === 1);
   const companyUsers = users.filter(
@@ -475,9 +473,9 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     sales: chan(sales),
     onlineSales: chan(sales, "Online"),
     onsiteSales: chan(sales, "Onsite"),
-    unknownLeads: chanUnlabeled(leads),
-    unknownTours: chanUnlabeled(tours),
-    unknownSales: chanUnlabeled(sales),
+    unknownLeads: unlabeledCount(leads),
+    unknownTours: unlabeledCount(tours),
+    unknownSales: unlabeledCount(sales),
   };
 
   // KPI row (gross sales vs target)
@@ -650,7 +648,20 @@ export async function getOverviewWithTargets(f: DashboardFilters) {
     };
   });
 
-  return { filters: f, kpis, trafficMatrix, divisions, developments, ratios, actuals };
+  return {
+    filters: f,
+    kpis,
+    trafficMatrix,
+    divisions,
+    developments,
+    ratios,
+    actuals,
+    unknownRecords: {
+      leads: toUnknownList(leadsBundle),
+      tours: toUnknownList(toursBundle),
+      sales: toUnknownList(salesBundle),
+    },
+  };
 }
 
 // ---------- Year-over-year chart ----------
@@ -759,3 +770,229 @@ export async function getYearOverYear(f: DashboardFilters) {
 }
 
 export const cached = createQueryCache({ maxEntries: 500 });
+
+/** Dialog lists at most this many records; `total` still reports the full count. */
+const UNKNOWN_RECORDS_LIMIT = 500;
+
+/**
+ * SQL form of the unknown bucket's membership test: rows carrying NEITHER
+ * 'Online' nor 'Onsite' on the channel column (the CRM's literal 'Unknown',
+ * NULL, or any other label). Must stay in lockstep with unlabeledCount()
+ * above, which applies the same predicate in JS to the grouped actuals —
+ * the audit (scripts/audit-dashboard.ts) cross-checks the drill-down total
+ * against the matrix bucket, so drift between the two fails the audit.
+ */
+const unlabeledChannelSql = (col: string) =>
+  `(${col} IS NULL OR ${col} NOT IN ('Online','Onsite'))`;
+
+/**
+ * One bundled statement per bucket: the grouped channel aggregates (ROW_KIND
+ * 'AGG') UNION ALL'd with the record-level unlabeled list (ROW_KIND 'REC',
+ * capped, newest first). Both branches share the source table, lead/sale
+ * membership predicate, date window (startDate..toDate), and filter
+ * fragments — and because they execute as a single Snowflake statement they
+ * read one consistent snapshot of the source table. Leads are dated by
+ * creation, tours by first tour, sales by contract ratification — the
+ * matrix cells' convention.
+ *
+ * Column mapping for 'REC' rows: COMPANY_NAME carries the record's division,
+ * DEVELOPMENT_NAME its community-of-interest, CHANNEL its raw channel value.
+ */
+interface BundledRow {
+  ROW_KIND: "AGG" | "REC";
+  COMPANY_NAME: string | null;
+  DEVELOPMENT_NAME: string | null;
+  CHANNEL: string | null;
+  N: number | null;
+  NAME: string | null;
+  EMAIL: string | null;
+  EVENT_DATE: string | null;
+  CRM_URL: string | null;
+  TOTAL_N: number | null;
+}
+
+function splitBundle(rows: BundledRow[]): ActualsBundle {
+  const agg: ActualRow[] = [];
+  const unknownRows: UnknownRecordRow[] = [];
+  for (const r of rows) {
+    if (r.ROW_KIND === "AGG") {
+      agg.push({
+        COMPANY_NAME: r.COMPANY_NAME,
+        DEVELOPMENT_NAME: r.DEVELOPMENT_NAME,
+        CHANNEL: r.CHANNEL,
+        N: Number(r.N) || 0,
+      });
+    } else {
+      unknownRows.push({
+        NAME: r.NAME,
+        EMAIL: r.EMAIL,
+        DEVELOPMENT: r.DEVELOPMENT_NAME,
+        DIVISION: r.COMPANY_NAME,
+        EVENT_DATE: r.EVENT_DATE ?? "",
+        RAW_CHANNEL: r.CHANNEL,
+        CRM_URL: r.CRM_URL,
+        TOTAL_N: Number(r.TOTAL_N) || 0,
+      });
+    }
+  }
+  return { rows: agg, unknownRows };
+}
+
+function bundledLeadActualsQuery(
+  f: DashboardFilters,
+  dateCol: string,
+): { sql: string; binds: (string | number)[] } {
+  const cf = contactFilters(f);
+  return {
+    sql: `
+      SELECT 'AGG' AS ROW_KIND,
+             D.COMPANY_NAME AS COMPANY_NAME,
+             D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
+             C.ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
+             COUNT(*) AS N,
+             NULL AS NAME, NULL AS EMAIL, NULL AS EVENT_DATE,
+             NULL AS CRM_URL, NULL AS TOTAL_N
+      FROM DM_CONTACTS C
+      LEFT JOIN ${DEV_DIM} D
+        ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+      WHERE ${isLeadSql("C")}
+        AND C.${dateCol} BETWEEN ? AND ?${cf.sql}
+      GROUP BY 2, 3, 4
+      UNION ALL
+      SELECT 'REC', R.DIVISION, R.DEVELOPMENT, R.RAW_CHANNEL, NULL,
+             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N
+      FROM (
+        SELECT C.CONTACT_FULL_NAME AS NAME,
+               C.CONTACT_EMAIL AS EMAIL,
+               C.CONTACT_EHI_COMMUNITY_OF_INTEREST AS DEVELOPMENT,
+               D.COMPANY_NAME AS DIVISION,
+               C.${dateCol} AS EVENT_DATE,
+               C.ONSITE_ONLINE_SOURCE_CHANNEL AS RAW_CHANNEL,
+               C.CONTACT_HUBSPOT_URL AS CRM_URL,
+               COUNT(*) OVER () AS TOTAL_N
+        FROM DM_CONTACTS C
+        LEFT JOIN ${DEV_DIM} D
+          ON C.CONTACT_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+        WHERE ${isLeadSql("C")}
+          AND C.${dateCol} BETWEEN ? AND ?
+          AND ${unlabeledChannelSql("C.ONSITE_ONLINE_SOURCE_CHANNEL")}${cf.sql}
+        ORDER BY C.${dateCol} DESC, C.CONTACT_FULL_NAME
+        LIMIT ${UNKNOWN_RECORDS_LIMIT}
+      ) R`,
+    binds: [f.startDate, f.toDate, ...cf.binds, f.startDate, f.toDate, ...cf.binds],
+  };
+}
+
+function bundledSalesActualsQuery(f: DashboardFilters): {
+  sql: string;
+  binds: (string | number)[];
+} {
+  const df = dealFilters(f);
+  return {
+    sql: `
+      SELECT 'AGG' AS ROW_KIND,
+             D.COMPANY_NAME AS COMPANY_NAME,
+             D.DEVELOPMENT_NAME AS DEVELOPMENT_NAME,
+             X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS CHANNEL,
+             COUNT(*) AS N,
+             NULL AS NAME, NULL AS EMAIL, NULL AS EVENT_DATE,
+             NULL AS CRM_URL, NULL AS TOTAL_N
+      FROM DM_DEALS X
+      LEFT JOIN ${DEV_DIM} D
+        ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+      WHERE ${isSaleSql("X")}
+        AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?${df.sql}
+      GROUP BY 2, 3, 4
+      UNION ALL
+      SELECT 'REC', R.DIVISION, R.DEVELOPMENT, R.RAW_CHANNEL, NULL,
+             R.NAME, R.EMAIL, R.EVENT_DATE, R.CRM_URL, R.TOTAL_N
+      FROM (
+        SELECT X.DEAL_NAME AS NAME,
+               NULL AS EMAIL,
+               X.DEAL_EHI_COMMUNITY_OF_INTEREST AS DEVELOPMENT,
+               D.COMPANY_NAME AS DIVISION,
+               X.CONTRACT_RATIFIED_DATE AS EVENT_DATE,
+               X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL AS RAW_CHANNEL,
+               X.DEAL_HUBSPOT_URL AS CRM_URL,
+               COUNT(*) OVER () AS TOTAL_N
+        FROM DM_DEALS X
+        LEFT JOIN ${DEV_DIM} D
+          ON X.DEAL_EHI_COMMUNITY_OF_INTEREST = D.DEVELOPMENT_NAME
+        WHERE ${isSaleSql("X")}
+          AND X.CONTRACT_RATIFIED_DATE BETWEEN ? AND ?
+          AND ${unlabeledChannelSql("X.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL")}${df.sql}
+        ORDER BY X.CONTRACT_RATIFIED_DATE DESC, X.DEAL_NAME
+        LIMIT ${UNKNOWN_RECORDS_LIMIT}
+      ) R`,
+    binds: [f.startDate, f.toDate, ...df.binds, f.startDate, f.toDate, ...df.binds],
+  };
+}
+
+interface UnknownRecordRow {
+  NAME: string | null;
+  EMAIL: string | null;
+  DEVELOPMENT: string | null;
+  DIVISION: string | null;
+  EVENT_DATE: string;
+  RAW_CHANNEL: string | null;
+  CRM_URL: string | null;
+  TOTAL_N: number;
+}
+
+export interface UnknownChannelRecord {
+  /** Deal name (sales) or contact full name (leads/tours) — may be blank in the CRM */
+  name: string | null;
+  /** Contact email (leads/tours only) — second handle for finding the CRM record */
+  email: string | null;
+  /** The record's own community-of-interest value, as entered in the CRM */
+  development: string | null;
+  /** Division attributed via the shared dev dimension (null when unmapped) */
+  division: string | null;
+  /** Contract-ratified date (sales), create date (leads), first-tour date (tours) */
+  date: string;
+  /** Raw channel value on the record — the literal 'Unknown', another label, or null when blank */
+  rawChannel: string | null;
+  /** Link to the record in the CRM, when the source row carries one */
+  crmUrl: string | null;
+}
+
+interface UnknownBucketList {
+  /**
+   * Full unlabeled-record count from the list branch of the bundled
+   * statement (COUNT OVER). The matrix's unknown bucket counts the same
+   * snapshot's aggregate rows in JS (unlabeledCount), so the two can only
+   * disagree when the SQL and JS membership predicates drift apart — the
+   * audit fails on exactly that.
+   */
+  total: number;
+  /** True when more records exist than the capped list returns. */
+  truncated: boolean;
+  records: UnknownChannelRecord[];
+}
+
+/**
+ * The individual CRM records behind one cell of the matrix's unknown bucket
+ * — the actionable to-do list for fixing channel attribution at the source.
+ * The lists ride INSIDE the overview response (one per bucket) rather than
+ * behind a separate endpoint: what the user sees on the matrix row and what
+ * the drill-down dialog lists always come from the same HTTP payload, so a
+ * background cache refresh between render and click can never make the
+ * dialog disagree with the on-screen count.
+ */
+function toUnknownList(bundle: ActualsBundle): UnknownBucketList {
+  const rows = bundle.unknownRows;
+  const total = rows.length > 0 ? Number(rows[0].TOTAL_N) || 0 : 0;
+  return {
+    total,
+    truncated: total > rows.length,
+    records: rows.map((r) => ({
+      name: r.NAME,
+      email: r.EMAIL,
+      development: r.DEVELOPMENT,
+      division: r.DIVISION,
+      date: r.EVENT_DATE,
+      rawChannel: r.RAW_CHANNEL,
+      crmUrl: r.CRM_URL,
+    })),
+  };
+}

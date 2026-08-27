@@ -8,6 +8,7 @@
 import type { OwtDashboardAppliedRange } from './owtDashboardAppliedRange';
 import type { OwtDashboardKpis } from './owtDashboardKpis';
 import type { OwtDashboardTrafficMatrix } from './owtDashboardTrafficMatrix';
+import type { OwtDashboardUnknownRecords } from './owtDashboardUnknownRecords';
 import type { OwtDevelopmentRow } from './owtDevelopmentRow';
 import type { OwtDivisionRow } from './owtDivisionRow';
 import type { OwtRatioRow } from './owtRatioRow';
@@ -19,4 +20,6 @@ export interface OwtDashboard {
   divisions: OwtDivisionRow[];
   developments: OwtDevelopmentRow[];
   ratios: OwtRatioRow[];
+  /** The CRM records behind each trafficMatrix.unknown bucket — the actionable to-do list for fixing channel attribution at the source, delivered with the counts they explain. */
+  unknownRecords: OwtDashboardUnknownRecords;
 }
