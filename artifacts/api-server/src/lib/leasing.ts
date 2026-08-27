@@ -86,6 +86,13 @@ type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
  * Goal type candidates per funnel stage/metric, newest naming first.
  * FY2025 only had RL_Leads / RL_Tours (no traffic or move-in goals);
  * FY2026 added RL_Web_Traffic, RL_First_Tours (+channel splits), RL_Move_Ins.
+ *
+ * If a goal type is renamed in DM_GOALS, update BOTH this list and the
+ * audit's copy in scripts/audit-leasing.ts: resolution is best-effort, so a
+ * stale name silently blanks that stage's target on the dashboard. The
+ * audit's stage-goal-coverage guard (requireStageGoals) fails loudly when
+ * a stage the year's regime budgets resolves nothing — that failure is the
+ * signal to fix these candidates.
  */
 const FUNNEL_GOAL_CANDIDATES: Record<FunnelStage, Record<GoalMetric, string[]>> = {
   webTraffic: { total: ["RL_Web_Traffic"], online: [], onsite: [] },

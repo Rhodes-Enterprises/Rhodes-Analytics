@@ -19,7 +19,7 @@
 - [Batched Snowflake round trips](batched-audit-baselines.md) — collapse scalars into COUNT_IF/GROUP BY scans (0==missing; subquery binds first); same shapes halve live endpoint fan-out (totals = Σ monthly).
 - [Env-var number parsing](env-var-parsing.md) — Number("") is 0, not NaN: unset env + ">= 0" guard silently disables budgets; treat empty as absent, and test the genuinely UNSET path.
 - [In-process audit patterns](in-process-audit-pattern.md) — warm-vs-request key drift via cache observer; clock-injected timezone-rollover binding via sentinel-seeded cache; --packages=external breaks on TS-source pkgs.
-- [Auto-merge verification](automerge-verification.md) — assisted rounds corrupt regions outside markers; the rebase BASE can ship broken; idling mid-rebase gets it ABORTED (recover via dist/*.map).
+- [Auto-merge verification](automerge-verification.md) — merges corrupt outside markers, graft dup decls, drop main() calls (tiny bundle = runs nothing); rebase BASE can ship broken; idling mid-rebase = ABORT.
 - [Parallel-task merges](parallel-task-merges.md) — two branches often fix the SAME gap; auto-merge stacks both (doubled registrations/type fields/functions) without conflicts — grep both-touched files, re-verify renamed helpers.
 - [Frontend unit tests](frontend-unit-tests.md) — vitest must never load the env-guarded vite.config (separate vitest.config); tsc excludes tests; extend the single "test" validation command.
 - [Validation registration quirk](validation-registration.md) — setValidationCommand may inject a "Project" wrapper workflow that hijacks the Run button; delete the wrapper, keep the isValidation workflow.

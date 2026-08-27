@@ -28,6 +28,16 @@
  *   actually present for that year from Snowflake and FAILS LOUDLY when
  *   the prior year has no RL goal data at all — otherwise every goal
  *   check would compare 0 == 0 and pass while covering nothing.
+ * - Stage goal-name drift guard (requireStageGoals): on the default and
+ *   prior-year scenarios, every funnel stage/metric the year's goal regime
+ *   budgets (FY2026+: all stages incl. the lead/tour online/onsite splits;
+ *   FY2025: only the RL_Leads/RL_Tours totals) must resolve a goal type
+ *   whose full-span baseline sum is non-zero. The API and this audit both
+ *   resolve stage goal types from whatever DM_GOALS contains for the year,
+ *   so a single renamed or dropped type (e.g. just RL_Web_Traffic) blanks
+ *   that one cell's target on BOTH sides and every per-cell goal check
+ *   passes 0 == 0 — and the all-stages-zero net (requireFunnelData) cannot
+ *   fire on a single blank stage.
  * - Funnel table baselines: every cell of the funnel totals table
  *   (webTraffic/leads/firstTours/moveIns plus the online/onsite lead and
  *   tour splits) is recomputed with the audit's own SQL — GA session starts
@@ -279,13 +289,26 @@ interface Scenario {
   name: string;
   filters: ScenarioFilters;
   /**
-   * Fail the scenario when its fiscal year resolves no RL total goal type
-   * or the goals within the range sum to zero. Set on the prior-year
-   * scenario, which exists to pin the goal-type fallback: without goal
-   * data every goal check compares 0 == 0 and would pass while testing
-   * nothing.
+   * Fail the scenario when its fiscal year resolves no RL lease total goal
+   * type or the goals within the range sum to zero. Set on the prior-year
+   * scenario, which exists to pin the lease goal-type fallback: without
+   * goal data every goal check compares 0 == 0 and would pass while
+   * testing nothing.
    */
   requireGoalData?: boolean;
+  /**
+   * Fail when any funnel stage/metric the scenario year's goal regime
+   * budgets (FY2026+: every stage incl. the lead/tour online/onsite
+   * splits; FY2025: only the RL_Leads/RL_Tours totals) resolves no goal
+   * type or its full-span goal sum is zero. Catches a goal-type rename or
+   * drop in DM_GOALS: the API and this audit resolve names independently
+   * from matching candidate lists, so a renamed type blanks ONE cell's
+   * target on both sides and every per-cell check passes 0 == 0 —
+   * requireFunnelData only fires when every stage blanks at once. Set on
+   * the default view (current-year coverage) and the prior-year scenario
+   * (where it is exactly the RL_Leads/RL_Tours fallback pin).
+   */
+  requireStageGoals?: boolean;
   /**
    * Run ONLY the funnel table Snowflake baselines and the funnel
    * trend-vs-totals consistency checks, skipping the lease KPI / matrix /
@@ -657,6 +680,50 @@ async function baselineGoalsByType(
     }
   }
   return (goalType) => (goalType && byType.get(goalType)) || EMPTY_GOAL_SUMS;
+}
+
+/**
+ * Full-span + to-date goal sums for several goal types in ONE query (the
+ * funnel needs up to 6 types per scenario; grouping keeps the audit under
+ * the Snowflake proxy rate limit). Unlike baselineGoalsByType — the lease
+ * goal baseline, which also rolls up per-month and per-community — the
+ * funnel cells only need the two scalar sums per type.
+ */
+async function baselineGoalSumsByType(
+  goalTypes: string[],
+  fiscalYear: number,
+  startDate: string,
+  endDate: string,
+  toDate: string,
+  community?: string,
+): Promise<Map<string, { fullSpan: number; toDate: number }>> {
+  if (goalTypes.length === 0) return new Map();
+  const placeholders = goalTypes.map(() => "?").join(",");
+  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
+  let extra = "";
+  if (community) {
+    extra = " AND DEVELOPMENT_NAME = ?";
+    binds.push(community);
+  }
+  const rows = await querySnowflake<{
+    GOAL_TYPE: string;
+    FULL_SPAN: number;
+    TO_DATE: number;
+  }>(
+    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
+            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
+     FROM DM_GOALS
+     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
+       AND BUDGET_DATE BETWEEN ? AND ?${extra}
+     GROUP BY 1`,
+    binds,
+  );
+  return new Map(
+    rows.map((r) => [
+      r.GOAL_TYPE,
+      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
+    ]),
+  );
 }
 /**
  * GA mapping domain — communities with any matched development row at all,
@@ -1542,6 +1609,7 @@ async function main() {
       name: "default view",
       filters: {},
       requireFunnelData: true,
+      requireStageGoals: true,
       withChannelLabelGuard: true,
       withGaFlagGuard: true,
     },
@@ -1555,6 +1623,7 @@ async function main() {
         endDate: `${priorYear}-12-31`,
       },
       requireGoalData: true,
+      requireStageGoals: true,
       requireFunnelData: true,
     },
   ];
@@ -1718,6 +1787,8 @@ const FUNNEL_GOAL_CANDIDATES: Record<FunnelStage, Record<GoalMetric, string[]>> 
   moveIns: { total: ["RL_Move_Ins"], online: [], onsite: [] },
 };
 
+/** First fiscal year that budgets every funnel stage (see FUNNEL_GOAL_CANDIDATES). */
+const FUNNEL_GOAL_REGIME_START_FY = 2026;
 /**
  * Compare every funnel-table cell (actual, fullSpanGoal, toDateGoal) against
  * independent Snowflake baselines. The chart-vs-table net (auditFunnelTrend)
@@ -1821,25 +1892,49 @@ async function auditFunnel(
   check("funnel.unknown.leads", Number(resp.funnel.unknown?.leads), leads.unlabeled);
   check("funnel.unknown.firstTours", Number(resp.funnel.unknown?.firstTours), tours.unlabeled);
 
-  // The prior-year scenario exists to pin the FY2025 goal-type fallback,
-  // which for the funnel means RL_Leads and RL_Tours must resolve and sum
-  // to something. Without that guard, losing the fallback would make both
-  // the API and the baseline show 0 goals and every check would "pass"
-  // while testing nothing.
-  if (scenario.requireGoalData) {
-    for (const stage of ["leads", "firstTours"] as const) {
-      const gtName = cellGoalType(stage, "total");
+  // Stage goal-name drift guard (requireStageGoals). Both the API and this
+  // audit resolve each cell's goal type from whatever DM_GOALS contains for
+  // the year, so a renamed or dropped goal type (e.g. just RL_Web_Traffic
+  // gone for the current year) makes BOTH sides resolve nothing for that
+  // ONE cell — the dashboard ships a blank/zero target and the per-cell
+  // checks above pass 0 == 0. requireFunnelData cannot see it (it only
+  // fires when EVERY stage zeroes at once), so scenarios that pin goal
+  // coverage require every stage/metric the year's goal regime budgets to
+  // resolve a type whose full-span baseline sum is non-zero. (A type whose
+  // issued goals are all zero is indistinguishable from a blank target and
+  // means the same thing to a viewer.) For the prior year this is exactly
+  // the old RL_Leads/RL_Tours fallback pin.
+  if (scenario.requireStageGoals) {
+    const required = requiredStageGoals(fiscalYear);
+    let missing = 0;
+    for (const { stage, metric } of required) {
+      const gtName = cellGoalType(stage, metric);
       const sum = goalSums(gtName).fullSpan;
-      if (!gtName || sum === 0) {
-        failures++;
-        console.error(
-          `  FAIL no ${stage} goal data for FY${fiscalYear}: resolved goal type=` +
-            `${gtName ?? "(none)"}, full-span sum=${sum} — this scenario pins the ` +
-            "prior-year funnel goal fallback (RL_Leads/RL_Tours), so empty goal " +
-            "data means the fallback is NOT being tested (goals missing from " +
-            "DM_GOALS, or the audit's candidate lists need updating)",
-        );
-      }
+      if (gtName && sum !== 0) continue;
+      missing++;
+      failures++;
+      const cands = FUNNEL_GOAL_CANDIDATES[stage][metric].join(", ");
+      console.error(
+        `  FAIL stage goal coverage ${stage}/${metric} (FY${fiscalYear}): resolved ` +
+          `goal type=${gtName ?? "(none)"} (candidates: ${cands}), full-span sum=${sum} — ` +
+          (fiscalYear >= FUNNEL_GOAL_REGIME_START_FY
+            ? "FY2026+ budgets this stage in DM_GOALS, so this funnel cell is " +
+              "showing a blank/zero target while its goal checks pass 0 == 0 " +
+              "vacuously. If the goal type was renamed upstream, update " +
+              "FUNNEL_GOAL_CANDIDATES here AND in src/lib/leasing.ts; if the " +
+              "goals are genuinely gone, the dashboard is shipping blank " +
+              "targets for this stage."
+            : "this scenario pins the prior-year funnel goal fallback " +
+              "(RL_Leads/RL_Tours), so empty goal data means the fallback is " +
+              "NOT being tested (goals missing from DM_GOALS, or the audit's " +
+              "candidate lists need updating)."),
+      );
+    }
+    if (missing === 0) {
+      console.log(
+        `  OK   stage goal coverage (FY${fiscalYear}): ${required.length}/${required.length} ` +
+          "required stage goals resolved with non-zero full-span sums",
+      );
     }
   }
 }
@@ -1876,6 +1971,30 @@ function gaMappedDomain(): Promise<Set<string>> {
     [],
   ).then((rows) => new Set(rows.filter((r) => r.C).map((r) => r.C as string)));
   return gaMappedDomainCache;
+}
+
+/**
+ * Funnel stage/metric pairs whose goals MUST exist for a fiscal year —
+ * resolve to a goal type AND sum non-zero over the full span — per the
+ * documented goal regimes: FY2026+ budgets every funnel stage including
+ * the lead/tour online/onsite splits; FY2025 only budgeted the RL_Leads /
+ * RL_Tours totals (no traffic or move-in goals, no channel splits).
+ * Deliberately hardcoded rather than derived from what DM_GOALS happens to
+ * contain — an expectation that adapts to the data cannot catch the data
+ * changing out from under the dashboard.
+ */
+function requiredStageGoals(
+  fiscalYear: number,
+): { stage: FunnelStage; metric: GoalMetric }[] {
+  if (fiscalYear >= FUNNEL_GOAL_REGIME_START_FY) {
+    return FUNNEL_CELLS.filter(
+      (c) => FUNNEL_GOAL_CANDIDATES[c.stage][c.metric].length > 0,
+    ).map((c) => ({ stage: c.stage, metric: c.metric }));
+  }
+  return [
+    { stage: "leads", metric: "total" },
+    { stage: "firstTours", metric: "total" },
+  ];
 }
 
 /**
@@ -1936,6 +2055,6 @@ function checkPtg(
 }
 
 main().catch((err) => {
-  console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
+  console.error("Audit crashed:", err);
   process.exit(1);
 });
