@@ -18,3 +18,4 @@
 - [Env-var number parsing](env-var-parsing.md) — Number("") is 0, not NaN: unset env + ">= 0" guard silently disables budgets; treat empty as absent, and test the genuinely UNSET path.
 - [In-process warm-up audit](in-process-audit-pattern.md) — warm-vs-request key drift needs real warm fn + real router + cache observer in one process; --packages=external breaks on workspace TS-source pkgs.
 - [Auto-merge verification](automerge-verification.md) — assisted rounds can corrupt regions outside markers; mid-rebase the tree lacks still-queued commits — check before re-implementing "lost" work.
+- [Parallel-task merges](parallel-task-merges.md) — two branches often fix the SAME gap; auto-merge stacks both (doubled registrations/type fields/functions) without conflicts — grep both-touched files, re-verify renamed helpers.

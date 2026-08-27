@@ -49,18 +49,23 @@
  *   audit-wide percentage tolerance would mask real drift). The funnel-only
  *   channel variants run this net too, so BOTH Online and Onsite are
  *   exercised even though the full scenarios only visit the busiest channel.
- * - Channel label-drift guard (default view): the online/onsite lease
- *   baselines here hardcode the SAME 'Online'/'Onsite' literals the API
- *   keys its channel split on (DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL).
- *   If upstream data relabels the channel values (e.g. dbt renames 'Online'
- *   to 'Digital'), both sides compute 0, every per-cell check passes 0=0,
- *   and the dashboard ships zeroed online/onsite lease columns with no
- *   alarm. A materially non-zero ratified-lease baseline whose Online AND
- *   Onsite baselines are BOTH zero therefore FAILS, naming the channel
- *   column, the expected labels, and the labels actually present. Quiet
- *   windows (total below AUDIT_CHANNEL_GUARD_MIN_TOTAL) are exempt so day
- *   one of a year cannot false-positive. Mirrors the chLabels guard in
- *   audit-dashboard.ts.
+ * - Channel label-drift guards (default view): the audit and the API key
+ *   their channel splits on the SAME hardcoded 'Online'/'Onsite' literals,
+ *   on TWO different columns — DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL
+ *   for the lease matrix / community columns, and
+ *   DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL for the funnel's online/onsite
+ *   lead and first-tour cells. If upstream data relabels either column's
+ *   values (e.g. dbt renames 'Online' to 'Digital'), both sides compute 0,
+ *   every check passes 0=0, and the dashboard ships zeroed online/onsite
+ *   columns with no alarm — the funnel cells are especially exposed because
+ *   they are otherwise only consistency-checked within one response, and
+ *   their stage TOTALS stay non-zero so the requireFunnelData vacuity guard
+ *   never trips. A materially non-zero total (ratified leases, funnel
+ *   leads, funnel first tours) whose Online AND Onsite counts are BOTH
+ *   zero therefore FAILS, naming the channel column, the expected labels,
+ *   and the labels actually present. Quiet windows (total below
+ *   AUDIT_CHANNEL_GUARD_MIN_TOTAL) are exempt so day one of a year cannot
+ *   false-positive. Mirrors the chLabels guards in audit-dashboard.ts.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:leasing
@@ -70,8 +75,9 @@
  *                        falling back to port 8080)
  *   AUDIT_TOLERANCE_PCT  allowed relative divergence in percent (default 0.5)
  *   AUDIT_CHANNEL_GUARD_MIN_TOTAL
- *                        minimum ratified-lease baseline count for the
- *                        channel label-drift guard to judge a window
+ *                        minimum total per guarded metric (ratified
+ *                        leases, funnel leads, funnel first tours) for the
+ *                        channel label-drift guards to judge a window
  *                        (default 10, same knob as audit-dashboard.ts)
  *
  * Exits 0 when all values match within tolerance, 1 otherwise.
@@ -248,9 +254,12 @@ interface Scenario {
    */
   requireFunnelData?: boolean;
   /**
-   * Run the channel label-drift guard: fail when the ratified-lease
-   * baseline is materially non-zero but the Online AND Onsite baselines
-   * are BOTH zero (see auditChannelLabels). Set on the default view.
+   * Run the channel label-drift guards: fail when a guarded total —
+   * ratified leases on the deals side (auditChannelLabels), funnel leads /
+   * first tours on the contacts side (auditFunnelChannelLabels) — is
+   * materially non-zero but its Online AND Onsite counts are BOTH zero.
+   * Set on the default view only: a channel-filtered scenario legitimately
+   * zeroes the opposite channel.
    */
   withChannelLabelGuard?: boolean;
 }
@@ -581,10 +590,11 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   checkCell("onsite", resp.matrix.onsite, gOnsite, onsiteRatified);
   checkCell("net", resp.matrix.net, gTotal, ratified - cancelled);
 
-  // ---- Channel label-drift guard ----
+  // ---- Channel label-drift guards ----
   if (scenario.withChannelLabelGuard) {
-    console.log("-- channel label-drift guard");
+    console.log("-- channel label-drift guards");
     await auditChannelLabels(ratified, onlineRatified, onsiteRatified, expStart, expTo, f);
+    await auditFunnelChannelLabels(expStart, expTo, f);
   }
 
   // ---- Community summary ----
@@ -604,23 +614,69 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   auditFunnelTrend(resp, scenario);
 }
 
+/**
+ * Shared judgment for one channel label-drift guard (mirrors the chLabels
+ * guards in audit-dashboard.ts).
+ *
+ * The audit's channel counts and the API's channel split hardcode the same
+ * 'Online'/'Onsite' literals. If upstream data relabels a channel column's
+ * values (e.g. dbt renames 'Online' to 'Digital'), BOTH sides compute 0,
+ * every check passes 0=0, and the leasing dashboard ships zeroed
+ * online/onsite columns with no alarm. A materially non-zero total whose
+ * two channel counts are BOTH zero is that signature: unlabeled rows
+ * legitimately make online + onsite < total, but at volume they never take
+ * both to exactly zero. Totals below CHANNEL_GUARD_MIN_TOTAL are treated as
+ * too quiet to judge (e.g. day one of a year) and cannot false-positive.
+ */
+async function judgeChannelLabels(g: {
+  /** Check name suffix: printed as chLabels:<metric>. */
+  metric: string;
+  /** What one counted row is, plural, for the messages. */
+  noun: string;
+  total: number;
+  online: number;
+  onsite: number;
+  /** Channel column the dashboard keys this metric's split on. */
+  column: string;
+  /** Where the 'Online'/'Onsite' literals live (API and audit sides). */
+  literalSites: string;
+  /** Audited window, e.g. "2026-01-01..2026-08-26". */
+  window: string;
+  /** Labels actually present (COALESCE(col,'(null)') GROUP BY), on demand. */
+  labelsPresent: () => Promise<string>;
+}): Promise<void> {
+  const name = `chLabels:${g.metric}`;
+  if (g.total < CHANNEL_GUARD_MIN_TOTAL) {
+    console.log(
+      `  OK   ${name}: total=${g.total} < ${CHANNEL_GUARD_MIN_TOTAL} — window too quiet to judge label drift`,
+    );
+    return;
+  }
+  if (g.online > 0 || g.onsite > 0) {
+    console.log(
+      `  OK   ${name}: 'Online'/'Onsite' labels present (online=${g.online} onsite=${g.onsite} of ${g.total})`,
+    );
+    return;
+  }
+  const present = await g.labelsPresent();
+  failures++;
+  console.error(
+    `  FAIL ${name}: ${g.total} ${g.noun} in ${g.window} but ZERO match 'Online' and ` +
+      `ZERO match 'Onsite' on ${g.column} — the expected channel labels are missing ` +
+      `from the data; labels present: ${present}. The leasing dashboard's channel ` +
+      `split AND this audit both hardcode 'Online'/'Onsite' (${g.literalSites}), so ` +
+      `the dashboard's online/onsite cells for this metric read 0 and every check ` +
+      `passes 0=0. If upstream renamed the channel values, update those literals to ` +
+      `the new labels.`,
+  );
+}
+
 type FunnelCellName = keyof LeasingResponse["funnel"];
 /**
- * Channel label-drift guard (mirrors the chLabels guard in
- * audit-dashboard.ts).
- *
- * The online/onsite baselines and the API's channel split hardcode the
- * same 'Online'/'Onsite' literals (r.CHANNEL === "Online"/"Onsite" in
- * src/lib/leasing.ts; the channel COUNT_IFs in baselineLeaseCounts /
- * auditCommunities here). If upstream data relabels the channel values in
- * DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL (e.g. dbt renames 'Online' to
- * 'Digital'), BOTH sides compute 0, every per-cell check passes 0=0, and
- * the leasing dashboard ships zeroed online/onsite lease columns with no
- * alarm. A materially non-zero ratified-lease baseline whose two channel
- * baselines are BOTH zero is that signature: unlabeled rows legitimately
- * make online + onsite < total, but at volume they never take both to
- * exactly zero. Totals below CHANNEL_GUARD_MIN_TOTAL are treated as too
- * quiet to judge (e.g. day one of a year) and cannot false-positive.
+ * Deals-side guard: the ratified-lease channel split
+ * (DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL). Reuses the online/onsite
+ * lease-count baselines the scenario already computed via
+ * baselineLeaseCounts, so the labels probe runs only on failure.
  */
 async function auditChannelLabels(
   total: number,
@@ -630,48 +686,111 @@ async function auditChannelLabels(
   toDate: string,
   f: ScenarioFilters,
 ): Promise<void> {
-  const name = "chLabels:ratified";
-  if (total < CHANNEL_GUARD_MIN_TOTAL) {
-    console.log(
-      `  OK   ${name}: total=${total} < ${CHANNEL_GUARD_MIN_TOTAL} — window too quiet to judge label drift`,
-    );
-    return;
-  }
-  if (online > 0 || onsite > 0) {
-    console.log(
-      `  OK   ${name}: 'Online'/'Onsite' labels present (online=${online} onsite=${onsite} of ${total})`,
-    );
-    return;
-  }
-  // Fetch the labels actually present so the failure names the fix.
-  const binds: (string | number)[] = [startDate, toDate];
-  let extra = "";
-  if (f.community) {
-    extra = " AND TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?";
-    binds.push(f.community);
-  }
-  const labelRows = await querySnowflake<{ LABEL: string; N: number }>(
-    `SELECT COALESCE(DEAL_ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
-     FROM DM_DEALS
-     WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND LEASE_RATIFIED_DATE BETWEEN ? AND ?${extra}
-     GROUP BY 1 ORDER BY N DESC`,
-    binds,
-  );
-  const present =
-    labelRows.map((r) => `'${r.LABEL}' (${Number(r.N) || 0})`).join(", ") || "(no rows)";
-  failures++;
-  console.error(
-    `  FAIL ${name}: ${total} ratified leases in ${startDate}..${toDate} but ZERO match ` +
-      `'Online' and ZERO match 'Onsite' on DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL — ` +
-      `the expected channel labels are missing from the data; labels present: ${present}. ` +
-      `The leasing dashboard's channel split AND this audit's baselines both hardcode ` +
-      `'Online'/'Onsite' (r.CHANNEL === ... in src/lib/leasing.ts; the channel COUNT_IFs ` +
-      `in baselineLeaseCounts/auditCommunities here), so every online/onsite lease cell ` +
-      `reads 0 and the per-cell checks pass 0=0. If upstream renamed the channel values, ` +
-      `update those literals to the new labels.`,
-  );
+  await judgeChannelLabels({
+    metric: "ratified",
+    noun: "ratified leases",
+    total,
+    online,
+    onsite,
+    column: "DM_DEALS.DEAL_ONSITE_ONLINE_SOURCE_CHANNEL",
+    literalSites:
+      "r.CHANNEL === ... over fetchLeaseCounts rows in src/lib/leasing.ts; " +
+      "the channel COUNT_IFs in baselineLeaseCounts/auditCommunities here",
+    window: `${startDate}..${toDate}`,
+    labelsPresent: async () => {
+      // Fetch the labels actually present so the failure names the fix.
+      const binds: (string | number)[] = [startDate, toDate];
+      let extra = "";
+      if (f.community) {
+        extra = " AND TRIM(RL_COMMUNITY_OF_INTEREST_HUBSPOT_DEAL) = ?";
+        binds.push(f.community);
+      }
+      const labelRows = await querySnowflake<{ LABEL: string; N: number }>(
+        `SELECT COALESCE(DEAL_ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
+         FROM DM_DEALS
+         WHERE PIPELINE_NAME = '${RL_PIPELINE}' AND LEASE_RATIFIED_DATE BETWEEN ? AND ?${extra}
+         GROUP BY 1 ORDER BY N DESC`,
+        binds,
+      );
+      return (
+        labelRows.map((r) => `'${r.LABEL}' (${Number(r.N) || 0})`).join(", ") || "(no rows)"
+      );
+    },
+  });
 }
 
+/**
+ * Contacts-side guard: the funnel's Online/Onsite lead and first-tour cells
+ * key on a DIFFERENT column than the lease matrix —
+ * DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL (funnel.onlineLeads/onsiteLeads/
+ * onlineFirstTours/onsiteFirstTours split fetchContactStageCounts rows via
+ * r.CHANNEL === 'Online'/'Onsite' in src/lib/leasing.ts) — so the
+ * deals-side guard above cannot catch a relabel here. Those funnel cells
+ * are otherwise only consistency-checked (chart vs table within ONE
+ * response): a contacts-side relabel zeroes both sides in unison and
+ * passes 0=0, while the stage TOTALS stay non-zero so requireFunnelData
+ * does not trip either. This guard is that blind spot's detection net.
+ *
+ * One COALESCE(col,'(null)') GROUP BY probe per stage doubles as count
+ * source and diagnostics: total = Σ all labels, online/onsite = the
+ * expected labels' rows, and the label list feeds the failure message
+ * directly. Row definitions mirror fetchContactStageCounts: leads =
+ * contacts created in range with a real RL community of interest; first
+ * tours = contacts whose first RL tour date falls in range.
+ */
+async function auditFunnelChannelLabels(
+  startDate: string,
+  toDate: string,
+  f: ScenarioFilters,
+): Promise<void> {
+  const stages = [
+    {
+      metric: "funnelLeads",
+      noun: "funnel leads",
+      dateExpr: "X.CONTACT_CREATE_DATE",
+      stageWhere:
+        " AND X.RL_COMMUNITY_OF_INTEREST IS NOT NULL" +
+        " AND TRIM(X.RL_COMMUNITY_OF_INTEREST) NOT IN ('', '(No Value)')",
+    },
+    {
+      metric: "funnelFirstTours",
+      noun: "funnel first tours",
+      dateExpr: "X.RL_MIN_FIRST_TOUR_DATE",
+      stageWhere: "",
+    },
+  ];
+  for (const s of stages) {
+    const binds: (string | number)[] = [startDate, toDate];
+    let extra = s.stageWhere;
+    if (f.community) {
+      extra += " AND TRIM(X.RL_COMMUNITY_OF_INTEREST) = ?";
+      binds.push(f.community);
+    }
+    const rows = await querySnowflake<{ LABEL: string; N: number }>(
+      `SELECT COALESCE(X.ONSITE_ONLINE_SOURCE_CHANNEL, '(null)') AS LABEL, COUNT(*) AS N
+       FROM DM_CONTACTS X
+       WHERE ${s.dateExpr} BETWEEN ? AND ?${extra}
+       GROUP BY 1 ORDER BY N DESC`,
+      binds,
+    );
+    const labelCount = (label: string) =>
+      rows.filter((r) => r.LABEL === label).reduce((t, r) => t + (Number(r.N) || 0), 0);
+    await judgeChannelLabels({
+      metric: s.metric,
+      noun: s.noun,
+      total: rows.reduce((t, r) => t + (Number(r.N) || 0), 0),
+      online: labelCount("Online"),
+      onsite: labelCount("Onsite"),
+      column: "DM_CONTACTS.ONSITE_ONLINE_SOURCE_CHANNEL",
+      literalSites:
+        "r.CHANNEL === ... over fetchContactStageCounts rows in src/lib/leasing.ts; " +
+        "labelCount() here",
+      window: `${startDate}..${toDate}`,
+      labelsPresent: async () =>
+        rows.map((r) => `'${r.LABEL}' (${Number(r.N) || 0})`).join(", ") || "(no rows)",
+    });
+  }
+}
 /**
  * Community summary baseline: ONE grouped conditional-aggregation scan
  * replaces the old four per-source dealByCommunity queries (ratified /
@@ -1057,47 +1176,6 @@ async function main() {
   process.exit(0);
 }
 
-/**
- * Full-span + to-date goal sums for several goal types in ONE query (the
- * funnel needs up to 6 types per scenario; grouping keeps the audit under
- * the Snowflake proxy rate limit).
- */
-async function baselineGoalsByType(
-  goalTypes: string[],
-  fiscalYear: number,
-  startDate: string,
-  endDate: string,
-  toDate: string,
-  community?: string,
-): Promise<Map<string, { fullSpan: number; toDate: number }>> {
-  if (goalTypes.length === 0) return new Map();
-  const placeholders = goalTypes.map(() => "?").join(",");
-  const binds: (string | number)[] = [toDate, fiscalYear, ...goalTypes, startDate, endDate];
-  let extra = "";
-  if (community) {
-    extra = " AND DEVELOPMENT_NAME = ?";
-    binds.push(community);
-  }
-  const rows = await querySnowflake<{
-    GOAL_TYPE: string;
-    FULL_SPAN: number;
-    TO_DATE: number;
-  }>(
-    `SELECT GOAL_TYPE, SUM(GOAL) AS FULL_SPAN,
-            SUM(IFF(BUDGET_DATE <= ?, GOAL, 0)) AS TO_DATE
-     FROM DM_GOALS
-     WHERE FISCAL_YEAR = ? AND GOAL_TYPE IN (${placeholders})
-       AND BUDGET_DATE BETWEEN ? AND ?${extra}
-     GROUP BY 1`,
-    binds,
-  );
-  return new Map(
-    rows.map((r) => [
-      r.GOAL_TYPE,
-      { fullSpan: Number(r.FULL_SPAN) || 0, toDate: Number(r.TO_DATE) || 0 },
-    ]),
-  );
-}
 
 /**
  * Contact-stage actual baseline from DM_CONTACTS, split by channel:
