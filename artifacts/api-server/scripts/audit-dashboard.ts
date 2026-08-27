@@ -106,6 +106,19 @@
  * GA users across all properties below AUDIT_GA_PROPERTY_GUARD_MIN_TOTAL)
  * are exempt so they cannot false-positive.
  *
+ * Goal-derived numbers are checked in every scenario too (auditGoals): the
+ * KPI row's salesGoal / salesTdGoal, each traffic-matrix cell's
+ * fullSpanGoal / toDateGoal, and the PTG figures derived from them. The
+ * baseline re-resolves the expected GOAL_TYPE per metric from live DISTINCT
+ * GOAL_TYPE values (expectedGoalType — a deliberate re-implementation of
+ * the API's resolveGoalType, since importing it would mask its regressions)
+ * and recomputes both sums as two plain BUDGET_DATE windows (start..end and
+ * start..toDate) instead of the API's SUM(IFF(BUDGET_DATE <= toDate, ...)).
+ * Goals respond to company/development filters (DM_GOALS columns), must
+ * IGNORE channel filters, and rebind their window and quarter resolution to
+ * explicit date ranges — so each scenario exercises a distinct goal
+ * regression class.
+ *
  * The breakdown tables (divisions / developments) are audited per row: leads,
  * tours, and sales against CRM-side baselines, and the website-user columns
  * against GA-side baselines recomputed with plain GROUP BYs over
@@ -217,6 +230,14 @@ interface DevelopmentRow {
   sales: number;
 }
 
+/** One traffic-matrix cell: goals for the full span / elapsed cutoff + PTG. */
+interface GoalCell {
+  fullSpanGoal: number;
+  toDateGoal: number;
+  actual: number;
+  ptgPercent: number | null;
+}
+
 /** Traffic-matrix cell: actual plus the resolved target values. */
 interface TargetCell {
   fullSpanGoal: number;
@@ -238,6 +259,7 @@ interface OverviewResponse {
     grossSales: number;
     salesGoal: number;
     salesTdGoal: number;
+    ptgVariance: number;
     ptgPercent: number | null;
   };
 
@@ -463,6 +485,20 @@ function gaFrag(f: ScenarioFilters): Frag {
   return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
 }
 
+/** Baseline fragments for DM_GOALS (goals have no channel dimension). */
+function goalFrag(f: ScenarioFilters): Frag {
+  const parts: string[] = [];
+  const binds: (string | number)[] = [];
+  if (f.company) {
+    parts.push("COMPANY_NAME = ?");
+    binds.push(f.company);
+  }
+  if (f.development) {
+    parts.push("DEVELOPMENT_NAME = ?");
+    binds.push(f.development);
+  }
+  return { sql: parts.length ? ` AND ${parts.join(" AND ")}` : "", binds };
+}
 function toQueryParams(f: ScenarioFilters): Record<string, string> {
   const params: Record<string, string> = {};
   if (f.company) params.company = f.company;
@@ -503,6 +539,7 @@ interface ScenarioResult {
   rangeOk: boolean;
   overview: OverviewResponse;
   expStart: string;
+  expEnd: string;
   expTo: string;
   /** set on every range-honoring scenario result */
   headline?: HeadlineBaselines;
@@ -535,7 +572,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
       `FAIL appliedRange mismatch: expected ${expStart}..${expEnd} (toDate=${expTo}), ` +
         `got ${ar.startDate}..${ar.endDate} (toDate=${ar.toDate}) — the API did not honor the requested/default dates`,
     );
-    return { ok: false, rangeOk: false, overview, expStart, expTo };
+    return { ok: false, rangeOk: false, overview, expStart, expEnd, expTo };
   }
 
   const cf = contactFrag(f);
@@ -775,6 +812,7 @@ async function auditScenario(scenario: Scenario): Promise<ScenarioResult> {
     rangeOk: true,
     overview,
     expStart,
+    expEnd,
     expTo,
     headline: {
       users,
@@ -1181,6 +1219,24 @@ async function auditWebsiteUserBreakdowns(
   return !failed;
 }
 
+/**
+ * Metrics the dashboard resolves goals for. gross_sales surfaces in the KPI
+ * row (salesGoal / salesTdGoal); every other metric in a traffic-matrix
+ * cell. Deliberately NOT imported from the API's data layer — the audit
+ * must fail when the API's metric list or naming drifts from the data.
+ */
+const GOAL_METRICS = [
+  "web_traffic",
+  "leads",
+  "online_leads",
+  "onsite_leads",
+  "first_tours",
+  "online_first_tours",
+  "onsite_first_tours",
+  "gross_sales",
+  "online_gross_sales",
+  "onsite_gross_sales",
+] as const;
 interface CommunityRow {
   development: string;
   division: string;
@@ -1411,15 +1467,31 @@ async function main() {
   for (const scenario of scenarios) {
     const result = await auditScenario(scenario);
     if (!result.ok) anyFailed = true;
-    if (!scenario.withBreakdowns && !scenario.withGaBreakdowns && !scenario.withRatios) {
-      continue;
-    }
     if (!result.rangeOk) {
       // Baselines would be bound to a range the API never applied; the
       // appliedRange failure above already fails the run.
       console.error(
-        `Skipping breakdown/ratio audits for "${scenario.name}" — appliedRange mismatch`,
+        `Skipping goal/breakdown/ratio audits for "${scenario.name}" — appliedRange mismatch`,
       );
+      continue;
+    }
+    // Goal-derived numbers are audited in EVERY scenario: goals respond to
+    // company/development filters, must ignore channel filters, and rebind
+    // their BUDGET_DATE window + quarter resolution to explicit date ranges.
+    // pinTargets scenarios are the exception: they value-pin every target
+    // cell themselves, and pre-regime years resolve no goal_* types by
+    // design — auditGoals' unresolved-metric gate would false-fail there.
+    if (!scenario.pinTargets) {
+      const goalsOk = await auditGoals(
+        scenario,
+        result.overview,
+        result.expStart,
+        result.expEnd,
+        result.expTo,
+      );
+      if (!goalsOk) anyFailed = true;
+    }
+    if (!scenario.withBreakdowns && !scenario.withGaBreakdowns && !scenario.withRatios) {
       continue;
     }
     if (scenario.withBreakdowns) {
@@ -1463,7 +1535,8 @@ async function main() {
         "labels, upstream renaming of the 'Online'/'Onsite' channel values (see any " +
         "chLabels guard failure above), upstream renaming of the GA PROPERTY values " +
         "(see any gaProperty guard failure above), a mis-wired funnel ratio, a stale ratio-goal " +
-        "name, a goal-type walk-back/target-resolution regression, ignored date " +
+        "name, a goal-type walk-back/target-resolution regression, a wrong " +
+        "GOAL_TYPE resolution or broken goal to-date cutoff, ignored date " +
         "parameters, changed filters, stale cached data, or " +
         "mislabeled/hidden communities or per-community YTD numbers drifting " +
         "from Snowflake in the Community List.",
@@ -1474,6 +1547,180 @@ async function main() {
   process.exit(0);
 }
 
+/**
+ * Audits every goal-derived number in one scenario's response: the KPI
+ * row's salesGoal / salesTdGoal, each traffic-matrix cell's fullSpanGoal /
+ * toDateGoal, and the PTG figures arithmetically derived from them
+ * (ptgPercent per cell; ptgVariance / ptgPercent on the KPI row).
+ *
+ * Baselines re-resolve the expected GOAL_TYPE per metric via
+ * expectedGoalType and recompute both sums WITHOUT the API's conditional
+ * aggregation: full-span is SUM(GOAL) over BUDGET_DATE BETWEEN start AND
+ * end, to-date is SUM(GOAL) over BUDGET_DATE BETWEEN start AND toDate —
+ * two plain windows instead of one SUM(IFF(...)). Regression classes per
+ * scenario:
+ *  - default view: wrong GOAL_TYPE resolution (e.g. stale quarter picked),
+ *    broken to-date cutoff, broken daily-distributed sums
+ *  - company / development filters: goal filters bound to the wrong
+ *    DM_GOALS column (COMPANY_NAME vs DEVELOPMENT_NAME)
+ *  - channel filter: filters leaking into the goal query — goals have no
+ *    channel dimension, so its goals must equal the default view's
+ *  - explicit date range: BUDGET_DATE window and quarter resolution bound
+ *    to the requested range (its toDate), not to today
+ *
+ * PTG checks recompute from the API's OWN actual + toDateGoal, isolating
+ * derivation bugs from goal-sum divergence (already caught above).
+ */
+async function auditGoals(
+  scenario: Scenario,
+  overview: OverviewResponse,
+  expStart: string,
+  expEnd: string,
+  expTo: string,
+): Promise<boolean> {
+  console.log(`\n=== Goals & targets (${scenario.name}) ===`);
+
+  // The audit sends no target param, so the API must apply its documented
+  // default. Resolving types for whatever the response echoes back would
+  // let a silently changed default validate itself.
+  const expTarget = "goal";
+  if (overview.appliedRange.target !== expTarget) {
+    console.error(
+      `FAIL target mismatch: expected default '${expTarget}', got '${overview.appliedRange.target}' — ` +
+        "goal baselines would be resolved against the wrong target",
+    );
+    return false;
+  }
+
+  const fiscalYear = Number(expStart.slice(0, 4));
+  const available = await availableGoalTypes(fiscalYear);
+  const typeByMetric = new Map<GoalMetric, string>();
+  const unresolved: GoalMetric[] = [];
+  for (const metric of GOAL_METRICS) {
+    const gt = expectedGoalType(available, expTarget, metric, expTo);
+    if (gt) typeByMetric.set(metric, gt);
+    else unresolved.push(metric);
+  }
+  const types = [...new Set(typeByMetric.values())];
+
+  // GOAL_TYPE resolution is global — it reads the fiscal year's DISTINCT
+  // type names, which no company/development/channel row filter changes —
+  // so EVERY dashboard metric must resolve in EVERY scenario. A single
+  // unresolved metric (one renamed or dropped GOAL_TYPE) is the silent
+  // zero-target regression this audit exists to catch: the API and a
+  // proceed-as-zero baseline would both compute 0 for that cell and
+  // "agree". Fail by name instead of comparing 0 == 0.
+  if (unresolved.length > 0) {
+    console.error(
+      `FAIL unresolved GOAL_TYPE for ${unresolved.length}/${GOAL_METRICS.length} metric(s) ` +
+        `(target '${expTarget}', FY${fiscalYear}, toDate ${expTo}): ${unresolved.join(", ")} — ` +
+        `no '${expTarget}_<metric>_qN' name (N <= toDate's quarter) exists among the fiscal ` +
+        `year's GOAL_TYPEs for them. Goal naming drifted or goals were not loaded; the ` +
+        `dashboard would silently show zero targets for these cells.`,
+    );
+    return false;
+  }
+
+  let failed = false;
+  const unfiltered = !scenario.filters.company && !scenario.filters.development;
+
+  const gfr = goalFrag(scenario.filters);
+  const placeholders = types.map(() => "?").join(",");
+  const goalSums = (from: string, to: string) =>
+    sfQuery<GoalBaselineRow>(
+      `SELECT GOAL_TYPE, SUM(GOAL) AS N
+       FROM DM_GOALS
+       WHERE FISCAL_YEAR = ?
+         AND GOAL_TYPE IN (${placeholders})
+         AND BUDGET_DATE BETWEEN ? AND ?${gfr.sql}
+       GROUP BY 1`,
+      [fiscalYear, ...types, from, to, ...gfr.binds],
+    );
+  const [fullRows, toDateRows] = await Promise.all([
+    goalSums(expStart, expEnd),
+    goalSums(expStart, expTo),
+  ]);
+  const fullByType = new Map(fullRows.map((r) => [r.GOAL_TYPE, Number(r.N) || 0]));
+  const tdByType = new Map(toDateRows.map((r) => [r.GOAL_TYPE, Number(r.N) || 0]));
+
+  const totalFullSpan = [...fullByType.values()].reduce((a, b) => a + b, 0);
+  if (unfiltered && totalFullSpan === 0) {
+    // Types resolved but the window has no goal rows: the dashboard would
+    // show all-zero targets. Only a filtered subset may legitimately do so.
+    console.error(
+      `FAIL all resolved goal baselines sum to zero in ${expStart}..${expEnd} ` +
+        `(types: ${types.join(", ")}) — goal rows missing for the window; ` +
+        "dashboard targets would all be zero",
+    );
+    failed = true;
+  } else if (!unfiltered && totalFullSpan === 0) {
+    // Distinct from unresolved types (a hard failure above): this subset
+    // simply has no goal rows, which is legitimate — the API's cells must
+    // then equal 0, and the per-cell comparisons below enforce exactly that.
+    console.log(
+      `note: resolved goal types carry zero rows under this filter — ` +
+        `legitimate for a company/development without goals; API goal cells must be 0`,
+    );
+  }
+
+  const tm = overview.trafficMatrix;
+  const cells: { label: string; metric: GoalMetric; cell: GoalCell }[] = [
+    { label: "online.websiteUsers", metric: "web_traffic", cell: tm.online.websiteUsers },
+    { label: "online.leads", metric: "online_leads", cell: tm.online.leads },
+    { label: "online.tours", metric: "online_first_tours", cell: tm.online.tours },
+    { label: "online.sales", metric: "online_gross_sales", cell: tm.online.sales },
+    { label: "onsite.leads", metric: "onsite_leads", cell: tm.onsite.leads },
+    { label: "onsite.tours", metric: "onsite_first_tours", cell: tm.onsite.tours },
+    { label: "onsite.sales", metric: "onsite_gross_sales", cell: tm.onsite.sales },
+    { label: "total.leads", metric: "leads", cell: tm.total.leads },
+    { label: "total.tours", metric: "first_tours", cell: tm.total.tours },
+    {
+      label: "kpi.grossSales",
+      metric: "gross_sales",
+      cell: {
+        fullSpanGoal: overview.kpis.salesGoal,
+        toDateGoal: overview.kpis.salesTdGoal,
+        actual: overview.kpis.grossSales,
+        ptgPercent: overview.kpis.ptgPercent,
+      },
+    },
+  ];
+
+  for (const { label, metric, cell } of cells) {
+    const gt = typeByMetric.get(metric);
+    const expFull = gt ? (fullByType.get(gt) ?? 0) : 0;
+    const expTd = gt ? (tdByType.get(gt) ?? 0) : 0;
+    const gtNote = gt ?? "(no goal type)";
+    for (const [kind, api, baseline] of [
+      ["fullSpan", cell.fullSpanGoal, expFull],
+      ["toDate  ", cell.toDateGoal, expTd],
+    ] as const) {
+      const d = divergedPct(api, baseline);
+      const ok = d <= TOLERANCE_PCT;
+      console.log(
+        `${ok ? "OK  " : "FAIL"} goal ${kind} ${label.padEnd(19)} ${gtNote.padEnd(28)} api=${api} baseline=${baseline} divergence=${d.toFixed(3)}%`,
+      );
+      if (!ok) failed = true;
+    }
+    // PTG must be derived from the cell's own actual & to-date goal.
+    const expPtg = derivedPtg(cell.actual, cell.toDateGoal);
+    const ptgOk = closeEnough(cell.ptgPercent, expPtg);
+    console.log(
+      `${ptgOk ? "OK  " : "FAIL"} goal ptg      ${label.padEnd(19)} api=${fmtNullable(cell.ptgPercent)} derived=${fmtNullable(expPtg)}`,
+    );
+    if (!ptgOk) failed = true;
+  }
+
+  // KPI variance is the remaining derived figure: actual - to-date goal.
+  const expVariance = overview.kpis.grossSales - overview.kpis.salesTdGoal;
+  const varOk = closeEnough(overview.kpis.ptgVariance, expVariance);
+  console.log(
+    `${varOk ? "OK  " : "FAIL"} goal variance kpi.grossSales      api=${overview.kpis.ptgVariance} derived=${expVariance}`,
+  );
+  if (!varOk) failed = true;
+
+  return !failed;
+}
 const GOALS_FLAG_VALUES = new Set(["Has Goals", "No Goals"]);
 
 main().catch((err) => {
@@ -2031,6 +2278,11 @@ interface DimRawRow {
   RENTAL_COMMUNITY_FLAG: string | null;
 }
 
+const MONTH_ABBR = [
+  "jan", "feb", "mar", "apr", "may", "jun",
+  "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
 type TargetMetric = (typeof TARGET_METRICS)[number];
 /** Per-community YTD baseline: full-window count plus its today-dated slice. */
 interface YtdBaselineRow {
@@ -2039,6 +2291,9 @@ interface YtdBaselineRow {
   N_TODAY: number;
 }
 
+function fmtNullable(v: number | null): string {
+  return v === null ? "null" : String(v);
+}
 let sfActive = 0;
 
 const sfWaiters: (() => void)[] = [];
@@ -2074,6 +2329,11 @@ async function sfQuery<T extends object>(
     sfActive--;
     sfWaiters.shift()?.();
   }
+}
+
+interface GoalBaselineRow {
+  GOAL_TYPE: string;
+  N: number;
 }
 
 /** Full-span and elapsed (to-date) goal sums per goal type over the range. */
@@ -2320,4 +2580,77 @@ async function resolveGoalRegime(
     }
   }
   return resolved;
+}
+
+/** The dashboard's PTG convention: percent to goal, null when no goal. */
+function derivedPtg(actual: number, toDateGoal: number): number | null {
+  if (!toDateGoal) return null;
+  return (actual / toDateGoal - 1) * 100;
+}
+
+/** DISTINCT GOAL_TYPE per fiscal year, shared across scenarios (1 query). */
+const goalTypesByYear = new Map<number, Promise<Set<string>>>();
+
+/**
+ * Equality for derived floats recomputed from values that round-tripped
+ * through the same JSON document (JSON round-trips doubles exactly, so only
+ * epsilon-level slack is needed).
+ */
+function closeEnough(api: number | null, expected: number | null): boolean {
+  if (api === null || expected === null) return api === expected;
+  return Math.abs(api - expected) <= Math.max(1e-6, Math.abs(expected) * 1e-9);
+}
+
+function availableGoalTypes(fiscalYear: number): Promise<Set<string>> {
+  let entry = goalTypesByYear.get(fiscalYear);
+  if (!entry) {
+    entry = sfQuery<{ GOAL_TYPE: string }>(
+      "SELECT DISTINCT GOAL_TYPE FROM DM_GOALS WHERE FISCAL_YEAR = ?",
+      [fiscalYear],
+    ).then((rows) => new Set(rows.map((r) => r.GOAL_TYPE)));
+    goalTypesByYear.set(fiscalYear, entry);
+  }
+  return entry;
+}
+
+type GoalMetric = (typeof GOAL_METRICS)[number];
+
+/**
+ * Expected DM_GOALS GOAL_TYPE for a target + metric — a deliberate
+ * re-implementation of the API's resolveGoalType (importing it would make
+ * the audit inherit its bugs). Convention, validated against live data:
+ *  - proforma / business_plan: annual plans `<target>_<metric>_year`
+ *  - goal: quarterly recalcs `goal_<metric>_q<N>` — latest quarter <= the
+ *    quarter of the elapsed cutoff (toDate), NOT of today
+ *  - waterfall: monthly recalcs `waterfall_<metric>_<mon>` — latest month
+ *    <= toDate's month
+ * Names are constructed exactly, so the retired `old_*` and rental `RL_*`
+ * variants present in DM_GOALS can never match.
+ */
+function expectedGoalType(
+  available: Set<string>,
+  target: string,
+  metric: GoalMetric,
+  toDate: string,
+): string | null {
+  if (target === "proforma" || target === "business_plan") {
+    const name = `${target}_${metric}_year`;
+    return available.has(name) ? name : null;
+  }
+  const month = Number(toDate.slice(5, 7)); // 1-12, straight off the string
+  if (target === "goal") {
+    for (let q = Math.ceil(month / 3); q >= 1; q--) {
+      const name = `goal_${metric}_q${q}`;
+      if (available.has(name)) return name;
+    }
+    return null;
+  }
+  if (target === "waterfall") {
+    for (let m = month; m >= 1; m--) {
+      const name = `waterfall_${metric}_${MONTH_ABBR[m - 1]}`;
+      if (available.has(name)) return name;
+    }
+    return null;
+  }
+  return null;
 }

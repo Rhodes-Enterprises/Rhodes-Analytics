@@ -6,6 +6,7 @@ description: Non-obvious rules for mapping Snowflake goals/actuals to the migrat
 # Goal data gotchas (marketing dashboards)
 
 - DM_GOALS is **daily-distributed**: sum GOAL over the date range for a span goal and over range-start→today for a to-date goal. Do not prorate.
+- Every `goal_*_qN` / `waterfall_*_<mon>` recalc GOAL_TYPE carries BUDGET_DATE rows across the whole fiscal year (Jan 1–Dec 31), not just its own quarter/month — window sums over any sub-range are valid (a January window of a q3 type is non-empty, a q1 type still has December rows).
 - The four dashboard targets are encoded in GOAL_TYPE naming conventions, and "Goal"/"Waterfall" are periodically re-issued (q1/q2/q3, monthly) — resolve the goal type at runtime by walking back to the latest existing period instead of hardcoding names. `old_*` and `RL_*` (rentals) variants must be excluded for EHI dashboards.
 - **Why:** hardcoded goal types silently go stale when dbt adds the next quarter/month recalc.
 - Division attribution for contacts/deals only works via the community-of-interest → DM_COMPANY_DEVELOPMENT.DEVELOPMENT_NAME join (~95% match; the rest, e.g. "General", stay unattributed) — expect division tables to sum below the grand totals, same as Qlik.
