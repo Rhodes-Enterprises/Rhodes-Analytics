@@ -49,12 +49,6 @@ function getContext(): SessionContext {
     warehouse: process.env.SNOWFLAKE_WAREHOUSE?.toUpperCase() || undefined,
   };
 }
-
-// Never cache the client — the SDK handles token refresh per call.
-function getConnectors(): ReplitConnectors {
-  return new ReplitConnectors();
-}
-
 export type Bind = string | number;
 
 interface RowTypeCol {
@@ -147,7 +141,8 @@ function releaseProxySlot(): void {
   slotWaiters.shift()?.();
 }
 
-async function proxyJson(path: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; json: ResultSet }> {
+let pausedUntil = 0;
+async function proxyJson(path: string, init: ProxyRequestInit): Promise<{ status: number; json: ResultSet }> {
   let status = 0;
   let text = "";
   let retryAfterHeader: string | null = null;
@@ -156,18 +151,16 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
     attempts = attempt + 1;
     let failed = false;
     let caught: unknown;
-    await acquireProxySlot();
+    // Never hold a pacer slot while the 429 pause gate is closed: wait
+    // first, then acquire, and re-check in case a 429 landed while queued.
+    for (;;) {
+      await awaitThrottleGate();
+      await acquireProxySlot();
+      if (pausedUntil <= Date.now()) break;
+      releaseProxySlot();
+    }
     try {
-      // A fresh client per attempt — the SDK handles token refresh per call.
-      const response = await getConnectors().proxy("snowflake", path, {
-        method: init.method,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          ...init.headers,
-        },
-        body: init.body,
-      });
+      const response = await snowflakeTestHooks.transport(path, init);
       status = response.status;
       retryAfterHeader = response.headers.get("retry-after");
       // Read the body inside the try: a connection dropped mid-body (e.g.
@@ -192,22 +185,28 @@ async function proxyJson(path: string, init: { method: string; headers?: Record<
       }
       throw caught;
     }
+    if (status === 429) {
+      // Arm the process-wide pause gate on EVERY throttle response —
+      // including the terminal attempt — so ALL queued requests wait out
+      // the proxy's Retry-After window together instead of piling onto a
+      // known-throttled proxy the moment this request's slot frees.
+      noteThrottled(retryAfterHeader, attempt);
+    }
     // 429 gets a larger budget than other retryable statuses: it is explicit
     // backpressure, and a saturated proxy can stay saturated for tens of
     // seconds while a parallel dashboard load drains.
     const maxRetries = status === 429 ? RATE_LIMIT_MAX_RETRIES : TRANSIENT_MAX_RETRIES;
     if (isRetryableStatus(status) && attempt < maxRetries) {
-      // On 429 the proxy says how long to back off — honor it (still capped
-      // and jittered so a burst of throttled queries doesn't retry in
-      // lockstep or wait unboundedly long).
-      const baseMs = status === 429 ? retryAfterBaseMs(retryAfterHeader) : undefined;
       logger.warn(
         { path, attempt: attempts, status },
         "Transient Snowflake proxy HTTP status — retrying",
       );
-      await sleep(
-        transientBackoffMs(attempt, baseMs, status === 429 ? RATE_LIMIT_BACKOFF_CAP_MS : undefined),
-      );
+      // A throttled request waits at the top of the next attempt via the
+      // shared pause gate (no double-sleep); other retryable statuses back
+      // off locally.
+      if (status !== 429) {
+        await sleep(transientBackoffMs(attempt));
+      }
       continue;
     }
     break;
@@ -268,6 +267,9 @@ export async function querySnowflake<T = Record<string, unknown>>(
   if (context.warehouse) body.warehouse = context.warehouse;
   if (binds.length > 0) body.bindings = toBindings(binds);
 
+  // Hold a slot for the statement's whole lifecycle (submit → poll →
+  // partition fetches) so its request budget stays accounted for.
+  await statementSlots.acquire();
   try {
     let { status, json } = await proxyJson("/api/v2/statements", {
       method: "POST",
@@ -309,6 +311,8 @@ export async function querySnowflake<T = Record<string, unknown>>(
       "Snowflake query failed",
     );
     throw err;
+  } finally {
+    statementSlots.release();
   }
 }
 
@@ -359,7 +363,105 @@ export async function checkSnowflake(): Promise<SnowflakeStatus> {
   }
 }
 
+// Above the per-request pacer sits a statement-level cap: a statement's
+// whole lifecycle (submit → 202 polls → partition fetches) holds one slot,
+// so a 14-query dashboard fan-out queues instead of opening 14 statements
+// whose polls all compete through the pacer at once. Waiters are FIFO.
+const MAX_CONCURRENT_STATEMENTS = 7;
+
+/**
+ * Test seam for the offline rate-limit audit (audit:throttle): the audit
+ * swaps `transport` for canned responses to prove the retry, pause-gate,
+ * and concurrency-cap contracts without network access. Production code
+ * must never reassign this.
+ */
+export const snowflakeTestHooks: {
+  transport: (path: string, init: ProxyRequestInit) => Promise<ProxyTransportResponse>;
+  readonly rateLimitMaxRetries: number;
+  readonly maxConcurrentStatements: number;
+} = {
+  transport: connectorTransport,
+  rateLimitMaxRetries: RATE_LIMIT_MAX_RETRIES,
+  maxConcurrentStatements: MAX_CONCURRENT_STATEMENTS,
+};
+
 /** 429 = proxy rate limit; 5xx = gateway/upstream hiccup. Other 4xx are real errors. */
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
+}
+
+class Semaphore {
+  private free: number;
+  private readonly waiters: (() => void)[] = [];
+  constructor(size: number) {
+    this.free = size;
+  }
+  async acquire(): Promise<void> {
+    if (this.free > 0) {
+      this.free--;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.free++;
+  }
+}
+
+const statementSlots = new Semaphore(MAX_CONCURRENT_STATEMENTS);
+
+interface ProxyRequestInit {
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+// Cooperative process-wide brake on top of the pacer: when ANY request gets
+// a 429, all proxy traffic from this process (submits and polls alike)
+// pauses until the Retry-After horizon passes. Without it, every in-flight
+// statement burns its own retry budget probing a proxy that already said
+// "slow down". Delay math delegates to the shared transient-retry policy.
+function noteThrottled(retryAfterHeader: string | null, attempt: number): void {
+  const delayMs = transientBackoffMs(
+    attempt,
+    retryAfterBaseMs(retryAfterHeader),
+    RATE_LIMIT_BACKOFF_CAP_MS,
+  );
+  pausedUntil = Math.max(pausedUntil, Date.now() + delayMs);
+}
+
+async function awaitThrottleGate(): Promise<void> {
+  for (;;) {
+    const waitMs = pausedUntil - Date.now();
+    if (waitMs <= 0) return;
+    // Small extra jitter staggers the herd released when the gate opens.
+    await new Promise((r) => setTimeout(r, waitMs + Math.floor(Math.random() * 250)));
+  }
+}
+
+async function connectorTransport(
+  path: string,
+  init: ProxyRequestInit,
+): Promise<ProxyTransportResponse> {
+  // Never cache the client — the SDK handles token refresh per call.
+  const connectors = new ReplitConnectors();
+  return connectors.proxy("snowflake", path, {
+    method: init.method,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...init.headers,
+    },
+    body: init.body,
+  });
+}
+
+/** Shape of one raw proxy exchange; structurally satisfied by fetch's Response. */
+export interface ProxyTransportResponse {
+  status: number;
+  ok: boolean;
+  headers: { get(name: string): string | null };
+  text(): Promise<string>;
 }

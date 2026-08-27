@@ -119,6 +119,7 @@ interface OverviewPayload {
   trafficMatrix: {
     online: { websiteUsers: MatrixCell; leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
     onsite: { leads: MatrixCell; tours: MatrixCell; sales: MatrixCell };
+    /** Rows with neither 'Online' nor 'Onsite' label — actuals only, no goals exist for the bucket. */
     unknown: { leads: number; tours: number; sales: number };
     total: { leads: MatrixCell; tours: MatrixCell };
     newWebsiteUsers: number;

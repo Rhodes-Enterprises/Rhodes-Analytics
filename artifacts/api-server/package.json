@@ -13,7 +13,8 @@
     "audit:dashboard": "esbuild scripts/audit-dashboard.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-dashboard.mjs --log-level=warning && node dist/audit-dashboard.mjs",
     "audit:yoy": "esbuild scripts/audit-yoy.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-yoy.mjs --log-level=warning && node dist/audit-yoy.mjs",
     "audit:leasing": "esbuild scripts/audit-leasing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-leasing.mjs --log-level=warning && node dist/audit-leasing.mjs",
-    "audit:ui": "esbuild scripts/audit-ui.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-ui.mjs --log-level=warning && node dist/audit-ui.mjs"
+    "audit:ui": "esbuild scripts/audit-ui.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-ui.mjs --log-level=warning && node dist/audit-ui.mjs",
+    "audit:throttle": "esbuild scripts/audit-throttle.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/audit-throttle.mjs --log-level=warning && SNOWFLAKE_MAX_IN_FLIGHT=50 SNOWFLAKE_MIN_START_SPACING_MS=0 node dist/audit-throttle.mjs"
   },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.3",
