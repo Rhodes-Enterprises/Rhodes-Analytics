@@ -80,6 +80,22 @@
  *   carry an expected flag value, naming the values actually present;
  *   properties below AUDIT_GA_FLAG_GUARD_MIN_TOTAL distinct users are too
  *   quiet to judge and exempt.
+ * - Percent-to-goal (ptgPercent) checks: every derived percent the page
+ *   shows — kpis, goal matrix, funnel cells, community rows (lease ptg and
+ *   the per-stage funnel cells) — is recomputed from the audit's OWN
+ *   baselines as (actual / toDateGoal - 1) * 100, null when the to-date
+ *   goal is zero or absent (the ptg() rule in src/lib/leasing.ts).
+ *   Comparison runs in RATIO space (ptg/100 + 1 vs actual/goal) with a
+ *   compounded tolerance: the two inputs are each verified within
+ *   TOLERANCE_PCT, and a percentage tolerance on the ptg VALUE itself is
+ *   meaningless around 0, exactly where a healthy dashboard sits
+ *   (actual ≈ goal). Null semantics are pinned BOTH ways: a cell with no
+ *   target (opposite channel under a channel filter, FY2025 stages
+ *   without goals, goalless communities) must report null — not 0 or
+ *   -100 — and a cell with a real target must report a number. This is
+ *   what catches a formula regression — full-span instead of to-date
+ *   denominator, a dropped "- 1", a lost null rule — that leaves every
+ *   raw actual and goal check green.
  *
  * Run from artifacts/api-server (API server must be running):
  *   pnpm run audit:leasing
@@ -147,6 +163,7 @@ interface FunnelCell {
   fullSpanGoal: number;
   toDateGoal: number;
   actual: number;
+  ptgPercent: number | null;
 }
 
 interface CommunityRow {
@@ -191,6 +208,7 @@ interface LeasingResponse {
     leasesCancelled: number;
     netLeases: number;
     ptgVariance: number;
+    ptgPercent: number | null;
   };
   funnel: {
     webTraffic: FunnelCell;
@@ -651,11 +669,11 @@ let gaMappedDomainCache: Promise<Set<string>> | undefined;
 type FunnelStage = "webTraffic" | "leads" | "firstTours" | "moveIns";
 let failures = 0;
 
-function close(a: number, b: number): boolean {
+function close(a: number, b: number, tolerancePct: number = TOLERANCE_PCT): boolean {
   if (a === b) return true;
   const denom = Math.max(Math.abs(a), Math.abs(b));
   if (denom === 0) return true;
-  return (Math.abs(a - b) / denom) * 100 <= TOLERANCE_PCT;
+  return (Math.abs(a - b) / denom) * 100 <= tolerancePct;
 }
 
 function check(label: string, apiValue: number, baseline: number): void {
@@ -689,8 +707,15 @@ function checkFloat(label: string, chartValue: number, tableValue: number): void
   }
 }
 
-// ---------- Scenario execution ----------
-
+/**
+ * Tolerance for DERIVED-RATIO checks (ptgPercent): the numerator (actual)
+ * and denominator (to-date goal) are each independently allowed to diverge
+ * from the baseline by TOLERANCE_PCT (cached responses legitimately lag
+ * today's activity), so their ratio can legitimately compound to
+ * (1 + t) / (1 - t) - 1 ≈ 2t.
+ */
+const RATIO_TOLERANCE_PCT =
+  ((1 + TOLERANCE_PCT / 100) / (1 - TOLERANCE_PCT / 100) - 1) * 100;
 async function auditScenario(scenario: Scenario): Promise<void> {
   const f = scenario.filters;
   console.log(`\n=== Scenario: ${scenario.name} ===`);
@@ -810,6 +835,7 @@ async function auditScenario(scenario: Scenario): Promise<void> {
   check("kpis.leasesCancelled", resp.kpis.leasesCancelled, cancelled);
   check("kpis.netLeases", resp.kpis.netLeases, ratified - cancelled);
   check("kpis.ptgVariance", resp.kpis.ptgVariance, ratified - gTotal.toDate);
+  checkPtg("kpis.ptgPercent", resp.kpis.ptgPercent, ratified, gTotal.toDate);
 
   // ---- Goal matrix ----
   console.log("-- matrix");
@@ -822,6 +848,9 @@ async function auditScenario(scenario: Scenario): Promise<void> {
     check(`matrix.${name}.fullSpanGoal`, cell.fullSpanGoal, goal.fullSpan);
     check(`matrix.${name}.toDateGoal`, cell.toDateGoal, goal.toDate);
     check(`matrix.${name}.actual`, cell.actual, actual);
+    // net compares against the ratified goal (no cancellation goal exists),
+    // which is exactly the goal the caller passes for the net row.
+    checkPtg(`matrix.${name}.ptgPercent`, cell.ptgPercent, actual, goal.toDate);
   };
   checkCell("total", resp.matrix.total, gTotal, ratified);
   checkCell("online", resp.matrix.online, gOnline, onlineRatified);
@@ -1229,48 +1258,13 @@ async function auditCommunities(
 
     // Per-community funnel columns
     const zero = { fullSpan: 0, toDate: 0 };
-    /**
-     * PTG drives the row coloring, so verify it independently from the
-     * baseline actual and to-date goal — not by trusting the API's own
-     * inputs. A zero to-date goal must yield null (no PTG), never ±100%.
-     * Actual and goal may each legitimately drift by the per-count
-     * tolerance between the API's cached read and this fresh baseline, so
-     * the actual/goal ratio compounds to (1+t)/(1−t); convert that to an
-     * absolute percentage-point bound. Wiring bugs (wrong stage, swapped
-     * operands) diverge by orders of magnitude beyond it.
-     */
-    const checkPtg = (
-      label: string,
-      apiPtg: number | null | undefined,
-      toDateGoal: number,
-      actual: number,
-    ) => {
-      const expected = toDateGoal
-        ? ((actual - toDateGoal) / toDateGoal) * 100
-        : null;
-      const api = apiPtg ?? null;
-      if (expected === null || api === null) {
-        if (expected === null && api === null) {
-          console.log(`  OK   ${label}: null (no to-date goal)`);
-        } else {
-          failures++;
-          console.error(`  FAIL ${label}: api=${api} baseline=${expected}`);
-        }
-        return;
-      }
-      const t = TOLERANCE_PCT / 100;
-      const bound =
-        Math.abs((actual / toDateGoal) * 100) * ((1 + t) / (1 - t) - 1) + 1e-6;
-      if (Math.abs(api - expected) <= bound) {
-        console.log(`  OK   ${label}: api=${api} baseline=${expected}`);
-      } else {
-        failures++;
-        console.error(
-          `  FAIL ${label}: api=${api} baseline=${expected} (allowed drift ±${bound})`,
-        );
-      }
-    };
-    checkPtg(`community[${name}].ptgPercent`, row.ptgPercent, goal.toDate, rat);
+    // PTG drives the row coloring, so verify it independently from the
+    // baseline actual and to-date goal — not by trusting the API's own
+    // inputs (module-level checkPtg: to-date denominator, null when no
+    // goal, ratio-space compounded tolerance). Community lease PTG pairs
+    // RATIFIED (not net) with the to-date goal — the same pairing the
+    // dashboard row uses; goalless communities must show null, not -100.
+    checkPtg(`community[${name}].ptgPercent`, row.ptgPercent, rat, goal.toDate);
     const stageCell = (
       label: string,
       cell: MatrixCell,
@@ -1280,7 +1274,7 @@ async function auditCommunities(
       check(`community[${name}].${label}.actual`, cell.actual, actual);
       check(`community[${name}].${label}.fullSpanGoal`, cell.fullSpanGoal, g.fullSpan);
       check(`community[${name}].${label}.toDateGoal`, cell.toDateGoal, g.toDate);
-      checkPtg(`community[${name}].${label}.ptgPercent`, cell.ptgPercent, g.toDate, actual);
+      checkPtg(`community[${name}].${label}.ptgPercent`, cell.ptgPercent, actual, g.toDate);
     };
     stageCell("leads", row.leads, stageGoals.leads.get(name) ?? zero, bLeads.get(name) ?? 0);
     stageCell(
@@ -1596,10 +1590,11 @@ async function main() {
         "channel values (see any chLabels failure above), relabeled analytics " +
         "Yes/No flag values zeroing web traffic (see any gaFlag failure " +
         "above), the monthly " +
-        "trend queries drifting from the funnel totals queries, or a funnel " +
+        "trend queries drifting from the funnel totals queries, a funnel " +
         "stage query drifting from its GA/DM_CONTACTS/DM_GOALS definition " +
         "(wrong stage date column, dropped lead definition, or broken " +
-        "channel goal semantics).",
+        "channel goal semantics), or a percent-to-goal formula/null-rule " +
+        "regression (see any ptgPercent failure above).",
     );
     process.exit(1);
   }
@@ -1689,7 +1684,7 @@ async function baselineTraffic(
     extra = " AND MATCHED_DEVELOPMENT_NAME = ?";
     binds.push(community);
   }
-  return countScalar(
+  const rows = await querySnowflake<{ N: number }>(
     `SELECT COUNT(*) AS N
      FROM FCT_GOOGLE_ANALYTICS_EVENT_LEVEL
      WHERE PROPERTY = 'Rhodes Living'
@@ -1697,6 +1692,7 @@ async function baselineTraffic(
        AND GOOGLE_ANALYTICS_DATE BETWEEN ? AND ?${extra}`,
     binds,
   );
+  return Number(rows[0]?.N) || 0;
 }
 
 /**
@@ -1808,6 +1804,10 @@ async function auditFunnel(
     check(`funnel.${c.name}.actual`, cell.actual, actualByCell[c.name]);
     check(`funnel.${c.name}.fullSpanGoal`, cell.fullSpanGoal, goal.fullSpan);
     check(`funnel.${c.name}.toDateGoal`, cell.toDateGoal, goal.toDate);
+    // Cells whose stage/metric resolves no goal type (opposite channel
+    // under a channel filter, traffic/move-ins under any channel filter,
+    // FY2025 stages that didn't exist) must report null — not 0 or -100.
+    checkPtg(`funnel.${c.name}.ptgPercent`, cell.ptgPercent, actualByCell[c.name], goal.toDate);
   }
 
   // The unknown-channel bucket (rows carrying NEITHER 'Online' nor 'Onsite'
@@ -1876,6 +1876,63 @@ function gaMappedDomain(): Promise<Set<string>> {
     [],
   ).then((rows) => new Set(rows.filter((r) => r.C).map((r) => r.C as string)));
   return gaMappedDomainCache;
+}
+
+/**
+ * Percent-to-goal check: recompute the expected value from the audit's OWN
+ * baselines and pin both the formula and the null semantics of
+ * src/lib/leasing.ts ptg() — (actual / toDateGoal - 1) * 100, null when the
+ * to-date goal is zero or absent. The raw actual and toDateGoal response
+ * fields are verified against the same baselines separately; without this
+ * check a formula regression — full-span instead of to-date denominator, a
+ * dropped "- 1", or 0/-100 instead of null for goalless cells — would ship
+ * wrong percentages while every underlying number still matches.
+ *
+ * The numeric comparison runs in RATIO space (ptg/100 + 1 vs actual/goal):
+ * a percentage tolerance on the ptg VALUE itself would blow up around
+ * ptg = 0 (actual ≈ goal — where a healthy dashboard sits), turning
+ * ordinary cache lag into false failures, while in ratio space the real
+ * regressions stay far outside RATIO_TOLERANCE_PCT (a dropped "- 1" shifts
+ * the ratio by a full 1.0; a full-span denominator scales it by
+ * span/elapsed).
+ */
+function checkPtg(
+  label: string,
+  apiPtg: number | null | undefined,
+  baselineActual: number,
+  baselineToDateGoal: number,
+): void {
+  // Mirror ptg()'s falsy-goal rule (0, NaN, absent) — not a strict === 0.
+  if (!baselineToDateGoal) {
+    if (apiPtg === null) {
+      console.log(`  OK   ${label}: null (no to-date goal), as expected`);
+    } else {
+      failures++;
+      console.error(
+        `  FAIL ${label}: api=${String(apiPtg)} but the baseline to-date goal is ` +
+          `${baselineToDateGoal} — a cell with no target must report ptgPercent=null, ` +
+          `not 0 or -100 (if the API resolved a goal this baseline doesn't have, ` +
+          `the toDateGoal check above fails too)`,
+      );
+    }
+    return;
+  }
+  const expected = (baselineActual / baselineToDateGoal - 1) * 100;
+  if (typeof apiPtg !== "number" || !Number.isFinite(apiPtg)) {
+    failures++;
+    console.error(
+      `  FAIL ${label}: api=${String(apiPtg)} but baseline expects ${expected} ` +
+        `(actual=${baselineActual}, to-date goal=${baselineToDateGoal} — a real ` +
+        `target exists, so ptgPercent must be a number, not null/missing)`,
+    );
+    return;
+  }
+  if (close(apiPtg / 100 + 1, baselineActual / baselineToDateGoal, RATIO_TOLERANCE_PCT)) {
+    console.log(`  OK   ${label}: api=${apiPtg} baseline=${expected}`);
+  } else {
+    failures++;
+    console.error(`  FAIL ${label}: api=${apiPtg} baseline=${expected}`);
+  }
 }
 
 main().catch((err) => {

@@ -234,8 +234,6 @@ import {
   isSaleSql,
 } from "../src/lib/business-defs";
 
-// Default to the API server's own local port (same PORT contract the server
-// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
 const TOLERANCE_PCT = Number(process.env.AUDIT_TOLERANCE_PCT ?? "0.5");
 
 // The Snowflake proxy enforces ~10 requests/second per REPL — a budget
@@ -2069,11 +2067,6 @@ async function auditGoals(
 }
 const GOALS_FLAG_VALUES = new Set(["Has Goals", "No Goals"]);
 
-main().catch((err) => {
-  console.error("AUDIT ERRORED:", err instanceof Error ? err.message : err);
-  process.exit(1);
-});
-
 interface RatioGoalBaselineRow {
   NAME: string;
   VAL: number | null;
@@ -3091,6 +3084,8 @@ function expectedGoalType(
   return null;
 }
 
+// Default to the API server's own local port (same PORT contract the server
+// uses; the artifact's configured port is 8080). Override with AUDIT_API_BASE.
 const API_BASE =
   process.env.AUDIT_API_BASE ?? `http://localhost:${process.env.PORT ?? "8080"}/api`;
 
