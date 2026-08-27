@@ -38,7 +38,12 @@
  *      cosmetic change in decimal places does not.
  *   6. PHASE 2 — filter-request WIRING. Drives every filter control on the
  *      page (Division, Development, Cohort Quarter, Lead Source, Contact
- *      Channel, Deal Channel, start/end date, target selector) one at a
+ *      Channel, Deal Channel, start/end date, target selector, and the
+ *      quick-range buttons: Current Year, Current Quarter, Clear filters —
+ *      the clearing buttons commit through the committed-date hook's 600ms
+ *      clear debounce and must drop BOTH date params entirely, with the
+ *      response's echoed appliedRange matching the server's current
+ *      America/Chicago quarter) one at a
  *      time and, after each change, asserts that the page's NEXT
  *      overview-with-targets request carries exactly the chosen value in
  *      the RIGHT query parameter and nothing else (a stray, missing,
@@ -408,9 +413,15 @@ async function extractDom(page: Page): Promise<DomSnapshot> {
         const tds = Array.from(tr.querySelectorAll("td"));
         if (tds.length < 2 || tds[0].hasAttribute("colspan")) continue; // section header row
         const labelLines = (text(tds[0]) ?? "").split("\n").map((s) => s.trim());
+        // The subtitle is the label cell's direct-child <div> (MatrixRow's
+        // "New users: …" and UnknownRow's "<share>% of <total>"). Don't take
+        // "the second innerText line": UnknownRow nests a "view records"
+        // drill-down affordance inside the label span, which displaces the
+        // real subtitle line (and fabricates one on zero-actual rows).
+        const subEl = tds[0].querySelector(":scope > div");
         rows.push({
           label: labelLines[0] ?? "",
-          sub: labelLines[1] ?? null,
+          sub: text(subEl),
           cells: tds.map((td) => text(td) ?? ""),
         });
       }
@@ -994,6 +1005,19 @@ async function main(): Promise<void> {
   }
 }
 
+// Invoked HERE, right after the definition — deliberately NOT at the file
+// tail: completion rebases have repeatedly auto-resolved tail hunks to the
+// incoming side, silently dropping this call and leaving the audit vacuously
+// green (defining everything, running nothing, exiting 0). Mid-file, inside
+// stable surrounding context, the invocation survives merges. This is safe:
+// main()'s synchronous prefix awaits immediately, and module-level bindings
+// declared further down (RETRY_WAIT_MS, armOverviewHold) are only READ at
+// runtime, long after module evaluation has initialized them.
+main().catch((err) => {
+  console.error(`AUDIT ERRORED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  process.exit(1);
+});
+
 /**
  * Open a (Radix) select by its trigger testid and click one option, picked
  * from the RENDERED option texts by `wanted`. Returns the chosen option's
@@ -1544,6 +1568,138 @@ async function auditFilterWiring(page: Page, hits: OverviewHit[]): Promise<void>
     expected: () => ({ target: "proforma", startDate: startPick, endDate: endPick }),
     verifyRerender: true,
   });
+
+  // ---- Quick-range buttons ------------------------------------------------
+  // Each button sets BOTH dates through the same committed-date hook:
+  // button-ytd fills Jan 1 → Dec 31 of the current year (complete plausible
+  // dates commit immediately), while button-quarter and button-clear-filters
+  // CLEAR the inputs — a cleared input commits only after the hook's 600ms
+  // debounce, and the request must then carry NO date params at all (the
+  // server substitutes the current America/Chicago quarter; the echoed
+  // appliedRange is asserted against independently computed bounds so
+  // "Current Quarter (default)" keeps meaning the current quarter). A
+  // regression here — swapped dates, one side left stale, Clear leaving a
+  // date behind — would silently query the wrong span while every
+  // payload-vs-Snowflake audit stays green.
+  //
+  // Pre-state discipline makes every assertion falsifiable:
+  //  - before button-ytd the applied range is moved to a NEUTRAL pair that
+  //    differs from both YTD endpoints on every calendar day, so a handler
+  //    that forgets one side cannot pass by coincidence;
+  //  - before each clearing button both dates are applied, so a leftover
+  //    param is visible;
+  //  - the selects are already back at "All", so a clearing click produces
+  //    exactly ONE param transition (select resets commit instantly while
+  //    date clears debounce — with a select still applied, Clear would
+  //    legitimately fire an intermediate request first).
+  // These steps run after the target step, so ?target=proforma stays applied
+  // throughout — which also proves the quick-range buttons preserve the
+  // target selection.
+  const year = now.getFullYear();
+  const ytdStart = `${year}-01-01`;
+  const ytdEnd = `${year}-12-31`;
+  // Neutral values: never equal to the YTD bounds, never equal to endPick
+  // (= today) even when the audit runs ON Dec 30, and always a valid
+  // same-year, in-order pair regardless of the calendar day.
+  const neutralEnd = endPick === `${year}-12-30` ? `${year}-12-29` : `${year}-12-30`;
+  const neutralStart = `${year}-01-02`; // startPick is Jan 1 — always a real change
+
+  // Mirror of the server's default-range rule in buildFilters: the current
+  // quarter of the CHICAGO calendar date (fixed calendar bounds, string math
+  // only — the node process timezone must not leak in).
+  const chicagoToday = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+  }).format(new Date());
+  const qIdx = Math.floor((Number(chicagoToday.slice(5, 7)) - 1) / 3);
+  const quarterStart = `${chicagoToday.slice(0, 4)}-${pad(qIdx * 3 + 1)}-01`;
+  const quarterEnd = `${chicagoToday.slice(0, 4)}-${["03-31", "06-30", "09-30", "12-31"][qIdx]}`;
+
+  const clickButton = async (control: string, testId: string): Promise<boolean> => {
+    const btn = page.locator(`[data-testid="${testId}"]`);
+    if ((await btn.count()) === 0) {
+      fail(`wiring · ${control}`, `button [data-testid="${testId}"] not found on the page`);
+      return false;
+    }
+    await btn.click();
+    return true;
+  };
+  // The wiring step already proved WHICH params the request carried; this
+  // pins what the server made of them, so the button's user-facing promise
+  // ("this span") holds end to end. Skipped when the step already failed.
+  const checkAppliedRange = (
+    control: string,
+    payload: OverviewPayload | null,
+    expStart: string,
+    expEnd: string,
+  ): void => {
+    if (payload == null) return; // the wiring step failed and said why
+    const a = payload.appliedRange;
+    if (a.startDate === expStart && a.endDate === expEnd) {
+      ok(`wiring · ${control} · applied range`, `server applied ${expStart} → ${expEnd}`);
+    } else {
+      fail(
+        `wiring · ${control} · applied range`,
+        `server applied ${a.startDate} → ${a.endDate} but this button promises ${expStart} → ${expEnd}`,
+      );
+    }
+  };
+  const PROFORMA_BASE: Record<string, string> = { target: "proforma" };
+
+  const preEndControl = "quick-range pre-state end date → ?endDate";
+  await wiringStep(page, hits, {
+    control: preEndControl,
+    action: () => fillDate(preEndControl, "input-end-date", neutralEnd),
+    expected: () => ({ ...PROFORMA_BASE, startDate: startPick, endDate: neutralEnd }),
+    verifyRerender: false,
+  });
+  const preStartControl = "quick-range pre-state start date → ?startDate";
+  await wiringStep(page, hits, {
+    control: preStartControl,
+    action: () => fillDate(preStartControl, "input-start-date", neutralStart),
+    expected: () => ({ ...PROFORMA_BASE, startDate: neutralStart, endDate: neutralEnd }),
+    verifyRerender: false,
+  });
+
+  const ytdControl = "YTD button [button-ytd] → ?startDate/?endDate";
+  const ytdPayload = await wiringStep(page, hits, {
+    control: ytdControl,
+    action: () => clickButton(ytdControl, "button-ytd"),
+    expected: () => ({ ...PROFORMA_BASE, startDate: ytdStart, endDate: ytdEnd }),
+    verifyRerender: true,
+  });
+  checkAppliedRange(ytdControl, ytdPayload, ytdStart, ytdEnd);
+
+  // Clear filters — dates were just set to YTD, selects are at "All", so the
+  // one debounced request must drop both date params (and keep the target).
+  // This dateless key was never requested this session, so the render-
+  // lifecycle hold can prove the headline is bound to the cleared request.
+  const clearControl = "Clear filters button [button-clear-filters] → no date params";
+  const clearPayload = await wiringStep(page, hits, {
+    control: clearControl,
+    action: () => clickButton(clearControl, "button-clear-filters"),
+    expected: () => PROFORMA_BASE,
+    verifyRerender: true,
+  });
+  checkAppliedRange(clearControl, clearPayload, quarterStart, quarterEnd);
+
+  // Re-apply a full range so the quarter button's clearing of BOTH params is
+  // observable (and YTD is re-checked from a cleared pre-state for free).
+  const rearmControl = "YTD button re-arm [button-ytd] → ?startDate/?endDate";
+  await wiringStep(page, hits, {
+    control: rearmControl,
+    action: () => clickButton(rearmControl, "button-ytd"),
+    expected: () => ({ ...PROFORMA_BASE, startDate: ytdStart, endDate: ytdEnd }),
+    verifyRerender: false, // this exact key is client-cached from the YTD step
+  });
+
+  const quarterControl = "This Quarter button [button-quarter] → no date params";
+  const quarterPayload = await wiringStep(page, hits, {
+    control: quarterControl,
+    action: () => clickButton(quarterControl, "button-quarter"),
+    expected: () => PROFORMA_BASE,
+    verifyRerender: false, // dateless key is client-cached from the Clear step
+  });
+  checkAppliedRange(quarterControl, quarterPayload, quarterStart, quarterEnd);
 }
 
 /**

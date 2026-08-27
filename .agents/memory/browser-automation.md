@@ -29,6 +29,17 @@ env-overridable rather than hardcoding a /nix/store path.
   DOM↔request binding instead: withhold the response at the route layer and
   require the loading state while held; only then trust value equality
   against the released payload.
+- The route-hold loading-state proof only works on a query key the client
+  has **never fetched this session**: react-query serves a cached key
+  instantly (no loading state), so steps that RETURN to a key (reset-to-All,
+  a second click of the same quick-range button) must skip the hold check —
+  default staleTime 0 still refetches on key return, so the param-multiset
+  assertion stays valid. Sequence steps so each hold check lands on a
+  first-visit key. Related timing facts: multiple same-tick setStates (two
+  debounced date-clear timers firing together) batch into ONE render/request
+  under React 18+; clearing controls with different commit latencies (instant
+  selects vs 600ms-debounced dates) fire an intermediate request unless the
+  instant ones are already at their reset value when clicked.
 - Never fail on the first transient 5xx/429 from the shared proxy: keep
   judging the page's own retry requests (their params must match too). 4xx
   is never transient.
@@ -70,3 +81,11 @@ UI-binding audits must gate conditional sections on the SAME payload condition t
 **Why:** a binding map of always-on rows breaks later — a page feature merged after the audit was written, plus a data shift that first makes the condition true, surfaces as "unknown row label" failures on a perfectly green page (this actually happened with the overview unknown-channel rows).
 
 **How to apply:** when adding rows/sections to an audited page, mirror the visibility predicate into the UI audit's binding map in the same change; recompute derived sub-labels (shares, "<1%" special cases) exactly as the page does.
+
+## Scrape by DOM structure, not innerText line index
+
+Reading "the second line of a cell's innerText" as its subtitle breaks the moment a sibling task nests extra affordance text (e.g. a "view records" drill-down hint) inside the label — it displaces the real subtitle line and fabricates one on rows that had none. Target the structural element instead (the cell's direct-child `<div>` via `:scope > div`).
+
+**Why:** innerText line order is a rendering accident; DOM structure is the page's actual contract. This bit when reviving a long-vacuous audit: it surfaced ALL accumulated UI drift at once, and the failures were scraper drift, not product bugs.
+
+**How to apply:** in extractDom-style scrapers, derive each semantic field from a selector anchored to structure (direct children, testids), never from split("\n") positions; when a revived/long-dormant audit fails, check for scraper drift against merged UI features before suspecting the product.

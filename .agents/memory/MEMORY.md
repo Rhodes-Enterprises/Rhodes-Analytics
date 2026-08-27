@@ -12,7 +12,7 @@
 - [Dashboard query cache](dashboard-query-cache.md) — shared SWR cache; traffic-triggered refreshes only (warehouse credits), global 2-wide gate (proxy 10 RPS); ALS-tracked dataAsOf/refreshing stamps (oldest entry wins); forced-refresh path for new endpoints.
 - [Audit tolerance conventions](audit-conventions.md) — same-day-cached bounds; Chicago "today"; prove checks can fail via doctoring proxy (scripted: audit-mutation; crash exit 1 ≠ demonstrated failure).
 - [Audit timeout layering](audit-conventions.md) — request deadline ×(retries+1)+backoffs must fit the per-audit budget; kill stuck audits via detached process group (killing pnpm orphans them).
-- [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium; UI audits: page's own XHR, param-multiset wiring, route-hold lifecycle proof vs vacuous equality, retry-tolerant 5xx.
+- [Headless browser automation](browser-automation.md) — playwright-core + Nix chromium; UI audits: page's own XHR, param-multiset wiring, route-hold proof (first-visit keys only), retry-tolerant 5xx.
 - [Client date-range guards](date-range-guards.md) — guard lone (single-set) dates too, and anchor client "today" to America/Chicago like the server: viewer-clock guards fail at quarter/year boundaries.
 - [Cohort & lead-source filters](cohort-leadsource-filters.md) — cohort = create quarter (same-quarter filter no-ops leads; tours carry signal); pick lead sources that also have deals in range.
 - [Batched Snowflake round trips](batched-audit-baselines.md) — collapse scalars into COUNT_IF/GROUP BY scans (0==missing; subquery binds first); same shapes halve live endpoint fan-out (totals = Σ monthly).
@@ -26,3 +26,4 @@
 - [Merge windows time out](merge-window-timeout.md) — resolve conflicts and call continueMergeResolution fast; platform aborts stalled rebases and drops WIP resolutions; verify before/after, not inside.
 - [No-history nulls](no-history-nulls.md) — months before a source's history start are null ("no data yet"), never 0; cutoff = unfiltered MIN(date), month-granular; audits require null exactly there.
 - [exceljs XLSX quirks](exceljs-quirks.md) — width 9 = "default" → style-less col dropped on write (clamp to 10); percent cells store fractions (v/100 + 0.0%); node tests: esbuild cjs, not esm.
+- [Task-env git auto-checkpointing](task-env-git.md) — HEAD absorbs your edits; `git checkout --`/status can't revert or reveal them — revert via reverse edit, verify by re-reading the file.
